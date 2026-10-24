@@ -3,9 +3,12 @@ import { ReloadOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import type { GroupItem, MemberItem, QuotaInfo, SendItem } from "../types";
 import { getAlias } from "../api";
+import { qqAvatar } from "../avatar";
 
 interface Props {
   group: GroupItem | null;
+  /** 当前 bot appid（成员头像 CDN 需要同 bot 维度的 openid 前缀） */
+  botAppid: string;
   members: MemberItem[];
   sends: SendItem[];
   quota: QuotaInfo | null;
@@ -24,7 +27,7 @@ const SEND_STATUS: Record<string, { color: string; text: string }> = {
 };
 
 /** 右栏（智能体视角）：群资料与成员名册 / 发送账本 / 额度水位 */
-export default function RightPanel({ group, members, sends, quota, onRefresh }: Props) {
+export default function RightPanel({ group, botAppid, members, sends, quota, onRefresh }: Props) {
   const { message: msg } = AntApp.useApp();
   return (
     <div className="right-panel">
@@ -85,7 +88,11 @@ export default function RightPanel({ group, members, sends, quota, onRefresh }: 
                     renderItem={(m) => (
                       <List.Item style={{ padding: "4px 0" }}>
                         <div className="member-row" style={{ width: "100%" }}>
-                          <Avatar size={26} style={{ background: "#c9d4e0" }}>
+                          <Avatar
+                            size={26}
+                            style={{ background: "#c9d4e0" }}
+                            src={qqAvatar(botAppid, m.member_openid)}
+                          >
                             {(m.username ?? "?").slice(0, 1)}
                           </Avatar>
                           <span className="m-name">{m.username ?? m.member_openid}</span>

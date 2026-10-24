@@ -323,6 +323,7 @@ export default function App() {
         <ChatView
           boot={boot}
           botName={bot?.name ?? (currentBot ?? "")}
+          botAppid={currentBot ?? ""}
           group={currentGroupItem}
           messages={messages}
           hasMore={hasMore}
@@ -333,6 +334,7 @@ export default function App() {
         />
         <RightPanel
           group={currentGroupItem}
+          botAppid={currentBot ?? ""}
           members={members}
           sends={sends}
           quota={quota}

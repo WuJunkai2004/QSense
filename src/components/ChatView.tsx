@@ -4,10 +4,12 @@ import { EditOutlined, RollbackOutlined, SendOutlined } from "@ant-design/icons"
 import dayjs from "dayjs";
 import type { Bootstrap, GroupItem, MsgItem } from "../types";
 import { getAlias, setAlias } from "../api";
+import { qqAvatar } from "../avatar";
 
 interface Props {
   boot: Bootstrap;
   botName: string;
+  botAppid: string;
   group: GroupItem | null;
   messages: MsgItem[];
   hasMore: boolean;
@@ -25,7 +27,7 @@ function RoleTag({ role }: { role: string | null }) {
 
 /** 聊天主区：群头 + 消息流（QQ 风格气泡）+ 发送框（被动回复 / 主动消息） */
 export default function ChatView(props: Props) {
-  const { boot, botName, group, messages, hasMore, busyOlder, onLoadOlder, onSend, onShowDetail } = props;
+  const { boot, botName, botAppid, group, messages, hasMore, busyOlder, onLoadOlder, onSend, onShowDetail } = props;
   const { message: msg } = AntApp.useApp();
   const [text, setText] = useState("");
   const [replyTo, setReplyTo] = useState<MsgItem | null>(null);
@@ -159,6 +161,7 @@ export default function ChatView(props: Props) {
                     shape="square"
                     size={34}
                     style={{ borderRadius: 8, background: self ? "#0099ff" : "#c9d4e0" }}
+                    src={!self && m.author.openid ? qqAvatar(botAppid, m.author.openid) : undefined}
                   >
                     {(self ? botName : (m.author.name ?? "?")).slice(0, 1)}
                   </Avatar>
