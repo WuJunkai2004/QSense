@@ -70,7 +70,7 @@ async function setupServer(): Promise<Fixture> {
     MCP_TOKEN: TOKEN,
     DATA_DIR: dir,
   });
-  const app = buildServer({ config, log: createLogger('error'), db, repo, version: '0.1.0' });
+  const app = buildServer({ config, log: createLogger('debug'), db, repo, version: '0.1.0' });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
@@ -126,10 +126,11 @@ test('M3-1 未带 token / 错 token → 401', async () => {
   }
 });
 
-test('M3-2 listTools 含 9 只读 + 3 写工具；未开启发送时写工具硬拒绝', async () => {
+test('M3-2 listTools 含 13 个工具；未开启发送时写工具硬拒绝', async () => {
   const fx = await setupServer();
+  let client: Client | null = null;
   try {
-    const client = await connectClient(fx.baseUrl);
+    client = await connectClient(fx.baseUrl);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
@@ -137,6 +138,7 @@ test('M3-2 listTools 含 9 只读 + 3 写工具；未开启发送时写工具硬
       'qq_context',
       'qq_cursor_get',
       'qq_cursor_set',
+      'qq_forget',
       'qq_get_new',
       'qq_list_groups',
       'qq_list_members',
@@ -153,8 +155,13 @@ test('M3-2 listTools 含 9 只读 + 3 写工具；未开启发送时写工具硬
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(denied.isError, true);
     assert.ok(denied.content[0]!.text.includes('SEND_ENABLE'), '拒绝文案应指出开启方式');
-    await client.close();
   } finally {
+    // 关闭顺序（踩坑#3）：断言失败也不能跳过 client.close，否则 app.close() 等 SSE 挂死
+    try {
+      await client?.close();
+    } catch {
+      /* 已关闭则忽略 */
+    }
     await fx.close();
   }
 });

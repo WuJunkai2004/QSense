@@ -53,6 +53,8 @@ test('M2-1 msg_elements 递归展开：文本/卡片/并行/合并转发多层/�
   const tree = [
     { message_type: 0, content: '看这个' },
     { message_type: 103, msg_idx: '3', children: [{ message_type: 0, content: '被引用的原文' }] },
+    // 官方真机形状（2026-10-24）：引用原文在本元素 content 字段，children 为空
+    { message_type: 103, msg_idx: 'REFIDX_x', content: '这是被引用的那条消息' },
     {
       message_type: 102,
       title: '群的聊天记录',
@@ -74,6 +76,7 @@ test('M2-1 msg_elements 递归展开：文本/卡片/并行/合并转发多层/�
   assert.ok(text.includes('看这个'));
   assert.ok(text.includes('[引用 msg_idx=3]'));
   assert.ok(text.includes('被引用的原文'));
+  assert.ok(text.includes('这是被引用的那条消息'), '官方真机形状：引用原文取自元素 content 字段');
   assert.ok(text.includes('[群的聊天记录]'));
   assert.ok(text.includes('转发里的第一条'));
   assert.ok(text.includes('[嵌套记录]'));

@@ -16,7 +16,7 @@ import type { Config } from '../config';
 import type { Logger } from '../logger';
 import type { Sender } from '../sender';
 import type { Repo } from '../store/repo';
-import { TOOLS, runTool } from './defs';
+import { TOOLS, UNTRUSTED_NOTICE, runTool } from './defs';
 
 export interface McpDeps {
   config: Config;
@@ -24,6 +24,8 @@ export interface McpDeps {
   repo: Repo;
   /** M4 发送器：写工具走这里；缺省=写工具硬拒绝 */
   sender?: Sender;
+  /** MCP 工具执行全局并发上限（M6 限流）：SQLite 同步查询毫秒级、写工具 API 调用秒级，8 足够且防打爆 */
+  maxConcurrent?: number;
   version: string;
 }
 
@@ -53,6 +55,8 @@ function rpcError(res: ServerResponse, status: number, code: number, message: st
 export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: ServerResponse, body?: unknown) => Promise<void> {
   const { config, log, repo, version } = deps;
   const mcpLog = log.child('mcp');
+  const maxConcurrent = deps.maxConcurrent ?? 8;
+  let active = 0;
   interface Session {
     server: Server;
     transport: StreamableHTTPServerTransport;
@@ -80,12 +84,25 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const name = req.params.name;
       const args = (req.params.arguments ?? {}) as Record<string, unknown>;
-      const result = await runTool(name, args, createContext());
-      mcpLog.debug('tool call', { tool: name, error: result.isError === true });
-      return {
-        content: [{ type: 'text', text: result.text }],
-        ...(result.isError === true ? { isError: true } : {}),
-      };
+      // M6 限流：全局并发上限（单用户场景够用），超限快速失败不排队
+      if (active >= maxConcurrent) {
+        mcpLog.warn('tool call rejected (busy)', { tool: name, active });
+        return {
+          content: [{ type: 'text', text: `${UNTRUSTED_NOTICE}\n服务繁忙（并发 ${active}/${maxConcurrent}），请稍后重试。` }],
+          isError: true,
+        };
+      }
+      active += 1;
+      try {
+        const result = await runTool(name, args, createContext());
+        mcpLog.debug('tool call', { tool: name, error: result.isError === true });
+        return {
+          content: [{ type: 'text', text: result.text }],
+          ...(result.isError === true ? { isError: true } : {}),
+        };
+      } finally {
+        active -= 1;
+      }
     });
     transport.onclose = () => {
       const sid = transport.sessionId;

@@ -416,6 +416,22 @@ export class Repo {
     this.updateSendStatus(row.id, status);
     return true;
   }
+
+  // —— M6 合规退出：qq_forget ——
+
+  /**
+   * 删除某群全部缓存：消息（FTS 触发器随行清理）、名册、注册表、digest 游标。
+   * sends 发送账本保留（运维审计；不含消息内容）。返回各类删除行数。
+   */
+  purgeGroupAll(botId: string, groupOpenid: string): { messages: number; members: number; groups: number; cursors: number } {
+    const run = this.db.transaction(() => ({
+      messages: this.db.prepare('DELETE FROM messages WHERE bot_id = ? AND group_openid = ?').run(botId, groupOpenid).changes,
+      members: this.db.prepare('DELETE FROM members WHERE bot_id = ? AND group_openid = ?').run(botId, groupOpenid).changes,
+      groups: this.db.prepare('DELETE FROM groups WHERE bot_id = ? AND group_openid = ?').run(botId, groupOpenid).changes,
+      cursors: this.db.prepare("DELETE FROM kv WHERE k = ?").run(`cursor:${botId}:${groupOpenid}`).changes,
+    }));
+    return run() as { messages: number; members: number; groups: number; cursors: number };
+  }
 }
 
 function messageParams(

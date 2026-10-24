@@ -1,0 +1,39 @@
+# Nginx 反代样例（形态B：MCP 端点经公网 HTTPS 暴露给本地 OpenCode）
+# 要点：
+# - /mcp 是 Streamable HTTP（POST JSON 响应 + 可能的 GET SSE 长连接）：
+#   必须关 proxy_buffering、拉长 read timeout
+# - /healthz 仅内网/本机（不必暴露公网）
+# - Bearer 鉴权由应用层完成（常数时间比较）；TLS 终止在 Nginx
+server {
+  listen 443 ssl;
+  http2 on;
+  server_name mcp.example.com;          # 换成你的域名
+
+  ssl_certificate     /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+
+  # 可选：网络层再拦一道（如仅家庭宽带 IP 段）
+  # allow 203.0.113.0/24;
+  # deny all;
+
+  location /mcp {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Connection "";
+    proxy_buffering off;                 # SSE/流式响应必须关
+    proxy_read_timeout 3600s;            # 会话级长连接
+    proxy_send_timeout 3600s;
+  }
+
+  location = /healthz {
+    allow 127.0.0.1;
+    deny all;
+    proxy_pass http://127.0.0.1:8787;
+  }
+}
+
+# 无域名/不想买证书：本地 OpenCode 直接走 SSH 隧道更简单——
+#   ssh -N -L 8787:127.0.0.1:8787 user@vps
+# 然后 opencode.jsonc 的 url 保持 http://127.0.0.1:8787/mcp 即可（流量经 SSH 加密）。

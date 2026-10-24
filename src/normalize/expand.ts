@@ -65,10 +65,16 @@ export function expandElements(elements: unknown, depth = 0): string[] {
     } else if (type === TYPE_FORWARD) {
       const title = typeof el.title === 'string' && el.title !== '' ? el.title : '聊天记录';
       out.push(`${indent}[${title}]`);
+      // 官方 102：content 可能带摘要文本（title 之外的正文补充）
+      const fwdText = textOf(el).trim();
+      if (fwdText !== '' && fwdText !== title) out.push(`${indent}${fwdText}`);
       out.push(...expandElements(childrenOf(el), depth + 1));
     } else if (type === TYPE_QUOTE) {
       const ref = typeof el.msg_idx === 'string' ? ` msg_idx=${el.msg_idx}` : '';
       out.push(`${indent}[引用${ref}]`);
+      // 官方 103：被引用原文就在本元素的 content 字段（真机 2026-10-24 核实），children 通常为空
+      const quoted = textOf(el).trim();
+      if (quoted !== '') out.push(`${indent}${quoted}`);
       out.push(...expandElements(childrenOf(el), depth + 1));
     } else {
       // 未知类型：有文本抽文本，保证不静默丢内容

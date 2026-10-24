@@ -417,6 +417,29 @@ export const TOOLS: ToolDef[] = [
       return sender.recall(botId, str(args, 'group', '群 openid'), str(args, 'msg_id', '消息 id'));
     },
   },
+  {
+    name: 'qq_forget',
+    description:
+      '【不可逆·合规退出】删除某群在本服务的全部缓存：消息（含检索索引）、成员名册、群注册表、digest 游标。发送审计账本保留（仅含 openid，无消息内容）。调用后该群数据不可恢复；若机器人仍在群里且消息继续到达，会重新开始累积缓存。需 confirm=true 执行。',
+    inputSchema: {
+      type: 'object',
+      required: ['group', 'confirm'],
+      properties: {
+        group: { type: 'string', description: '群 openid' },
+        confirm: { type: 'boolean', description: '必须显式传 true 才执行删除' },
+        bot: { type: 'string', description: 'bot appid；单 bot 时可省略' },
+      },
+    },
+    handler: (args, ctx) => {
+      const botId = resolveBotId(args, ctx);
+      const group = str(args, 'group', '群 openid');
+      if (args.confirm !== true) {
+        throw new ToolError('删除未执行：本操作不可逆，需显式传 confirm=true。请先与用户确认后再调用。');
+      }
+      const purged = ctx.repo.purgeGroupAll(botId, group);
+      return { bot: botId, group, forgotten: true, purged };
+    },
+  },
 ];
 
 /** 工具执行入口（统一错误翻译；返回 MCP CallToolResult.content）。写工具经 Sender，故为异步。 */

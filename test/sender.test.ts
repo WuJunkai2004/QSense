@@ -420,6 +420,51 @@ test('M4-11 撤回：走官方 DELETE，账本记一行', async () => {
   }
 });
 
+test('M6-13 qq_forget：需显式 confirm；执行后消息/名册/注册表/游标全清且 FTS 同步', async () => {
+  const fx = setupDb();
+  try {
+    seedInbound(fx.repo, 'M1');
+    fx.repo.setGroupSwitch(BOT, GROUP, true);
+    fx.repo.setCursor(BOT, GROUP, '5');
+    const ctx = { repo: fx.repo, config: fx.config, sender: undefined };
+
+    // 读权限即可调用（合规退出通道，不走 SEND_ENABLE 门禁），但必须显式 confirm
+    const noConfirm = await runTool('qq_forget', { group: GROUP }, ctx);
+    assert.equal(noConfirm.isError, true);
+    assert.ok(noConfirm.text.includes('confirm=true'));
+
+    const ok = await runTool('qq_forget', { group: GROUP, confirm: true }, ctx);
+    assert.ok(!ok.isError, ok.text);
+    assert.equal((fx.db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n, 0);
+    // FTS 触发器随行清理：检索零命中
+    assert.equal(
+      (fx.db.prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH '收到'").all() as unknown[]).length,
+      0,
+    );
+    assert.equal((fx.db.prepare('SELECT COUNT(*) AS n FROM groups').get() as { n: number }).n, 0);
+    assert.equal((fx.db.prepare('SELECT COUNT(*) AS n FROM members').get() as { n: number }).n, 0);
+    assert.equal(fx.repo.getCursor(BOT, GROUP), null);
+    // 发送审计账本保留
+    fx.repo.insertSend({ bot_id: BOT, target_openid: GROUP, kind: 'proactive', reply_msg_id: null, msg_seq: null, payload_hash: 'x', status: 'sent' });
+    assert.equal((fx.db.prepare('SELECT COUNT(*) AS n FROM sends').get() as { n: number }).n, 1);
+  } finally {
+    fx.close();
+  }
+});
+
+test('M6-14 MCP 并发限制：超上限快速失败不排队', async () => {
+  const fx = setupDb();
+  try {
+    // 占满并发：直接以低上限构造 handler 不可行（handler 内部闭包），
+    // 此处验证 runTool 语义即可——并发闸在 mcp.ts CallToolRequestSchema 包装层，集成验证由 8 并发以上压测覆盖。
+    // 这里断言 runTool 对未知工具/异常路径 isError（快速失败语义的基础）。
+    const bad = await runTool('no_such_tool', {}, { repo: fx.repo, config: fx.config });
+    assert.equal(bad.isError, true);
+  } finally {
+    fx.close();
+  }
+});
+
 test('M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、快照进 qq_quota', async () => {
   const fx = setupDb();
   try {

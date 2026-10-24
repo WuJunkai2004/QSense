@@ -19,6 +19,8 @@ const SENSITIVE_KEYS = new Set([
   'ark_json',
   // 密钥类（无论如何都不允许）
   'secret',
+  'clientsecret',
+  'appsecret',
   'token',
   'authorization',
   'password',

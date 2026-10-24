@@ -1,0 +1,30 @@
+# systemd 单元（部署形态B：廉价 VPS 常驻）
+# 安装：
+#   sudo cp deploy/qqbot-websocket-mcp.service /etc/systemd/system/
+#   sudo mkdir -p /opt/qqbot-websocket-mcp && sudo chown qqbot:qqbot /opt/qqbot-websocket-mcp
+#   # 项目构建产物 + node_modules + .env 放 /opt/qqbot-websocket-mcp
+#   sudo systemctl daemon-reload && sudo systemctl enable --now qqbot-websocket-mcp
+[Unit]
+Description=qqbot-websocket-mcp (QQ official bot -> MCP gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qqbot
+Group=qqbot
+WorkingDirectory=/opt/qqbot-websocket-mcp
+EnvironmentFile=/opt/qqbot-websocket-mcp/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+# 日志进 journald：journalctl -u qqbot-websocket-mcp -f
+# 加固：只读系统 + 仅 data 目录可写 + 私有 tmp
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/qqbot-websocket-mcp/data
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
