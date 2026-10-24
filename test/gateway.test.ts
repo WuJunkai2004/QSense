@@ -84,7 +84,11 @@ async function teardown(ctx: Ctx): Promise<void> {
   await ctx.supervisor.start().catch(() => undefined); // 等连接循环退出
   await ctx.gw.close();
   ctx.db.close();
-  rmSync(ctx.dir, { recursive: true, force: true });
+  try {
+    rmSync(ctx.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch {
+    /* Windows 句柄延迟，best-effort */
+  }
 }
 
 const readyAt = (ctx: Ctx): Promise<void> =>

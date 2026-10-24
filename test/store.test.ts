@@ -8,6 +8,15 @@ import { join } from 'node:path';
 import { openDatabase, runMigrations } from '../src/store/db';
 import { migrations } from '../src/store/migrations';
 
+/** best-effort 清理：Windows 下新建 .db 文件可能被 AV/索引服务短暂持有句柄，删除失败留给系统回收 */
+function cleanupDir(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch {
+    /* 忽略 */
+  }
+}
+
 function tempDbDir(): string {
   return mkdtempSync(join(tmpdir(), 'qqbot-mcp-test-'));
 }
@@ -25,17 +34,20 @@ test('迁移框架：建表、版本记录、WAL 生效、重复执行幂等', (
     // WAL 生效
     assert.equal(db.pragma('journal_mode', { simple: true }), 'wal');
 
-    // 版本已记录
+    // 版本已记录（v1 kv / v2 业务表 / v3 FTS）
     const rows = db.prepare('SELECT version, name FROM schema_migrations').all();
-    assert.deepEqual(rows, [{ version: 1, name: 'kv' }]);
-
+    assert.deepEqual(rows, [
+      { version: 1, name: 'kv' },
+      { version: 2, name: 'business-tables' },
+      { version: 3, name: 'fts-indexes' },
+    ]);
     // 幂等：重跑不报错、不重复记录
     runMigrations(db, migrations);
-    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n, 1);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get() as { n: number }).n, 3);
 
     db.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    cleanupDir(dir);
   }
 });
 
@@ -44,16 +56,17 @@ test('追加迁移只执行增量', () => {
   try {
     const db = openDatabase(dir);
     runMigrations(db, migrations);
-    const v2 = [{ version: 2, name: 'kv2', up: 'CREATE TABLE kv2(k TEXT PRIMARY KEY);' }];
-    runMigrations(db, [...migrations, ...v2]);
+    // 用远超现有版本号的 v99 模拟"未来新增迁移"
+    const v99 = [{ version: 99, name: 'future', up: 'CREATE TABLE future_t(k TEXT PRIMARY KEY);' }];
+    runMigrations(db, [...migrations, ...v99]);
 
     const rows = db.prepare('SELECT version FROM schema_migrations ORDER BY version').all();
-    assert.deepEqual(rows, [{ version: 1 }, { version: 2 }]);
+    assert.deepEqual(rows, [{ version: 1 }, { version: 2 }, { version: 3 }, { version: 99 }]);
     // 新表可用
-    db.prepare("INSERT INTO kv2(k) VALUES ('x')").run();
+    db.prepare("INSERT INTO future_t(k) VALUES ('x')").run();
     db.close();
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    cleanupDir(dir);
   }
 });
 
@@ -65,6 +78,6 @@ test('openDatabase 自动创建数据目录', () => {
     assert.ok(db.open);
     db.close();
   } finally {
-    rmSync(parent, { recursive: true, force: true });
+    cleanupDir(parent);
   }
 });

@@ -17,6 +17,7 @@ const zh = {
   cfg_mcp_token_short: '配置无效：MCP_TOKEN 长度不足 16 位（当前 {len} 位）。生成：openssl rand -hex 32',
   cfg_send_needs_allowlist:
     '配置无效：SEND_ENABLE=true 但 ALLOW_GROUPS 为空。写操作需要显式群白名单（双重门禁），格式：ALLOW_GROUPS=abc123,def456（group_openid 逗号分隔）。',
+  cfg_bad_retention: '配置无效：RETENTION_DAYS={value}，必须是 1-3650 的整数（缓存消息保留天数）。',
   // —— 启动 ——
   boot_db_fail: '数据库初始化失败：{path}（{reason}）。检查 DATA_DIR 是否存在且可写。',
   boot_listen_fail: '监听失败：{addr} 无法绑定（{reason}）。检查 PORT/HOST 是否被占用或无权限。',
@@ -28,6 +29,7 @@ const zh = {
   gw_event_dedup: '重复事件已去重丢弃：type={type}，id={id}。',
   // —— 退出 ——
   shutdown_done: '已优雅退出。',
+  retention_purged: '保留策略清理完成：删除 {removed} 条过期缓存消息。',
 } as const;
 
 type Translation = Record<keyof typeof zh, string>;
@@ -46,6 +48,7 @@ const en: Translation = {
   cfg_mcp_token_short: 'Invalid config: MCP_TOKEN shorter than 16 chars (got {len}). Generate: openssl rand -hex 32',
   cfg_send_needs_allowlist:
     'Invalid config: SEND_ENABLE=true but ALLOW_GROUPS is empty. Writes require an explicit group allowlist, format: ALLOW_GROUPS=abc123,def456 (comma-separated group_openid).',
+  cfg_bad_retention: 'Invalid config: RETENTION_DAYS={value}, must be an integer in 1-3650 (cached message retention days).',
   boot_db_fail: 'Database init failed: {path} ({reason}). Check DATA_DIR exists and is writable.',
   boot_listen_fail: 'Listen failed: cannot bind {addr} ({reason}). Check if PORT/HOST is occupied or permission denied.',
   boot_ok: 'qqbot-websocket-mcp started: http://{addr} , {bots} bot(s) registered, data dir {dataDir}, send={send}.',
@@ -54,6 +57,7 @@ const en: Translation = {
   gw_disconnected_final: 'Gateway disconnected and will not reconnect (code={code}, {reason}).',
   gw_event_dedup: 'Duplicate event dropped: type={type}, id={id}.',
   shutdown_done: 'Graceful shutdown complete.',
+  retention_purged: 'Retention purge done: removed {removed} expired cached messages.',
 };
 
 export type Lang = 'zh' | 'en';
