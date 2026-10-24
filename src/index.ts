@@ -2,7 +2,8 @@
 // Fastify（/healthz；M3 起 /mcp）→ 优雅退出（SIGINT/SIGTERM）。
 
 import { loadConfig, loadDotEnv } from "./config";
-import { GatewaySupervisor } from "./gateway";
+import { BotRegistry } from "./bots";
+import { GatewaySupervisor, type GatewayStatus } from "./gateway";
 import { TokenService } from "./gateway/token";
 import { t } from "./i18n";
 import { createLogger } from "./logger";
@@ -13,7 +14,7 @@ import { openDatabase, runMigrations } from "./store/db";
 import { migrations } from "./store/migrations";
 import { Repo } from "./store/repo";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 async function main(): Promise<void> {
   loadDotEnv();
@@ -31,41 +32,39 @@ async function main(): Promise<void> {
   const db = openDatabase(config.dataDir);
   runMigrations(db, migrations);
 
-  // 事件入库（M2）+ 发送器（M4）：单一 Repo 实例贯穿缓存/账本/MCP 工具
+  // 事件入库（M2）+ 发送器（M4）+ 机器人注册表（M7 运行时动态 bot）：
+  // 单一 Repo 实例贯穿缓存/账本/MCP 工具；registry 贯穿网关/发送器/工具面/UI
   const repo = new Repo(db);
   const tokens = new TokenService(log.child("token"));
+  const registry = new BotRegistry({
+    base: config.apps,
+    db,
+    verify: async (app) => {
+      await tokens.getAccessToken(app); // 官方凭据校验：拉真 token，失败即拒绝添加
+    },
+  });
   const sender = new Sender({
     config,
     log,
     db,
     repo,
     tokenManager: tokens.sdk,
+    bots: registry,
   });
 
-  const app = buildServer({ config, log, db, repo, sender, version: VERSION });
+  // 各 bot 网关状态快照（/healthz 无关；qq_list_bots 与 /ui/api/bootstrap 展示用）
+  const statuses = new Map<string, GatewayStatus>();
 
   let eventCount = 0;
   let storedCount = 0;
-  const purgeOld = (): void => {
-    try {
-      const removed = repo.purgeOldMessages(config.retentionDays);
-      if (removed > 0) log.info(t("retention_purged", { removed }));
-    } catch (e) {
-      log.error("retention purge failed", {
-        reason: e instanceof Error ? e.message : String(e),
-      });
-    }
-  };
-  purgeOld();
-  const retentionTimer = setInterval(purgeOld, 24 * 60 * 60 * 1000);
-  retentionTimer.unref();
 
-  // 事件接入器：WS 出站长连接，逐 bot 连接官方网关（共享 tokens）
+  // 事件接入器：WS 出站长连接，逐 bot 连接官方网关（共享 tokens；运行时可经 UI 增删）
   const gateway = new GatewaySupervisor({
     config,
     log,
     db,
     tokens,
+    bots: registry,
     handlers: {
       onEvent: (e) => {
         // 硬约束：日志不含消息正文，只记事件类型与来源
@@ -88,6 +87,7 @@ async function main(): Promise<void> {
         });
       },
       onStatus: (s) => {
+        statuses.set(s.botId, s);
         log.info("gateway status", {
           botId: s.botId,
           state: s.state,
@@ -96,6 +96,34 @@ async function main(): Promise<void> {
       },
     },
   });
+
+  const app = buildServer({
+    config,
+    log,
+    db,
+    repo,
+    sender,
+    version: VERSION,
+    registry,
+    supervisor: gateway,
+    tokens,
+    botStatuses: () => [...statuses.values()],
+  });
+
+  const purgeOld = (): void => {
+    try {
+      const removed = repo.purgeOldMessages(config.retentionDays);
+      if (removed > 0) log.info(t("retention_purged", { removed }));
+    } catch (e) {
+      log.error("retention purge failed", {
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+  purgeOld();
+  const retentionTimer = setInterval(purgeOld, 24 * 60 * 60 * 1000);
+  retentionTimer.unref();
+
   const gatewayStart = gateway.start();
 
   let closing = false;
@@ -131,7 +159,7 @@ async function main(): Promise<void> {
   log.info(
     t("boot_ok", {
       addr,
-      bots: config.apps.length,
+      bots: registry.list().length,
       dataDir: config.dataDir,
       send: config.sendEnabled ? "on" : "off",
     }),

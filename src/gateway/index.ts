@@ -11,6 +11,7 @@ import {
   type ReconnectPolicy,
 } from "@tencent-connect/qqbot-nodejs/protocol";
 import type { BotApp, Config } from "../config";
+import type { BotRegistry } from "../bots";
 import { t } from "../i18n";
 import type { Logger } from "../logger";
 import type { DB } from "../store/db";
@@ -56,6 +57,8 @@ export interface SupervisorDeps {
   overrides?: GatewayOverrides;
   /** 外部注入的 TokenService（M4：发送器与网关共享同一 token 缓存）；缺省自建 */
   tokens?: TokenService;
+  /** 机器人注册表（含运行时动态 bot）；缺省回落 config.apps（仅测试） */
+  bots?: BotRegistry;
 }
 
 /** 携带消息 id 的事件类型（去重键 = bot:type:id；其余事件天然幂等 upsert，无需去重） */
@@ -81,7 +84,9 @@ export class GatewaySupervisor {
   start(): Promise<void> {
     if (this.startPromise === null) {
       this.startPromise = Promise.all(
-        this.deps.config.apps.map((app) => this.launch(app)),
+        (this.deps.bots?.list() ?? this.deps.config.apps).map((app) =>
+          this.launch(app),
+        ),
       ).then(() => undefined);
     }
     return this.startPromise;
@@ -92,6 +97,20 @@ export class GatewaySupervisor {
     for (const c of this.controllers.values()) c.abort();
     this.controllers.clear();
     this.tokens.stopAll();
+  }
+
+  /** 运行时接入一个 bot（已在跑则幂等跳过）；WebUI 添加机器人时调用 */
+  addBot(app: BotApp): void {
+    if (this.controllers.has(app.appid)) return;
+    void this.launch(app).catch(() => undefined);
+  }
+
+  /** 运行时摘除一个 bot（未在跑则幂等跳过）；WebUI 移除机器人时调用 */
+  removeBot(botId: string): void {
+    const controller = this.controllers.get(botId);
+    if (controller === undefined) return;
+    this.controllers.delete(botId);
+    controller.abort();
   }
 
   private async launch(app: BotApp): Promise<void> {
@@ -170,6 +189,9 @@ export class GatewaySupervisor {
       // 4914/4915（intents 未授权 / 机器人被封禁）属致命：不重连，人工处理
       log.error(t("gw_fatal_close", { detail }));
       handlers.onStatus?.({ botId: app.appid, state: "fatal", detail });
+    } finally {
+      // 致命结束（非 abort）时清理控制器占位，允许后续 addBot 重新接入
+      if (!controller.signal.aborted) this.controllers.delete(app.appid);
     }
   }
 

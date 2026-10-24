@@ -189,7 +189,7 @@ test("M3-1 未带 token / 错 token → 401", async () => {
   }
 });
 
-test("M3-2 listTools 含 13 个工具；未开启发送时写工具硬拒绝", async () => {
+test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
@@ -203,6 +203,7 @@ test("M3-2 listTools 含 13 个工具；未开启发送时写工具硬拒绝", a
       "qq_cursor_set",
       "qq_forget",
       "qq_get_new",
+      "qq_list_bots",
       "qq_list_groups",
       "qq_list_members",
       "qq_quota",

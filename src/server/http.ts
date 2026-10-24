@@ -3,12 +3,16 @@
 // MCP 官方 SDK 的 StreamableHTTPServerTransport 基于 Node 原生 req/res，Fastify 可直接对接，零适配层。
 
 import Fastify from "fastify";
+import type { BotRegistry } from "../bots";
 import type { Config } from "../config";
+import type { GatewayStatus, GatewaySupervisor } from "../gateway";
+import type { TokenService } from "../gateway/token";
 import type { Logger } from "../logger";
 import type { Sender } from "../sender";
 import type { DB } from "../store/db";
 import { Repo } from "../store/repo";
 import { bearerOk, createMcpHandler } from "../tools/mcp";
+import { registerUiRoutes } from "./ui";
 
 export interface ServerDeps {
   config: Config;
@@ -18,6 +22,11 @@ export interface ServerDeps {
   /** M4 发送器：写工具走这里；缺省=写工具硬拒绝 */
   sender?: Sender;
   version: string;
+  /** —— WebUI 依赖（齐备才挂载 /ui 与 /ui/api）—— */
+  registry?: BotRegistry;
+  supervisor?: GatewaySupervisor;
+  tokens?: TokenService;
+  botStatuses?: () => GatewayStatus[];
 }
 
 export function buildServer(deps: ServerDeps) {
@@ -53,6 +62,8 @@ export function buildServer(deps: ServerDeps) {
     log,
     repo,
     sender: deps.sender,
+    bots: deps.registry,
+    botStatuses: deps.botStatuses,
     version,
   });
   app.route({
@@ -74,6 +85,22 @@ export function buildServer(deps: ServerDeps) {
       await handleMcp(req.raw, reply.raw, req.body);
     },
   });
+
+  // WebUI（M7）：registry+supervisor+tokens 齐备才挂载（缺省=测试旧行为，不挂 /ui）
+  if (deps.registry !== undefined && deps.supervisor !== undefined && deps.tokens !== undefined && deps.botStatuses !== undefined) {
+    registerUiRoutes(app, {
+      config,
+      log,
+      db,
+      repo,
+      version,
+      registry: deps.registry,
+      supervisor: deps.supervisor,
+      tokens: deps.tokens,
+      botStatuses: deps.botStatuses,
+      sender: deps.sender,
+    });
+  }
 
   return app;
 }

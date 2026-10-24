@@ -13,6 +13,8 @@ import {
   isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { Config } from '../config';
+import type { BotRegistry } from '../bots';
+import type { GatewayStatus } from '../gateway';
 import type { Logger } from '../logger';
 import type { Sender } from '../sender';
 import type { Repo } from '../store/repo';
@@ -24,6 +26,10 @@ export interface McpDeps {
   repo: Repo;
   /** M4 发送器：写工具走这里；缺省=写工具硬拒绝 */
   sender?: Sender;
+  /** 机器人注册表（含运行时动态 bot）；qq_list_bots/resolveBotId 用 */
+  bots?: BotRegistry;
+  /** 各 bot 网关状态快照；qq_list_bots 展示用 */
+  botStatuses?: () => GatewayStatus[];
   /** MCP 工具执行全局并发上限（M6 限流）：SQLite 同步查询毫秒级、写工具 API 调用秒级，8 足够且防打爆 */
   maxConcurrent?: number;
   version: string;
@@ -63,7 +69,13 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
   }
   const sessions = new Map<string, Session>();
 
-  const createContext = () => ({ repo, config, sender: deps.sender });
+  const createContext = () => ({
+    repo,
+    config,
+    sender: deps.sender,
+    bots: deps.bots,
+    botStatuses: deps.botStatuses,
+  });
 
   const createSession = (): Session => {
     const transport = new StreamableHTTPServerTransport({

@@ -252,6 +252,25 @@ export class Repo {
       .all(botId) as Array<Record<string, unknown>>;
   }
 
+  /** WebUI 会话列表：群 + 成员数 + 最后一条消息摘要（rowid 最大者） */
+  listGroupsWithLast(botId: string): Array<Record<string, unknown>> {
+    return this.db
+      .prepare(
+        `
+        SELECT g.group_openid, g.full_msg_enabled, g.added_at, g.updated_at,
+               (SELECT COUNT(*) FROM members m WHERE m.bot_id = g.bot_id AND m.group_openid = g.group_openid) AS member_count,
+               lm.ts AS last_ts, lm.content AS last_content, lm.author_name AS last_author
+        FROM groups g
+        LEFT JOIN messages lm ON lm.rowid = (
+          SELECT MAX(x.rowid) FROM messages x WHERE x.bot_id = g.bot_id AND x.group_openid = g.group_openid
+        )
+        WHERE g.bot_id = ?
+        ORDER BY COALESCE(lm.ts, g.updated_at, g.added_at) DESC
+      `,
+      )
+      .all(botId) as Array<Record<string, unknown>>;
+  }
+
   listMembers(
     botId: string,
     groupOpenid: string,
@@ -347,6 +366,25 @@ export class Repo {
       .all(botId, groupOpenid, limit) as MsgRow[];
   }
 
+  /** WebUI 消息流翻页：beforeRid=null 取最新一页；返回按 rowid 升序（气泡渲染序） */
+  messagesPageBefore(
+    botId: string,
+    groupOpenid: string,
+    beforeRid: number | null,
+    limit: number,
+  ): MsgRow[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT rowid AS rid, * FROM messages
+        WHERE bot_id = ? AND group_openid = ? AND (? IS NULL OR rowid < ?)
+        ORDER BY rowid DESC LIMIT ?
+      `,
+      )
+      .all(botId, groupOpenid, beforeRid, beforeRid ?? 0, limit) as MsgRow[];
+    return rows.reverse();
+  }
+
   /**
    * 关键词检索：≥3 字符走 FTS trigram（短语引号包裹防语法注入），否则 LIKE 子串扫描；
    * FTS 语法异常一律回退 LIKE。
@@ -432,6 +470,24 @@ export class Repo {
       )
       .get(botId, dateStr) as { n: number };
     return row.n;
+  }
+
+  /** WebUI 发送记录：某 bot 对某群的最近账本行（含审核回填状态，无消息内容） */
+  recentSends(
+    botId: string,
+    targetOpenid: string,
+    limit: number,
+  ): SendRow[] {
+    return this.db
+      .prepare(
+        `
+        SELECT id, bot_id, target_openid, kind, reply_msg_id, msg_seq,
+               payload_hash, provider_msg_id, status, error_code, created_at
+        FROM sends WHERE bot_id = ? AND target_openid = ?
+        ORDER BY id DESC LIMIT ?
+      `,
+      )
+      .all(botId, targetOpenid, limit) as SendRow[];
   }
 
   // —— M4 发送账本（sends 表）与主动额度（quota_daily 表） ——

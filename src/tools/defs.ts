@@ -1,9 +1,12 @@
-// MCP 工具面定义（DESIGN.md §3.4）：9 只读 + 3 写（M4）。
+// MCP 工具面定义（DESIGN.md §3.4）：10 只读（含 qq_list_bots）+ 3 写 + qq_forget。
 // 只读为纯函数：入参 → Repo 查询 → 结构化结果。
 // 写工具经 Sender（真实官方API）：硬约束——SEND_ENABLE=true 且群在 ALLOW_GROUPS 才生效，否则硬拒绝；
 // 工具描述均标注"真实写操作"。每个返回体首行固定注入不可信内容提示。
+// 多机器人：全部工具带可选 bot 参数（resolveBotId）；qq_list_bots 供发现，多 bot 时其他工具必填。
 
 import type { Config } from '../config';
+import type { BotRegistry } from '../bots';
+import type { GatewayStatus } from '../gateway';
 import { t } from '../i18n';
 import type { Sender } from '../sender';
 import type { MsgRow, Repo } from '../store/repo';
@@ -27,6 +30,10 @@ export interface ToolContext {
   config: Config;
   /** M4 发送器：写工具必需；缺省=发送功能未装配，硬拒绝 */
   sender?: Sender;
+  /** 机器人注册表（含运行时动态 bot）；缺省回落 config.apps */
+  bots?: BotRegistry;
+  /** 各 bot 网关状态快照（qq_list_bots 展示用）；缺省=状态未知 */
+  botStatuses?: () => GatewayStatus[];
 }
 
 // —— 参数校验（显式 validate，错误可操作） ——
@@ -58,16 +65,16 @@ function optInt(args: Record<string, unknown>, key: string, min: number, max: nu
 
 /** bot 解析：多 bot 时必须显式指定；单 bot 缺省即用 */
 function resolveBotId(args: Record<string, unknown>, ctx: ToolContext): string {
-  const bots = ctx.config.apps;
+  const bots = ctx.bots?.list() ?? ctx.config.apps;
   const asked = optStr(args, 'bot');
   if (asked !== undefined) {
     if (!bots.some((b) => b.appid === asked)) {
-      throw new ToolError(`bot 不存在：${asked}。已注册：${bots.map((b) => b.appid).join(', ') || '（无）'}。`);
+      throw new ToolError(`bot 不存在：${asked}。已注册：${bots.map((b) => b.appid).join(', ') || '（无）'}。可先调 qq_list_bots 查看列表。`);
     }
     return asked;
   }
   if (bots.length === 1) return bots[0].appid;
-  throw new ToolError(`当前注册了多个 bot（${bots.map((b) => b.appid).join(', ')}），请用 bot 参数指定。`);
+  throw new ToolError(`当前注册了多个 bot（${bots.map((b) => b.appid).join(', ')}），请先用 qq_list_bots 查看列表，再用 bot 参数指定。`);
 }
 
 /** 写工具取发送器；未装配=双重门禁未开，硬拒绝（不发任何请求） */
@@ -113,6 +120,29 @@ function groupRowOut(r: Record<string, unknown>): Record<string, unknown> {
 // —— 工具集 ——
 
 export const TOOLS: ToolDef[] = [
+  {
+    name: 'qq_list_bots',
+    description:
+      '列出本服务注册的全部机器人（appid/名称/来源/网关状态）与发送开关。多 bot 环境下，其他 qq_* 工具必须用 bot 参数指定 appid。',
+    inputSchema: { type: 'object', properties: {} },
+    handler: (_args, ctx) => {
+      const statuses = new Map(
+        (ctx.botStatuses?.() ?? []).map((s) => [s.botId, s]),
+      );
+      const bots = (ctx.bots?.list() ?? ctx.config.apps).map((a) => ({
+        appid: a.appid,
+        name: a.name,
+        source: ctx.bots?.isDynamic(a.appid) === true ? 'runtime' : 'config',
+        gateway: statuses.get(a.appid)?.state ?? 'unknown',
+      }));
+      return {
+        count: bots.length,
+        send_enabled: ctx.config.sendEnabled,
+        auth_level: ctx.config.authLevel,
+        bots,
+      };
+    },
+  },
   {
     name: 'qq_list_groups',
     description: '列出机器人所在的群注册表（自建：含全量消息开关状态与成员数）。无消息正文的元数据。',

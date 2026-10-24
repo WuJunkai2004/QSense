@@ -13,6 +13,7 @@ import {
   type TokenManager,
 } from "@tencent-connect/qqbot-nodejs/protocol";
 import type { BotApp, Config } from "../config";
+import type { BotRegistry } from "../bots";
 import { t } from "../i18n";
 import type { Logger } from "../logger";
 import type { DB } from "../store/db";
@@ -78,6 +79,8 @@ export interface SenderDeps {
   repo: Repo;
   /** SDK TokenManager（与网关共用同一实例，token 缓存复用） */
   tokenManager: TokenManager;
+  /** 机器人注册表（含运行时动态 bot）；缺省回落 config.apps（仅测试） */
+  bots?: BotRegistry;
   /** 测试注入：覆盖限额默认值 */
   limits?: Partial<SendLimits>;
   /** 测试注入：替换真实 MessageApi */
@@ -169,10 +172,11 @@ export class Sender {
   }
 
   private appOf(botId: string): BotApp {
-    const app = this.deps.config.apps.find((a) => a.appid === botId);
+    const bots = this.deps.bots?.list() ?? this.deps.config.apps;
+    const app = bots.find((a) => a.appid === botId);
     if (app === undefined)
       throw new Error(
-        `bot 不存在：${botId}。可用：${this.deps.config.apps.map((a) => a.appid).join(", ")}`,
+        `bot 不存在：${botId}。可用：${bots.map((a) => a.appid).join(", ")}`,
       );
     return app;
   }

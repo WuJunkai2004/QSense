@@ -1,6 +1,6 @@
 {
   "name": "qqbot-websocket-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "QQ官方机器人 → MCP 网关：官方 WS Gateway 接入事件，SQLite 缓存，MCP 工具面暴露给 OpenCode",
   "author": "Wu Junkai <wu.junkai@qq.com>",
   "type": "module",
@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "dev": "node build.mjs && node --watch dist/index.js",
-    "test": "tsx --test test/config.test.ts test/store.test.ts test/logger.test.ts test/gateway.test.ts test/dedup.test.ts test/normalize.test.ts test/mcp.test.ts test/sender.test.ts"
+    "test": "tsx --test test/config.test.ts test/store.test.ts test/logger.test.ts test/gateway.test.ts test/dedup.test.ts test/normalize.test.ts test/mcp.test.ts test/sender.test.ts test/bots.test.ts test/ui-api.test.ts"
   },
   "license": "MIT",
   "dependencies": {

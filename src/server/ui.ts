@@ -1,0 +1,452 @@
+// WebUI 路由（/ui）：
+// - 静态托管：ui/dist（git submodule qqbot-webui 的构建产物）；未构建时 503 给出可操作提示
+// - JSON API：/ui/api/*，Bearer 复用 MCP_TOKEN（sha256 + timingSafeEqual，同 /mcp）
+// - 写入口（添加/移除 bot、发送消息）与 MCP 工具共享同一套硬门禁与账本，无旁路
+//
+// 安全说明：静态资源不含敏感数据（纯 JS 壳）；所有数据经 /ui/api 鉴权后读取；
+// token 由前端存 localStorage 并以 Authorization 头携带（非 cookie，无 CSRF 面）。
+
+import { readFile, stat } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
+import type { FastifyInstance, FastifyReply } from "fastify";
+import { BotRegistryError, type BotRegistry } from "../bots";
+import type { Config } from "../config";
+import type { GatewayStatus, GatewaySupervisor } from "../gateway";
+import { kvSessionPort } from "../gateway/session-store";
+import type { TokenService } from "../gateway/token";
+import type { Logger } from "../logger";
+import type { Sender } from "../sender";
+import type { DB } from "../store/db";
+import type { MsgRow, Repo } from "../store/repo";
+import { bearerOk } from "../tools/mcp";
+
+export interface UiDeps {
+  config: Config;
+  log: Logger;
+  db: DB;
+  repo: Repo;
+  version: string;
+  registry: BotRegistry;
+  supervisor: GatewaySupervisor;
+  tokens: TokenService;
+  /** 各 bot 网关状态快照（bootstrap 展示用） */
+  botStatuses: () => GatewayStatus[];
+  /** 发送器：POST /send 用；缺省=发送端点硬拒绝（与 MCP requireSender 同语义） */
+  sender?: Sender;
+}
+
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".txt": "text/plain; charset=utf-8",
+  ".woff2": "font/woff2",
+};
+
+const distDir = (): string => process.env.UI_DIST_DIR?.trim() || "./ui/dist";
+
+/** 统一错误映射：BotRegistryError（含参数类错误）→ 400，其余 → 500（记日志） */
+function mapError(log: Logger, e: unknown): { status: number; message: string } {
+  if (e instanceof BotRegistryError) return { status: 400, message: e.message };
+  const message = e instanceof Error ? e.message : String(e);
+  log.error("ui api error", { reason: message.slice(0, 300) });
+  return { status: 500, message: "内部错误，请查看服务日志。" };
+}
+
+export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
+  const { config, log, repo, registry, supervisor, tokens, version } = deps;
+  const uiLog = log.child("ui");
+
+  // —— 静态托管（无鉴权：纯前端壳，不含数据） ——
+
+  async function serveFile(reply: FastifyReply, filePath: string): Promise<void> {
+    try {
+      const buf = await readFile(filePath);
+      const dot = filePath.lastIndexOf(".");
+      const ext = dot >= 0 ? filePath.slice(dot).toLowerCase() : "";
+      reply.type(MIME[ext] ?? "application/octet-stream").send(buf);
+    } catch {
+      reply.code(404).send({ error: "文件不存在。" });
+    }
+  }
+
+  async function serveIndex(reply: FastifyReply): Promise<void> {
+    const root = resolve(distDir());
+    try {
+      await stat(join(root, "index.html"));
+    } catch {
+      reply
+        .code(503)
+        .type("text/plain; charset=utf-8")
+        .send(
+          "WebUI 未构建：ui/ 是 git submodule（qqbot-webui）。请执行 `git submodule update --init`，" +
+            "随后在 ui/ 内 `npm install && npm run build`，产物生成于 ui/dist/。",
+        );
+      return;
+    }
+    await serveFile(reply, join(root, "index.html"));
+  }
+
+  app.get("/ui", async (_req, reply) => serveIndex(reply));
+  app.get("/ui/", async (_req, reply) => serveIndex(reply));
+  app.get("/ui/*", async (req, reply) => {
+    const root = resolve(distDir());
+    let rel: string;
+    try {
+      rel = decodeURIComponent((req.params as { "*": string })["*"]);
+    } catch {
+      reply.code(400).send({ error: "非法路径。" });
+      return;
+    }
+    const target = resolve(root, rel);
+    if (target !== root && !target.startsWith(root + sep)) {
+      reply.code(400).send({ error: "非法路径。" });
+      return;
+    }
+    let s;
+    try {
+      s = await stat(target);
+    } catch {
+      // 无扩展名路径回退 index.html（SPA 习惯）；带扩展名的缺失文件 404
+      if (!rel.includes(".")) {
+        await serveIndex(reply);
+        return;
+      }
+      reply.code(404).send({ error: "文件不存在。" });
+      return;
+    }
+    if (s.isDirectory()) {
+      await serveIndex(reply);
+      return;
+    }
+    await serveFile(reply, target);
+  });
+
+  // —— JSON API（Bearer 鉴权，封装作用域内生效） ——
+
+  app.register(
+    async function uiApi(plugin) {
+      plugin.addHook("onRequest", async (req, reply) => {
+        if (!bearerOk(req.headers.authorization, config.mcpToken)) {
+          reply.code(401).send({ error: "Unauthorized：缺少或错误的 Bearer token。" });
+        }
+      });
+
+      /** bot 解析：与工具面 resolveBotId 同语义（单 bot 缺省，多 bot 必填） */
+      const resolveBot = (raw: unknown): string => {
+        const bots = registry.list();
+        const asked =
+          typeof raw === "string" && raw.trim() !== "" ? raw.trim() : undefined;
+        if (asked !== undefined) {
+          if (!bots.some((b) => b.appid === asked)) {
+            throw new BotRegistryError(
+              `bot 不存在：${asked}。已注册：${bots.map((b) => b.appid).join(", ") || "（无）"}。`,
+            );
+          }
+          return asked;
+        }
+        if (bots.length === 1) return bots[0].appid;
+        throw new BotRegistryError(
+          `当前注册了多个 bot（${bots.map((b) => b.appid).join(", ")}），请用 bot 参数指定。`,
+        );
+      };
+
+      const intParam = (
+        raw: unknown,
+        min: number,
+        max: number,
+        fallback: number,
+      ): number => {
+        if (raw === undefined || raw === null || raw === "") return fallback;
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < min || n > max) {
+          throw new BotRegistryError(
+            `参数必须是 ${min}-${max} 的整数（收到 ${String(raw)}）。`,
+          );
+        }
+        return n;
+      };
+
+      const groupOf = (raw: unknown): string => {
+        const g = typeof raw === "string" ? raw.trim() : "";
+        if (g === "") throw new BotRegistryError("缺少 group 参数（群 openid）。");
+        return g;
+      };
+
+      plugin.get("/bootstrap", async () => {
+        const statuses = new Map<string, GatewayStatus>();
+        for (const s of deps.botStatuses()) statuses.set(s.botId, s);
+        return {
+          version,
+          uptime_s: Math.round(process.uptime()),
+          send_enabled: config.sendEnabled,
+          auth_level: config.authLevel,
+          allow_groups: config.allowGroups,
+          bots: registry.list().map((a) => {
+            const s = statuses.get(a.appid);
+            return {
+              appid: a.appid,
+              name: a.name,
+              dynamic: registry.isDynamic(a.appid),
+              gateway: s?.state ?? "unknown",
+              detail: s?.detail,
+            };
+          }),
+        };
+      });
+
+      plugin.post("/bots", async (req, reply) => {
+        try {
+          const body = (req.body ?? {}) as Record<string, unknown>;
+          const appid = typeof body.appid === "string" ? body.appid : "";
+          const secret = typeof body.secret === "string" ? body.secret : "";
+          const name = typeof body.name === "string" ? body.name : undefined;
+          const added = await registry.add({ appid, secret, name });
+          supervisor.addBot(added);
+          uiLog.info("bot added via ui", { appid: added.appid });
+          return { ok: true, bot: { appid: added.appid, name: added.name } };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      plugin.delete("/bots/:appid", async (req, reply) => {
+        try {
+          const appid = (req.params as { appid: string }).appid;
+          const removed = registry.remove(appid); // env 基座抛错 → 400
+          supervisor.removeBot(appid);
+          kvSessionPort(deps.db, appid).clear(); // 会话与 token 缓存一并清理（重加即全新 IDENTIFY）
+          tokens.clear(removed);
+          uiLog.info("bot removed via ui", { appid });
+          return { ok: true, appid };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      plugin.get("/groups", async (req, reply) => {
+        try {
+          const botId = resolveBot((req.query as Record<string, unknown>).bot);
+          const groups = repo.listGroupsWithLast(botId).map((g) => ({
+            group_openid: g.group_openid,
+            full_msg_enabled: g.full_msg_enabled === 1,
+            member_count: Number(g.member_count ?? 0),
+            updated_at:
+              g.updated_at !== null
+                ? new Date(Number(g.updated_at)).toISOString()
+                : null,
+            last:
+              g.last_ts !== null
+                ? {
+                    ts: new Date(Number(g.last_ts)).toISOString(),
+                    author: (g.last_author as string | null) ?? null,
+                    snippet: ((g.last_content as string | null) ?? "").slice(0, 80),
+                  }
+                : null,
+          }));
+          return { bot: botId, groups };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      plugin.get("/messages", async (req, reply) => {
+        try {
+          const q = req.query as Record<string, unknown>;
+          const botId = resolveBot(q.bot);
+          const group = groupOf(q.group);
+          const limit = intParam(q.limit, 1, 200, 50);
+          const out = (rows: MsgRow[]) =>
+            rows.map((r) => ({
+              rid: r.rid,
+              msg_id: r.msg_id,
+              ts: r.ts !== null ? new Date(r.ts).toISOString() : null,
+              author: {
+                openid: r.author_openid,
+                name: r.author_name,
+                role: r.author_role,
+              },
+              content: r.content,
+              has_attachments: r.attachments_json !== null,
+              has_ark: r.ark_json !== null,
+              has_elements: r.elements_json !== null,
+            }));
+          if (q.after !== undefined && q.after !== "") {
+            // 轮询模式：rowid > after 的增量（升序）
+            const after = intParam(q.after, 0, Number.MAX_SAFE_INTEGER, 0);
+            const rows = repo.getMessagesAfter(botId, group, after, limit);
+            return { bot: botId, group, mode: "after", messages: out(rows) };
+          }
+          const before =
+            q.before !== undefined && q.before !== ""
+              ? intParam(q.before, 0, Number.MAX_SAFE_INTEGER, 0)
+              : null;
+          const rows = repo.messagesPageBefore(botId, group, before, limit);
+          return {
+            bot: botId,
+            group,
+            mode: "page",
+            messages: out(rows),
+            has_more: rows.length === limit,
+            next_before: rows.length > 0 ? rows[0].rid : null,
+          };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      plugin.get("/message", async (req, reply) => {
+        try {
+          const q = req.query as Record<string, unknown>;
+          const botId = resolveBot(q.bot);
+          const group = groupOf(q.group);
+          const msgId = typeof q.msg_id === "string" ? q.msg_id.trim() : "";
+          if (msgId === "") {
+            throw new BotRegistryError("缺少 msg_id 参数。");
+          }
+          const row = repo.getMessageByMsgId(botId, group, msgId);
+          if (row === null) {
+            reply.code(404).send({ error: "消息不存在（或已过保留期被清理）。" });
+            return;
+          }
+          return {
+            rid: row.rid,
+            msg_id: row.msg_id,
+            ts: row.ts !== null ? new Date(row.ts).toISOString() : null,
+            author: {
+              openid: row.author_openid,
+              name: row.author_name,
+              role: row.author_role,
+            },
+            content: row.content,
+            mentions: row.mentions_json ? JSON.parse(row.mentions_json) : null,
+            attachments: row.attachments_json
+              ? JSON.parse(row.attachments_json)
+              : null,
+            ark: row.ark_json ? JSON.parse(row.ark_json) : null,
+            elements: row.elements_json ? JSON.parse(row.elements_json) : null,
+            raw: row.raw_json ? JSON.parse(row.raw_json) : null,
+          };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      plugin.get("/members", async (req, reply) => {
+        try {
+          const q = req.query as Record<string, unknown>;
+          const botId = resolveBot(q.bot);
+          const group = groupOf(q.group);
+          const limit = intParam(q.limit, 1, 500, 200);
+          const members = repo.listMembers(botId, group, limit).map((m) => ({
+            member_openid: m.member_openid,
+            username: m.username,
+            member_role: m.member_role,
+            msg_count: Number(m.msg_count ?? 0),
+            last_seen:
+              m.last_seen !== null && m.last_seen !== undefined
+                ? new Date(Number(m.last_seen)).toISOString()
+                : null,
+          }));
+          return { bot: botId, group, members };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      plugin.get("/sends", async (req, reply) => {
+        try {
+          const q = req.query as Record<string, unknown>;
+          const botId = resolveBot(q.bot);
+          const group = groupOf(q.group);
+          const limit = intParam(q.limit, 1, 100, 30);
+          const sends = repo.recentSends(botId, group, limit).map((s) => ({
+            id: s.id,
+            kind: s.kind,
+            status: s.status,
+            reply_msg_id: s.reply_msg_id,
+            msg_seq: s.msg_seq,
+            provider_msg_id: s.provider_msg_id,
+            error_code: s.error_code,
+            created_at:
+              s.created_at !== null
+                ? new Date(s.created_at).toISOString()
+                : null,
+          }));
+          return { bot: botId, group, sends };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      plugin.get("/quota", async (req, reply) => {
+        try {
+          const botId = resolveBot((req.query as Record<string, unknown>).bot);
+          const date = new Date().toISOString().slice(0, 10);
+          return {
+            bot: botId,
+            send_enabled: config.sendEnabled,
+            auth_level: config.authLevel,
+            proactive_sent_today: repo.proactiveSentToday(botId, date),
+            ...(deps.sender !== undefined
+              ? { buckets: deps.sender.snapshot(botId) }
+              : {}),
+          };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      plugin.post("/send", async (req, reply) => {
+        const sender = deps.sender;
+        if (sender === undefined) {
+          reply.code(400).send({ error: "发送功能未装配（Sender 未注入）。" });
+          return;
+        }
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const text = typeof body.text === "string" ? body.text : "";
+        const group = typeof body.group === "string" ? body.group.trim() : "";
+        const replyMsgId =
+          typeof body.reply_msg_id === "string" && body.reply_msg_id !== ""
+            ? body.reply_msg_id
+            : undefined;
+        if (group === "" || text.trim() === "") {
+          reply.code(400).send({ error: "参数 group 与 text 均不能为空。" });
+          return;
+        }
+        try {
+          const botId = resolveBot(body.bot);
+          const result =
+            replyMsgId !== undefined
+              ? await sender.reply(botId, group, replyMsgId, text)
+              : await sender.proactive(botId, group, text);
+          uiLog.info("send via ui", {
+            bot: botId,
+            group,
+            status: result.status,
+          });
+          return { ok: true, result };
+        } catch (e) {
+          // 发送类错误（门禁/官方API/频控）全部 400 透出可操作文案
+          const message = e instanceof Error ? e.message : String(e);
+          uiLog.warn("send via ui failed", { reason: message.slice(0, 200) });
+          reply.code(400).send({ error: message });
+        }
+      });
+    },
+    { prefix: "/ui/api" },
+  );
+}
