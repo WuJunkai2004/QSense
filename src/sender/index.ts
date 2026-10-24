@@ -214,6 +214,8 @@ export class Sender {
     replyMsgId: string,
     text: string,
     markdown = false,
+    /** true=附带 message_reference 引用块（客户端展示引用样式）；false=纯被动回复（仅窗口绑定） */
+    quote = false,
   ): Promise<SendResult> {
     const app = this.gate(botId, groupOpenid);
     const content = this.checkContent(text);
@@ -268,26 +270,29 @@ export class Sender {
         status: "reserved",
       });
       // 官方群聊引用块（2026-03 v2 autogen 文档收录 message_reference，真机实测返回 ext_info.ref_idx）：
-      // 填引用后 QQ 客户端以引用形式展示；ignore_get_message_error=true 兜底——
+      // 显式引用（quote=true）时附带，QQ 客户端以引用样式展示；ignore_get_message_error=true 兜底——
       // 原消息详情拉取失败（如被撤回）时仍送达，仅丢失引用样式（送达优先于样式）。
-      const messageReference = {
-        message_id: replyMsgId,
-        ignore_get_message_error: true,
-      };
+      // 纯被动回复（quote=false）只做 msg_id 窗口绑定，不带引用块。
+      const messageReference = quote
+        ? {
+            message_id: replyMsgId,
+            ignore_get_message_error: true,
+          }
+        : undefined;
       const body: Record<string, unknown> = asMarkdown
         ? {
             msg_type: 2,
             markdown: { content },
             msg_id: replyMsgId,
             msg_seq: seq,
-            message_reference: messageReference,
+            ...(messageReference !== undefined ? { message_reference: messageReference } : {}),
           }
         : {
             msg_type: 0,
             content,
             msg_id: replyMsgId,
             msg_seq: seq,
-            message_reference: messageReference,
+            ...(messageReference !== undefined ? { message_reference: messageReference } : {}),
           };
       try {
         const resp = await this.api(app).sendRaw(

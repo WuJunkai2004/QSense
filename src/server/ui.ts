@@ -430,11 +430,12 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           reply.code(400).send({ error: "参数 group 与 text 均不能为空。" });
           return;
         }
+        const quote = body.quote === true;
         try {
           const botId = resolveBot(body.bot);
           const result =
             replyMsgId !== undefined
-              ? await sender.reply(botId, group, replyMsgId, text)
+              ? await sender.reply(botId, group, replyMsgId, text, false, quote)
               : await sender.proactive(botId, group, text);
           // 官方不回推 bot 自发消息：发送成功后本地补记，WebUI 刷新后仍可见。
           // 落库失败不影响发送结果（消息已出账，只记日志）。

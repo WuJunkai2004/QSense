@@ -172,6 +172,32 @@ test("M4-2 不同文本 → msg_seq 递增为 2，两条都在账本", async () 
   }
 });
 
+test("M4-2b 引用开关：默认纯被动回复不带 message_reference；quote=true 才携带引用块", async () => {
+  const fx = setupDb();
+  try {
+    seedInbound(fx.repo, "M1");
+    const mock = makeApiMock();
+    const sender = new Sender({
+      config: fx.config,
+      log: createLogger("error"),
+      db: fx.db,
+      repo: fx.repo,
+      tokenManager: {} as never,
+      apiFor: () => mock,
+    });
+    await sender.reply(BOT, GROUP, "M1", "纯回复（不带引用块）");
+    await sender.reply(BOT, GROUP, "M1", "引用回复（带引用块）", false, true);
+    assert.equal(mock.calls.length, 2);
+    assert.equal(mock.calls[0]!.body.message_reference, undefined, "默认不携带引用块");
+    assert.deepEqual(mock.calls[1]!.body.message_reference, {
+      message_id: "M1",
+      ignore_get_message_error: true,
+    });
+  } finally {
+    fx.close();
+  }
+});
+
 test("M4-3 窗口过期（>5分钟）→ 明确报错且不发", async () => {
   const fx = setupDb();
   try {
