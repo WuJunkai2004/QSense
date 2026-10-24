@@ -6,7 +6,8 @@
 
 html,
 body,
-#root {
+#root,
+#root .ant-app {
   height: 100%;
   margin: 0;
   overflow: hidden; /* 视口锁死：任何滚动都发生在内部面板，不整页滚 */
