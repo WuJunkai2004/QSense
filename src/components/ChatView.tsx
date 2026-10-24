@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Alert, Avatar, Button, Input, Modal, Tag, Tooltip, App as AntApp } from "antd";
+import { Alert, Avatar, Button, Input, Modal, Spin, Tag, Tooltip, App as AntApp } from "antd";
 import { EditOutlined, RollbackOutlined, SendOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import type { Bootstrap, GroupItem, MsgItem } from "../types";
@@ -54,6 +54,28 @@ export default function ChatView(props: Props) {
       el.scrollTop += el.scrollHeight - prev.height;
     }
   }, [messages]);
+
+  // 增量加载：顶部哨兵进入视口（含 160px 预载边距）自动翻更早一页，避免一次加载过多
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const loadOlderRef = useRef(onLoadOlder);
+  loadOlderRef.current = onLoadOlder;
+  const busyRef = useRef(busyOlder);
+  busyRef.current = busyOlder;
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const list = listRef.current;
+    if (sentinel === null || list === null || !hasMore) return;
+    const ob = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting) && !busyRef.current) {
+          loadOlderRef.current();
+        }
+      },
+      { root: list, rootMargin: "160px 0px 0px 0px" },
+    );
+    ob.observe(sentinel);
+    return () => ob.disconnect();
+  }, [hasMore, messages.length]);
 
   const groupOpenid = group?.group_openid ?? null;
   const alias = groupOpenid !== null ? getAlias(groupOpenid) : "";
@@ -115,10 +137,17 @@ export default function ChatView(props: Props) {
         ) : (
           <>
             {hasMore && (
+              <div className="load-older" ref={sentinelRef}>
+                {busyOlder ? (
+                  <Spin size="small" />
+                ) : (
+                  <span style={{ color: "#9aa0a8", fontSize: 12 }}>上滑加载更早…</span>
+                )}
+              </div>
+            )}
+            {!hasMore && messages.length > 0 && (
               <div className="load-older">
-                <Button size="small" type="text" loading={busyOlder} onClick={onLoadOlder}>
-                  加载更早消息
-                </Button>
+                <span style={{ color: "#c3c8cf", fontSize: 12 }}>没有更早的消息了</span>
               </div>
             )}
             {messages.map((m) => {

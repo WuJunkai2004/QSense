@@ -109,7 +109,7 @@ export default function App() {
     setHasMore(false);
     if (boot === null || currentBot === null || currentGroup === null) return;
     get<{ messages: MsgItem[]; has_more: boolean }>(
-      `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}&limit=50`,
+      `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}&limit=30`,
     )
       .then((r) => {
         setMessages(r.messages);
@@ -149,7 +149,7 @@ export default function App() {
     try {
       const before = messages[0].rid;
       const r = await get<{ messages: MsgItem[]; has_more: boolean }>(
-        `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}&before=${before}&limit=50`,
+        `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}&before=${before}&limit=30`,
       );
       setMessages((prev) => [...r.messages, ...prev]);
       setHasMore(r.has_more);
