@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useReducer, useState } from "react";
-import { Badge, Button, Spin, Tag, App as AntApp } from "antd";
+import {
+  Badge,
+  Button,
+  Drawer,
+  Spin,
+  Tag,
+  App as AntApp,
+} from "antd";
+import { SettingOutlined } from "@ant-design/icons";
 import {
   clearToken,
   getLastBot,
@@ -24,6 +32,7 @@ import SessionList from "./components/SessionList";
 import ChatView from "./components/ChatView";
 import RightPanel from "./components/RightPanel";
 import MessageDetailDrawer from "./components/MessageDetailDrawer";
+import SettingsView from "./components/SettingsView";
 
 const en = encodeURIComponent;
 
@@ -41,6 +50,7 @@ export default function App() {
   const [sends, setSends] = useState<SendItem[]>([]);
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
   const [detail, setDetail] = useState<MsgItem | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [, forceRender] = useReducer((x: number) => x + 1, 0);
 
   // 401（token 失效）广播 → 回登录页
@@ -334,9 +344,15 @@ export default function App() {
         </Tag>
         <span className="spacer" />
         <span style={{ color: "#9aa0a8", fontSize: 12 }}>
-          运行 {Math.floor(boot.uptime_s / 60)} 分钟 · 白名单{" "}
-          {boot.allow_groups.length} 群
+          运行 {Math.floor(boot.uptime_s / 60)} 分钟 · 当前 bot 白名单{" "}
+          {bot?.allow_groups.length ?? 0} 群
         </span>
+        <Button
+          size="small"
+          icon={<SettingOutlined />}
+          title="设置（发送开关 / 白名单 / token 轮换）"
+          onClick={() => setSettingsOpen(true)}
+        />
         <Button size="small" onClick={logout}>
           退出
         </Button>
@@ -355,7 +371,7 @@ export default function App() {
           groups={groups}
           current={currentGroup}
           onSelect={setCurrentGroup}
-          allowGroups={boot.allow_groups}
+          allowGroups={bot?.allow_groups ?? []}
         />
         <ChatView
           boot={boot}
@@ -384,6 +400,19 @@ export default function App() {
         msg={detail}
         onClose={() => setDetail(null)}
       />
+      <Drawer
+        title="设置"
+        placement="right"
+        width={560}
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        destroyOnClose
+      >
+        <SettingsView
+          open={settingsOpen}
+          onChanged={refreshBoot}
+        />
+      </Drawer>
     </div>
   );
 }

@@ -3,7 +3,8 @@
 export interface BotInfo {
   appid: string;
   name: string;
-  dynamic: boolean;
+  /** M8：白名单按 bot 独立落库（bots 表），不再是顶层全局字段 */
+  allow_groups: string[];
   gateway: "ready" | "resumed" | "disconnected" | "fatal" | "unknown";
   detail?: string;
 }
@@ -13,8 +14,34 @@ export interface Bootstrap {
   uptime_s: number;
   send_enabled: boolean;
   auth_level: "certified" | "uncertified";
-  allow_groups: string[];
   bots: BotInfo[];
+}
+
+/** GET/PUT /ui/api/settings 载荷 */
+export interface SettingsInfo {
+  send_enabled: boolean;
+  bots: Array<{
+    appid: string;
+    name: string;
+    allow_groups: string[];
+    gateway: string;
+  }>;
+}
+
+/** POST /bots/:appid/agent-token（轮换）：新 token 仅本次返回 */
+export interface AgentTokenResult {
+  ok: true;
+  bot: string;
+  agent_token: string;
+  note: string;
+}
+
+/** POST /bots（注册）：agent_token 仅本次返回 */
+export interface AddBotResult {
+  ok: true;
+  bot: { appid: string; name: string };
+  agent_token: string;
+  note: string;
 }
 
 export interface GroupLast {

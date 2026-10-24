@@ -133,10 +133,12 @@ export default function ChatView(props: Props) {
       : alias !== ""
         ? alias
         : `群 ${groupOpenid.slice(0, 12)}…`;
+  const botGroups =
+    boot.bots.find((b) => b.appid === botAppid)?.allow_groups ?? [];
   const sendAllowed =
     boot.send_enabled === true &&
     groupOpenid !== null &&
-    boot.allow_groups.includes(groupOpenid);
+    botGroups.includes(groupOpenid);
 
   // 智能默认：无显式引用目标时，自动引用回复窗口内最新一条入站消息（被动，不耗主动额度）。
   // 官方每条群消息最多被动回复 5 次：本地计数防止自动回复把同一目标的槽位耗尽，超额自动降级主动发送。

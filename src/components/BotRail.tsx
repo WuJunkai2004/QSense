@@ -75,16 +75,7 @@ export default function BotRail({ bots, current, onSelect, onRefresh }: Props) {
           key={b.appid}
           trigger={["contextMenu"]}
           menu={{
-            items:
-              b.dynamic === true
-                ? [{ key: "remove", label: "移除该机器人", danger: true }]
-                : [
-                    {
-                      key: "info",
-                      label: "QQ_APPS 配置 bot（不可在此移除）",
-                      disabled: true,
-                    },
-                  ],
+            items: [{ key: "remove", label: "移除该机器人", danger: true }],
             onClick: (info) => {
               if (info.key === "remove") removeBot(b);
             },
@@ -97,8 +88,7 @@ export default function BotRail({ bots, current, onSelect, onRefresh }: Props) {
             <Tooltip
               title={
                 <span>
-                  {b.name}（{b.appid}）· {gatewayText(b.gateway)}
-                  {b.dynamic ? " · 运行时添加，右键可移除" : ""}
+                  {b.name}（{b.appid}）· {gatewayText(b.gateway)} · 右键可移除
                 </span>
               }
               placement="right"
