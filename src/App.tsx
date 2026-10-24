@@ -204,7 +204,7 @@ export default function App() {
   }, [loadQuota]);
 
   // 发送：乐观追加（成功保留标记本机、失败移除），账本/额度即时刷新
-  const handleSend = async (text: string, replyMsgId: string | null): Promise<void> => {
+  const handleSend = async (text: string, replyMsgId: string | null, quote: boolean = false): Promise<void> => {
     if (boot === null || currentBot === null || currentGroup === null) return;
     const botName = boot.bots.find((b) => b.appid === currentBot)?.name ?? currentBot;
     const pending: MsgItem = {
@@ -224,7 +224,7 @@ export default function App() {
         bot: currentBot,
         group: currentGroup,
         text,
-        ...(replyMsgId !== null ? { reply_msg_id: replyMsgId } : {}),
+        ...(replyMsgId !== null ? { reply_msg_id: replyMsgId, quote } : {}),
       });
       void message.success(
         r.result.status === "pending_audit"

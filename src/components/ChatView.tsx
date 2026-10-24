@@ -15,7 +15,7 @@ interface Props {
   hasMore: boolean;
   busyOlder: boolean;
   onLoadOlder: () => void;
-  onSend: (text: string, replyMsgId: string | null) => Promise<void>;
+  onSend: (text: string, replyMsgId: string | null, quote: boolean) => Promise<void>;
   onShowDetail: (m: MsgItem) => void;
 }
 
@@ -130,7 +130,8 @@ export default function ChatView(props: Props) {
     const target = replyTo ?? autoTarget;
     setSending(true);
     try {
-      await onSend(t, target?.msg_id ?? null);
+      // 显式「引用」→ 被动回复附带官方引用块；智能默认 → 纯回复（仅窗口绑定，不带引用块）
+      await onSend(t, target?.msg_id ?? null, replyTo !== null);
       if (target !== null) {
         replyCountRef.current.set(target.msg_id, (replyCountRef.current.get(target.msg_id) ?? 0) + 1);
       }
@@ -270,7 +271,7 @@ export default function ChatView(props: Props) {
             <div className="reply-banner auto">
               <RollbackOutlined />
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                发送将自动引用回复 {autoTarget.author.name ?? "?"} 的最新消息（被动回复，不消耗主动额度）
+                发送将自动回复 {autoTarget.author.name ?? "?"} 的最新消息（被动回复，不消耗主动额度）
               </span>
             </div>
           )
@@ -295,7 +296,7 @@ export default function ChatView(props: Props) {
               replyTo !== null
                 ? "引用回复（被动，不消耗主动额度，5 分钟窗口）…"
                 : autoTarget !== null
-                  ? `发送 = 自动引用回复 ${autoTarget.author.name ?? "?"}（被动，不消耗主动额度）…`
+                  ? `发送 = 自动回复 ${autoTarget.author.name ?? "?"} 的最新消息（被动，不消耗主动额度）…`
                   : "主动消息（消耗额度：bot 级 30/60 每分钟、单群 20 每分钟、1000/天）…"
             }
             autoSize={{ minRows: 1, maxRows: 4 }}
