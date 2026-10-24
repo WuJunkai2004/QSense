@@ -5,6 +5,7 @@
 import Fastify from 'fastify';
 import type { Config } from '../config';
 import type { Logger } from '../logger';
+import type { Sender } from '../sender';
 import type { DB } from '../store/db';
 import { Repo } from '../store/repo';
 import { bearerOk, createMcpHandler } from '../tools/mcp';
@@ -13,11 +14,14 @@ export interface ServerDeps {
   config: Config;
   log: Logger;
   db: DB;
+  repo: Repo;
+  /** M4 发送器：写工具走这里；缺省=写工具硬拒绝 */
+  sender?: Sender;
   version: string;
 }
 
 export function buildServer(deps: ServerDeps) {
-  const { config, log, db, version } = deps;
+  const { config, log, db, repo, version } = deps;
   // 关闭 fastify 内置日志，统一用自研 logger；请求日志只记方法+路径（去掉 query，防泄漏）
   const app = Fastify({ logger: false });
   const httpLog = log.child('http');
@@ -44,7 +48,7 @@ export function buildServer(deps: ServerDeps) {
   });
 
   // MCP Streamable HTTP（M3）：Bearer 鉴权 + 会话管理；Fastify 解析 JSON 体后交 SDK transport
-  const handleMcp = createMcpHandler({ config, log, repo: new Repo(db), version });
+  const handleMcp = createMcpHandler({ config, log, repo, sender: deps.sender, version });
   app.route({
     method: ['GET', 'POST', 'DELETE'],
     url: '/mcp',

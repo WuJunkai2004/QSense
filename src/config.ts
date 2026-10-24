@@ -27,7 +27,11 @@ export interface Config {
   logLevel: Level;
   /** 缓存消息保留天数（DESIGN.md §3.3 保留策略），默认 90 */
   retentionDays: number;
+  /** 机器人认证等级：决定主动消息 bot 级频控（certified=60qpm / uncertified=30qpm），默认未认证（保守） */
+  authLevel: AuthLevel;
 }
+
+export type AuthLevel = 'certified' | 'uncertified';
 
 /** 读取 .env（不覆盖已存在的进程环境变量）；零依赖轻实现，仅需 KEY=VALUE 语法。 */
 export function loadDotEnv(path = '.env'): void {
@@ -131,6 +135,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     retentionDays = Number(retentionRaw);
   }
 
+  let authLevel: AuthLevel = 'uncertified';
+  const authRaw = env.QQ_AUTH_LEVEL;
+  if (authRaw !== undefined && authRaw !== '') {
+    if (authRaw !== 'certified' && authRaw !== 'uncertified') {
+      throw new Error(t('cfg_bad_authlevel', { value: authRaw }));
+    }
+    authLevel = authRaw;
+  }
+
   return {
     apps,
     mcpToken,
@@ -142,5 +155,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     logContent: parseBool(env, 'LOG_CONTENT', false),
     logLevel: levelFromEnv(env.LOG_LEVEL),
     retentionDays,
+    authLevel,
   };
 }

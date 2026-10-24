@@ -14,6 +14,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import type { Config } from '../config';
 import type { Logger } from '../logger';
+import type { Sender } from '../sender';
 import type { Repo } from '../store/repo';
 import { TOOLS, runTool } from './defs';
 
@@ -21,6 +22,8 @@ export interface McpDeps {
   config: Config;
   log: Logger;
   repo: Repo;
+  /** M4 发送器：写工具走这里；缺省=写工具硬拒绝 */
+  sender?: Sender;
   version: string;
 }
 
@@ -56,7 +59,7 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
   }
   const sessions = new Map<string, Session>();
 
-  const createContext = () => ({ repo, config });
+  const createContext = () => ({ repo, config, sender: deps.sender });
 
   const createSession = (): Session => {
     const transport = new StreamableHTTPServerTransport({
@@ -77,7 +80,7 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const name = req.params.name;
       const args = (req.params.arguments ?? {}) as Record<string, unknown>;
-      const result = runTool(name, args, createContext());
+      const result = await runTool(name, args, createContext());
       mcpLog.debug('tool call', { tool: name, error: result.isError === true });
       return {
         content: [{ type: 'text', text: result.text }],

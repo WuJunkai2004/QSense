@@ -59,6 +59,15 @@ export function handleGatewayEvent(repo: Repo, event: RawEvent): void {
       if (u !== '') repo.setC2cSwitch(event.botId, u, false);
       return;
     }
+    case 'MESSAGE_AUDIT_PASS':
+    case 'MESSAGE_AUDIT_REJECT': {
+      // 主动消息人工审核结果（304023/304024 的异步回执）：回填 sends 账本 earliest pending 行。
+      // 官方事件体字段未完全核实（M5 真机观察），容错取 group_openid/user_openid 定位。
+      const result = event.type === 'MESSAGE_AUDIT_PASS' ? 'audit_pass' : 'audit_reject';
+      const target = fieldOf(event.data, 'group_openid') || fieldOf(event.data, 'user_openid');
+      if (target !== '') repo.applyAuditResult(event.botId, target, result);
+      return;
+    }
     default:
       // MESSAGE_AUDIT / INTERACTION 等在 M4 按需接入
       return;

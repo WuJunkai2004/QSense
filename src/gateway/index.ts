@@ -54,6 +54,8 @@ export interface SupervisorDeps {
   db: DB;
   handlers: GatewayHandlers;
   overrides?: GatewayOverrides;
+  /** 外部注入的 TokenService（M4：发送器与网关共享同一 token 缓存）；缺省自建 */
+  tokens?: TokenService;
 }
 
 /** 携带消息 id 的事件类型（去重键 = bot:type:id；其余事件天然幂等 upsert，无需去重） */
@@ -68,7 +70,7 @@ export class GatewaySupervisor {
 
   constructor(private readonly deps: SupervisorDeps) {
     this.gwLog = deps.log.child("gateway");
-    this.tokens = new TokenService(deps.log.child("token"));
+    this.tokens = deps.tokens ?? new TokenService(deps.log.child("token"));
   }
 
   /** 启动全部 bot 的连接循环；阻塞到 stop()（各 bot abort 后正常返回） */

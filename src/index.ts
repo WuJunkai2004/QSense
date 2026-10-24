@@ -3,9 +3,11 @@
 
 import { loadConfig, loadDotEnv } from './config';
 import { GatewaySupervisor } from './gateway';
+import { TokenService } from './gateway/token';
 import { t } from './i18n';
 import { createLogger } from './logger';
 import { handleGatewayEvent } from './normalize/handler';
+import { Sender } from './sender';
 import { buildServer } from './server/http';
 import { openDatabase, runMigrations } from './store/db';
 import { migrations } from './store/migrations';
@@ -29,10 +31,13 @@ async function main(): Promise<void> {
   const db = openDatabase(config.dataDir);
   runMigrations(db, migrations);
 
-  const app = buildServer({ config, log, db, version: VERSION });
-
-  // 事件入库（M2）：事件 → 规范化 → SQLite；单条事件路径绝不抛错
+  // 事件入库（M2）+ 发送器（M4）：单一 Repo 实例贯穿缓存/账本/MCP 工具
   const repo = new Repo(db);
+  const tokens = new TokenService(log.child('token'));
+  const sender = new Sender({ config, log, db, repo, tokenManager: tokens.sdk });
+
+  const app = buildServer({ config, log, db, repo, sender, version: VERSION });
+
   let eventCount = 0;
   let storedCount = 0;
   const purgeOld = (): void => {
@@ -47,11 +52,12 @@ async function main(): Promise<void> {
   const retentionTimer = setInterval(purgeOld, 24 * 60 * 60 * 1000);
   retentionTimer.unref();
 
-  // 事件接入器：WS 出站长连接，逐 bot 连接官方网关
+  // 事件接入器：WS 出站长连接，逐 bot 连接官方网关（共享 tokens）
   const gateway = new GatewaySupervisor({
     config,
     log,
     db,
+    tokens,
     handlers: {
       onEvent: (e) => {
         // 硬约束：日志不含消息正文，只记事件类型与来源

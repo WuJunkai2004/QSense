@@ -70,7 +70,7 @@ async function setupServer(): Promise<Fixture> {
     MCP_TOKEN: TOKEN,
     DATA_DIR: dir,
   });
-  const app = buildServer({ config, log: createLogger('error'), db, version: '0.1.0' });
+  const app = buildServer({ config, log: createLogger('error'), db, repo, version: '0.1.0' });
   await app.listen({ port: 0, host: '127.0.0.1' });
   const addr = app.server.address();
   const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
@@ -126,7 +126,7 @@ test('M3-1 未带 token / 错 token → 401', async () => {
   }
 });
 
-test('M3-2 listTools 含 9 个 qq_* 只读工具', async () => {
+test('M3-2 listTools 含 9 只读 + 3 写工具；未开启发送时写工具硬拒绝', async () => {
   const fx = await setupServer();
   try {
     const client = await connectClient(fx.baseUrl);
@@ -141,8 +141,18 @@ test('M3-2 listTools 含 9 个 qq_* 只读工具', async () => {
       'qq_list_groups',
       'qq_list_members',
       'qq_quota',
+      'qq_recall',
+      'qq_reply',
       'qq_search',
+      'qq_send_proactive',
     ]);
+    // 双重门禁未开（SEND_ENABLE 缺省 false）→ 写工具硬拒绝且不炸
+    const denied = (await client.callTool({
+      name: 'qq_send_proactive',
+      arguments: { group: GROUP, text: 'test' },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(denied.isError, true);
+    assert.ok(denied.content[0]!.text.includes('SEND_ENABLE'), '拒绝文案应指出开启方式');
     await client.close();
   } finally {
     await fx.close();

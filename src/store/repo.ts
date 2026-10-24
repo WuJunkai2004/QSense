@@ -28,6 +28,22 @@ export interface MsgRow {
   [k: string]: unknown;
 }
 
+/** 发送账本行（sends 表）：status = reserved|sent|failed|pending_audit|audit_pass|audit_reject */
+export interface SendRow {
+  id: number;
+  bot_id: string;
+  target_openid: string;
+  kind: string;
+  reply_msg_id: string | null;
+  msg_seq: number | null;
+  payload_hash: string | null;
+  provider_msg_id: string | null;
+  status: string;
+  error_code: number | null;
+  created_at: number | null;
+  [k: string]: unknown;
+}
+
 export class Repo {
   private readonly insertGroupMsg: Stmt<[Record<string, unknown>]>;
   private readonly insertC2cMsg: Stmt<[Record<string, unknown>]>;
@@ -40,6 +56,9 @@ export class Repo {
   private readonly kvSetStmt: Stmt<[string, string]>;
   private readonly purgeGroupStmt: Stmt<[number]>;
   private readonly purgeC2cStmt: Stmt<[number]>;
+  private readonly insertSendStmt: Stmt<[string, string, string, string | null, number | null, string | null, string, number]>;
+  private readonly updateSendStmt: Stmt<[string, string | null, number | null, number]>;
+  private readonly incrQuotaStmt: Stmt<[string, string, string]>;
 
   constructor(private readonly db: DB) {
     this.insertGroupMsg = db.prepare(`
@@ -96,6 +115,17 @@ export class Repo {
     );
     this.purgeGroupStmt = db.prepare('DELETE FROM messages WHERE ts < ?');
     this.purgeC2cStmt = db.prepare('DELETE FROM c2c_messages WHERE ts < ?');
+    this.insertSendStmt = db.prepare(`
+      INSERT INTO sends(bot_id, target_openid, kind, reply_msg_id, msg_seq, payload_hash, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    this.updateSendStmt = db.prepare(
+      'UPDATE sends SET status = ?, provider_msg_id = COALESCE(?, provider_msg_id), error_code = ? WHERE id = ?',
+    );
+    this.incrQuotaStmt = db.prepare(`
+      INSERT INTO quota_daily(bot_id, target_openid, date, proactive_count) VALUES (?, ?, ?, 1)
+      ON CONFLICT(bot_id, target_openid, date) DO UPDATE SET proactive_count = proactive_count + 1
+    `);
   }
 
   /** 群消息入库；返回 false = msg_id 重复（官方重推），幂等忽略 */
@@ -309,6 +339,82 @@ export class Repo {
       .prepare('SELECT COALESCE(SUM(proactive_count), 0) AS n FROM quota_daily WHERE bot_id = ? AND date = ?')
       .get(botId, dateStr) as { n: number };
     return row.n;
+  }
+
+  // —— M4 发送账本（sends 表）与主动额度（quota_daily 表） ——
+
+  /** 幂等重放查询：同 回复目标+payload 且已受理（sent/pending_audit）的首次记录 */
+  findSendReplay(botId: string, kind: string, replyMsgId: string, payloadHash: string): SendRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM sends WHERE bot_id = ? AND kind = ? AND reply_msg_id = ? AND payload_hash = ?
+         AND status IN ('sent', 'pending_audit') ORDER BY id ASC LIMIT 1`,
+      )
+      .get(botId, kind, replyMsgId, payloadHash) as SendRow | undefined;
+    return row ?? null;
+  }
+
+  /** 被动窗口已用次数：除 failed（官方未受理）外的全部账本行 */
+  countPassiveSends(botId: string, replyMsgId: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM sends WHERE bot_id = ? AND kind = 'passive' AND reply_msg_id = ? AND status != 'failed'",
+      )
+      .get(botId, replyMsgId) as { n: number };
+    return row.n;
+  }
+
+  /** 下一个 msg_seq：账本内单调递增（含 failed 行，保证不复用官方可能已受理的序号） */
+  nextMsgSeq(botId: string, replyMsgId: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(MAX(msg_seq), 0) AS m FROM sends WHERE bot_id = ? AND kind = 'passive' AND reply_msg_id = ?",
+      )
+      .get(botId, replyMsgId) as { m: number };
+    return row.m + 1;
+  }
+
+  /** 预订账本行（reservation 先行）：返回 rowid */
+  insertSend(p: {
+    bot_id: string;
+    target_openid: string;
+    kind: string;
+    reply_msg_id: string | null;
+    msg_seq: number | null;
+    payload_hash: string | null;
+    status: string;
+  }): number {
+    const info = this.insertSendStmt.run(p.bot_id, p.target_openid, p.kind, p.reply_msg_id, p.msg_seq, p.payload_hash, p.status, Date.now());
+    return Number(info.lastInsertRowid);
+  }
+
+  updateSendStatus(id: number, status: string, providerMsgId?: string, errorCode?: number): void {
+    this.updateSendStmt.run(status, providerMsgId ?? null, errorCode ?? null, id);
+  }
+
+  /** 单群当日主动消息已发数（北京自然日，见 sender.beijingDate） */
+  proactiveCountFor(botId: string, targetOpenid: string, date: string): number {
+    const row = this.db
+      .prepare('SELECT proactive_count AS n FROM quota_daily WHERE bot_id = ? AND target_openid = ? AND date = ?')
+      .get(botId, targetOpenid, date) as { n: number } | undefined;
+    return row?.n ?? 0;
+  }
+
+  /** 当日额度记账 +1（无行则建） */
+  incrQuotaDaily(botId: string, targetOpenid: string, date: string): void {
+    this.incrQuotaStmt.run(botId, targetOpenid, date);
+  }
+
+  /** MESSAGE_AUDIT 回填：定位该群最早的 pending_audit 行，落到 pass/reject */
+  applyAuditResult(botId: string, targetOpenid: string, status: 'audit_pass' | 'audit_reject'): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT id FROM sends WHERE bot_id = ? AND target_openid = ? AND status = 'pending_audit' ORDER BY id ASC LIMIT 1",
+      )
+      .get(botId, targetOpenid) as { id: number } | undefined;
+    if (row === undefined) return false;
+    this.updateSendStatus(row.id, status);
+    return true;
   }
 }
 
