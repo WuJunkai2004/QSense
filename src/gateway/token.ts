@@ -2,7 +2,7 @@
 // 已核实事实（API-FACTS.md #6）：POST /app/getAppAccessToken，有效期 7200s，
 // 有效期内重复获取幂等；过期前 60s 窗内获取返回新 token；业务错误在 body.code（HTTP 恒 200）。
 
-import { TokenManager } from '@tencent-connect/qqbot-nodejs/protocol';
+import { TokenManager } from "@tencent-connect/qqbot-nodejs/protocol";
 import type { BotApp } from "../config";
 import type { Logger } from "../logger";
 

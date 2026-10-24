@@ -11,7 +11,7 @@ export interface Migration {
 export const migrations: Migration[] = [
   {
     version: 1,
-    name: 'kv',
+    name: "kv",
     up: `
       CREATE TABLE kv(
         k TEXT PRIMARY KEY,
@@ -21,7 +21,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 2,
-    name: 'business-tables',
+    name: "business-tables",
     // 全量业务表，权威定义见 DESIGN.md §3.3。
     // 偏差说明：FTS 用 trigram 而非 unicode61——unicode61 不分词中文（整句成单 token），
     // qq_search 关键词检索对中文不可用；trigram 支持子串匹配（better-sqlite3 内置 SQLite ≥ 3.34）。
@@ -108,7 +108,7 @@ export const migrations: Migration[] = [
   },
   {
     version: 3,
-    name: 'fts-indexes',
+    name: "fts-indexes",
     // external-content FTS5 + 触发器同步（ messages / c2c_messages 的 content 列 ）
     up: `
       CREATE VIRTUAL TABLE messages_fts USING fts5(

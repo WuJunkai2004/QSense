@@ -23,7 +23,7 @@ export interface NormalizedMention {
 export interface NormalizedMessage {
   botId: string;
   /** group=群聊 / c2c=单聊 */
-  scope: 'group' | 'c2c';
+  scope: "group" | "c2c";
   /** scope=group 时为 group_openid；scope=c2c 时为 user_openid */
   scopeId: string;
   msgId: string;

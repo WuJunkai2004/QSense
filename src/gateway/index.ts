@@ -59,7 +59,11 @@ export interface SupervisorDeps {
 }
 
 /** 携带消息 id 的事件类型（去重键 = bot:type:id；其余事件天然幂等 upsert，无需去重） */
-const DEDUP_TYPES = new Set(["GROUP_MESSAGE_CREATE", "GROUP_AT_MESSAGE_CREATE", "C2C_MESSAGE_CREATE"]);
+const DEDUP_TYPES = new Set([
+  "GROUP_MESSAGE_CREATE",
+  "GROUP_AT_MESSAGE_CREATE",
+  "C2C_MESSAGE_CREATE",
+]);
 
 export class GatewaySupervisor {
   private readonly controllers = new Map<string, AbortController>();
@@ -99,7 +103,11 @@ export class GatewaySupervisor {
     const log = this.gwLog.child(app.appid);
 
     const connection = new GatewayConnection({
-      account: { accountId: app.appid, appId: app.appid, clientSecret: app.secret },
+      account: {
+        accountId: app.appid,
+        appId: app.appid,
+        clientSecret: app.secret,
+      },
       abortSignal: controller.signal,
       log: {
         info: (msg, meta) => log.debug(msg, meta),
@@ -122,7 +130,8 @@ export class GatewaySupervisor {
           : fetchGatewayUrl(accessToken),
       reconnect: overrides?.reconnect,
       onReady: () => handlers.onStatus?.({ botId: app.appid, state: "ready" }),
-      onResumed: () => handlers.onStatus?.({ botId: app.appid, state: "resumed" }),
+      onResumed: () =>
+        handlers.onStatus?.({ botId: app.appid, state: "resumed" }),
       onDisconnected: (e) => {
         handlers.onStatus?.({
           botId: app.appid,
@@ -130,10 +139,13 @@ export class GatewaySupervisor {
           detail: `code=${e.code} willReconnect=${String(e.willReconnect)}`,
         });
         if (!e.willReconnect) {
-          log.error(t("gw_disconnected_final", { code: e.code, reason: e.reason }));
+          log.error(
+            t("gw_disconnected_final", { code: e.code, reason: e.reason }),
+          );
         }
       },
-      onError: (err) => log.warn("gateway recoverable error", { reason: err.message }),
+      onError: (err) =>
+        log.warn("gateway recoverable error", { reason: err.message }),
       onMessage: (msg) => {
         // 群聊/C2C 消息走 SDK 规范化通道，msg.raw 为官方原始载荷（M2 规范化以此为准）
         if (msg.kind !== "group" && msg.kind !== "c2c") return;
@@ -162,7 +174,12 @@ export class GatewaySupervisor {
   }
 
   /** 事件上行 + 消息级 id 去重（存储层主键是第二道闸，M2 落地） */
-  private async emit(botId: string, type: string, data: unknown, log: Logger): Promise<void> {
+  private async emit(
+    botId: string,
+    type: string,
+    data: unknown,
+    log: Logger,
+  ): Promise<void> {
     if (DEDUP_TYPES.has(type)) {
       const id = (data as { id?: unknown }).id;
       if (typeof id === "string" && id !== "") {

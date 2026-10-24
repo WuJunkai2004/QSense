@@ -4,7 +4,10 @@ import { t } from "../i18n";
 
 export const QQ_API_BASE = "https://api.bot.qq.com";
 
-export async function fetchGatewayUrl(accessToken: string, base: string = QQ_API_BASE): Promise<string> {
+export async function fetchGatewayUrl(
+  accessToken: string,
+  base: string = QQ_API_BASE,
+): Promise<string> {
   let res: Response;
   try {
     res = await fetch(`${base}/gateway`, {
@@ -12,7 +15,10 @@ export async function fetchGatewayUrl(accessToken: string, base: string = QQ_API
     });
   } catch (e) {
     throw new Error(
-      t("gw_url_fail", { status: "network", reason: e instanceof Error ? e.message : String(e) }),
+      t("gw_url_fail", {
+        status: "network",
+        reason: e instanceof Error ? e.message : String(e),
+      }),
     );
   }
   const body = (await res.json().catch(() => null)) as { url?: string } | null;

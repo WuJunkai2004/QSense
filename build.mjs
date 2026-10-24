@@ -13,5 +13,10 @@ await esbuild.build({
   target: "node20",
   bundle: true,
   sourcemap: true,
-  external: ["better-sqlite3", "fastify", "@tencent-connect/qqbot-nodejs", "ws"],
+  external: [
+    "better-sqlite3",
+    "fastify",
+    "@tencent-connect/qqbot-nodejs",
+    "ws",
+  ],
 });

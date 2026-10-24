@@ -27,7 +27,7 @@ const asElements = (v: unknown): ElementLike[] =>
   Array.isArray(v) ? (v as ElementLike[]) : [];
 
 function childrenOf(el: ElementLike): ElementLike[] {
-  for (const key of ['children', 'elements', 'messages', 'paragraphs']) {
+  for (const key of ["children", "elements", "messages", "paragraphs"]) {
     const v = el[key];
     if (Array.isArray(v)) return v as ElementLike[];
   }
@@ -35,9 +35,9 @@ function childrenOf(el: ElementLike): ElementLike[] {
 }
 
 function textOf(el: ElementLike): string {
-  if (typeof el.content === 'string') return el.content;
-  if (typeof el.text === 'string') return el.text;
-  return '';
+  if (typeof el.content === "string") return el.content;
+  if (typeof el.text === "string") return el.text;
+  return "";
 }
 
 /**
@@ -50,36 +50,38 @@ function textOf(el: ElementLike): string {
  */
 export function expandElements(elements: unknown, depth = 0): string[] {
   const out: string[] = [];
-  const indent = '  '.repeat(depth);
+  const indent = "  ".repeat(depth);
   for (const el of asElements(elements)) {
     const type = el.message_type ?? el.type;
     if (type === TYPE_TEXT) {
       const text = textOf(el).trim();
-      if (text !== '') out.push(`${indent}${text}`);
+      if (text !== "") out.push(`${indent}${text}`);
     } else if (type === TYPE_ARK) {
-      const label = el.title ?? el.desc ?? '';
-      out.push(`${indent}[卡片]${label !== '' ? ` ${label}` : ''}`);
+      const label = el.title ?? el.desc ?? "";
+      out.push(`${indent}[卡片]${label !== "" ? ` ${label}` : ""}`);
     } else if (type === TYPE_PARALLEL) {
       out.push(`${indent}[并行消息]`);
       out.push(...expandElements(childrenOf(el), depth + 1));
     } else if (type === TYPE_FORWARD) {
-      const title = typeof el.title === 'string' && el.title !== '' ? el.title : '聊天记录';
+      const title =
+        typeof el.title === "string" && el.title !== "" ? el.title : "聊天记录";
       out.push(`${indent}[${title}]`);
       // 官方 102：content 可能带摘要文本（title 之外的正文补充）
       const fwdText = textOf(el).trim();
-      if (fwdText !== '' && fwdText !== title) out.push(`${indent}${fwdText}`);
+      if (fwdText !== "" && fwdText !== title) out.push(`${indent}${fwdText}`);
       out.push(...expandElements(childrenOf(el), depth + 1));
     } else if (type === TYPE_QUOTE) {
-      const ref = typeof el.msg_idx === 'string' ? ` msg_idx=${el.msg_idx}` : '';
+      const ref =
+        typeof el.msg_idx === "string" ? ` msg_idx=${el.msg_idx}` : "";
       out.push(`${indent}[引用${ref}]`);
       // 官方 103：被引用原文就在本元素的 content 字段（真机 2026-10-24 核实），children 通常为空
       const quoted = textOf(el).trim();
-      if (quoted !== '') out.push(`${indent}${quoted}`);
+      if (quoted !== "") out.push(`${indent}${quoted}`);
       out.push(...expandElements(childrenOf(el), depth + 1));
     } else {
       // 未知类型：有文本抽文本，保证不静默丢内容
       const text = textOf(el).trim();
-      if (text !== '') out.push(`${indent}${text}`);
+      if (text !== "") out.push(`${indent}${text}`);
     }
   }
   return out;

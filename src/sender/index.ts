@@ -6,14 +6,23 @@
 // 发送通道仅官方 API（SDK MessageApi.sendRaw / recallMessage）；msg_seq 由本项目账本权威分配，
 // 不用 SDK 内置计数器（进程重启即丢，不满足幂等要求）。
 
-import { createHash } from 'node:crypto';
-import { ApiClient, MessageApi, type TokenManager } from '@tencent-connect/qqbot-nodejs/protocol';
-import type { BotApp, Config } from '../config';
-import { t } from '../i18n';
-import type { Logger } from '../logger';
-import type { DB } from '../store/db';
-import type { Repo } from '../store/repo';
-import { describeSendError, extractBizCode, isAuditPendingCode, isMarkdownPermissionError } from './errors';
+import { createHash } from "node:crypto";
+import {
+  ApiClient,
+  MessageApi,
+  type TokenManager,
+} from "@tencent-connect/qqbot-nodejs/protocol";
+import type { BotApp, Config } from "../config";
+import { t } from "../i18n";
+import type { Logger } from "../logger";
+import type { DB } from "../store/db";
+import type { Repo } from "../store/repo";
+import {
+  describeSendError,
+  extractBizCode,
+  isAuditPendingCode,
+  isMarkdownPermissionError,
+} from "./errors";
 
 /** 被动回复窗口（API-FACTS #3，官方限制）：群 5 分钟/5 次；单聊 60 分钟/4 次（v1 工具面仅群聊） */
 export const PASSIVE_WINDOW = {
@@ -34,7 +43,7 @@ export interface SendLimits {
   perGroupDaily: number;
 }
 
-export type SendStatus = 'sent' | 'replayed' | 'downgraded' | 'pending_audit';
+export type SendStatus = "sent" | "replayed" | "downgraded" | "pending_audit";
 
 export interface SendResult {
   status: SendStatus;
@@ -49,13 +58,13 @@ export interface SendResult {
 /** 发送 API 最小接口（生产=SDK MessageApi；测试=记录调用的 mock） */
 export interface SendApi {
   sendRaw(
-    scope: 'group' | 'c2c',
+    scope: "group" | "c2c",
     targetId: string,
     creds: { appId: string; clientSecret: string },
     body: Record<string, unknown>,
   ): Promise<{ id: string }>;
   recallMessage(
-    scope: 'group' | 'c2c',
+    scope: "group" | "c2c",
     targetId: string,
     messageId: string,
     creds: { appId: string; clientSecret: string },
@@ -88,7 +97,10 @@ class TokenBucket {
   }
   private refill(): void {
     const now = Date.now();
-    this.tokens = Math.min(this.capacity, this.tokens + ((now - this.last) / 60_000) * this.refillPerMin);
+    this.tokens = Math.min(
+      this.capacity,
+      this.tokens + ((now - this.last) / 60_000) * this.refillPerMin,
+    );
     this.last = now;
   }
   tryTake(): { ok: boolean; waitMs: number } {
@@ -97,7 +109,10 @@ class TokenBucket {
       this.tokens -= 1;
       return { ok: true, waitMs: 0 };
     }
-    return { ok: false, waitMs: Math.ceil(((1 - this.tokens) / this.refillPerMin) * 60_000) };
+    return {
+      ok: false,
+      waitMs: Math.ceil(((1 - this.tokens) / this.refillPerMin) * 60_000),
+    };
   }
   get remaining(): number {
     this.refill();
@@ -120,9 +135,10 @@ export class Sender {
   private readonly relationBuckets = new Map<string, TokenBucket>();
 
   constructor(private readonly deps: SenderDeps) {
-    this.log = deps.log.child('sender');
+    this.log = deps.log.child("sender");
     this.limits = {
-      qpm: deps.limits?.qpm ?? (deps.config.authLevel === 'certified' ? 60 : 30),
+      qpm:
+        deps.limits?.qpm ?? (deps.config.authLevel === "certified" ? 60 : 30),
       perRelationQpm: deps.limits?.perRelationQpm ?? PER_RELATION_QPM,
       perGroupDaily: deps.limits?.perGroupDaily ?? PER_GROUP_DAILY,
     };
@@ -154,7 +170,10 @@ export class Sender {
 
   private appOf(botId: string): BotApp {
     const app = this.deps.config.apps.find((a) => a.appid === botId);
-    if (app === undefined) throw new Error(`bot 不存在：${botId}。可用：${this.deps.config.apps.map((a) => a.appid).join(', ')}`);
+    if (app === undefined)
+      throw new Error(
+        `bot 不存在：${botId}。可用：${this.deps.config.apps.map((a) => a.appid).join(", ")}`,
+      );
     return app;
   }
 
@@ -164,8 +183,11 @@ export class Sender {
     if (!config.sendEnabled || !config.allowGroups.includes(groupOpenid)) {
       throw new Error(
         config.allowGroups.includes(groupOpenid)
-          ? t('send_disabled', { enabled: String(config.sendEnabled), allow: config.allowGroups.length })
-          : t('send_not_allowlisted', { group: groupOpenid }),
+          ? t("send_disabled", {
+              enabled: String(config.sendEnabled),
+              allow: config.allowGroups.length,
+            })
+          : t("send_not_allowlisted", { group: groupOpenid }),
       );
     }
     return this.appOf(botId);
@@ -173,9 +195,9 @@ export class Sender {
 
   private checkContent(text: string): string {
     const trimmed = text.trim();
-    if (trimmed === '') throw new Error('消息内容为空。请提供要发送的文本。');
+    if (trimmed === "") throw new Error("消息内容为空。请提供要发送的文本。");
     if ([...trimmed].length > MAX_CONTENT_LEN) {
-      throw new Error(t('send_text_too_long', { len: [...trimmed].length }));
+      throw new Error(t("send_text_too_long", { len: [...trimmed].length }));
     }
     return trimmed;
   }
@@ -191,53 +213,99 @@ export class Sender {
   ): Promise<SendResult> {
     const app = this.gate(botId, groupOpenid);
     const content = this.checkContent(text);
-    const payloadHash = sha256(`${markdown ? 'md' : 'text'}\0${content}`);
+    const payloadHash = sha256(`${markdown ? "md" : "text"}\0${content}`);
 
     // 幂等重放：同 回复目标+payload 已成功受理（sent/pending_audit）→ 直接返回首次结果
-    const replayed = this.deps.repo.findSendReplay(botId, 'passive', replyMsgId, payloadHash);
+    const replayed = this.deps.repo.findSendReplay(
+      botId,
+      "passive",
+      replyMsgId,
+      payloadHash,
+    );
     if (replayed !== null) {
-      this.log.info('passive replay (idempotent)', { msgId: replyMsgId, seq: replayed.msg_seq });
+      this.log.info("passive replay (idempotent)", {
+        msgId: replyMsgId,
+        seq: replayed.msg_seq,
+      });
       return {
-        status: 'replayed',
+        status: "replayed",
         msg_seq: replayed.msg_seq ?? undefined,
         provider_msg_id: replayed.provider_msg_id ?? undefined,
-        detail: '同内容回复此前已成功提交（幂等账本命中），未重复发送。',
+        detail: "同内容回复此前已成功提交（幂等账本命中），未重复发送。",
       };
     }
 
     // 窗口与次数（官方限制：群 5 分钟/5 次）
-    const inbound = this.deps.repo.getMessageByMsgId(botId, groupOpenid, replyMsgId);
-    if (inbound === null || inbound.ts === null) throw new Error(t('send_window_no_msg', { msg_id: replyMsgId }));
+    const inbound = this.deps.repo.getMessageByMsgId(
+      botId,
+      groupOpenid,
+      replyMsgId,
+    );
+    if (inbound === null || inbound.ts === null)
+      throw new Error(t("send_window_no_msg", { msg_id: replyMsgId }));
     const win = PASSIVE_WINDOW.group;
-    if (Date.now() - inbound.ts > win.ms) throw new Error(t('send_window_expired'));
+    if (Date.now() - inbound.ts > win.ms)
+      throw new Error(t("send_window_expired"));
     const used = this.deps.repo.countPassiveSends(botId, replyMsgId);
-    if (used >= win.max) throw new Error(t('send_window_exhausted', { used, max: win.max }));
+    if (used >= win.max)
+      throw new Error(t("send_window_exhausted", { used, max: win.max }));
 
-    const send = async (asMarkdown: boolean, seq: number): Promise<SendResult> => {
+    const send = async (
+      asMarkdown: boolean,
+      seq: number,
+    ): Promise<SendResult> => {
       const reservation = this.deps.repo.insertSend({
         bot_id: botId,
         target_openid: groupOpenid,
-        kind: 'passive',
+        kind: "passive",
         reply_msg_id: replyMsgId,
         msg_seq: seq,
-        payload_hash: sha256(`${asMarkdown ? 'md' : 'text'}\0${content}`),
-        status: 'reserved',
+        payload_hash: sha256(`${asMarkdown ? "md" : "text"}\0${content}`),
+        status: "reserved",
       });
       const body: Record<string, unknown> = asMarkdown
-        ? { msg_type: 2, markdown: { content }, msg_id: replyMsgId, msg_seq: seq }
+        ? {
+            msg_type: 2,
+            markdown: { content },
+            msg_id: replyMsgId,
+            msg_seq: seq,
+          }
         : { msg_type: 0, content, msg_id: replyMsgId, msg_seq: seq };
       try {
-        const resp = await this.api(app).sendRaw('group', groupOpenid, credsOf(app), body);
-        this.deps.repo.updateSendStatus(reservation, 'sent', resp.id);
-        this.log.info('passive sent', { group: groupOpenid, seq, provider: resp.id });
-        return { status: 'sent', msg_seq: seq, provider_msg_id: resp.id };
+        const resp = await this.api(app).sendRaw(
+          "group",
+          groupOpenid,
+          credsOf(app),
+          body,
+        );
+        this.deps.repo.updateSendStatus(reservation, "sent", resp.id);
+        this.log.info("passive sent", {
+          group: groupOpenid,
+          seq,
+          provider: resp.id,
+        });
+        return { status: "sent", msg_seq: seq, provider_msg_id: resp.id };
       } catch (e) {
         const biz = extractBizCode(e);
         if (isAuditPendingCode(biz)) {
-          this.deps.repo.updateSendStatus(reservation, 'pending_audit', undefined, biz ?? undefined);
-          return { status: 'pending_audit', msg_seq: seq, detail: t('send_audit_pending', { code: biz ?? 0 }) };
+          this.deps.repo.updateSendStatus(
+            reservation,
+            "pending_audit",
+            undefined,
+            biz ?? undefined,
+          );
+          return {
+            status: "pending_audit",
+            msg_seq: seq,
+            detail: t("send_audit_pending", { code: biz ?? 0 }),
+          };
         }
-        this.deps.repo.updateSendStatus(reservation, 'failed', undefined, biz ?? undefined);
+        this.deps.repo.updateSendStatus(
+          reservation,
+          "failed",
+          undefined,
+          biz ?? undefined,
+        );
         throw e;
       }
     };
@@ -250,8 +318,15 @@ export class Sender {
           throw new Error(describeSendError(e));
         }
         // 304036：Markdown 无模板权限 → 自动降级纯文本（新账本行，失败行不计窗口次数）
-        const result = await send(false, this.deps.repo.nextMsgSeq(botId, replyMsgId));
-        return { ...result, status: 'downgraded', detail: t('send_markdown_downgraded') };
+        const result = await send(
+          false,
+          this.deps.repo.nextMsgSeq(botId, replyMsgId),
+        );
+        return {
+          ...result,
+          status: "downgraded",
+          detail: t("send_markdown_downgraded"),
+        };
       }
     }
     try {
@@ -264,7 +339,11 @@ export class Sender {
 
   // —— 主动消息 ——
 
-  async proactive(botId: string, groupOpenid: string, text: string): Promise<SendResult> {
+  async proactive(
+    botId: string,
+    groupOpenid: string,
+    text: string,
+  ): Promise<SendResult> {
     const app = this.gate(botId, groupOpenid);
     const content = this.checkContent(text);
     const repo = this.deps.repo;
@@ -274,72 +353,113 @@ export class Sender {
     const usedToday = repo.proactiveCountFor(botId, groupOpenid, date);
     if (usedToday >= this.limits.perGroupDaily) {
       throw new Error(
-        t('send_quota_daily', { group: groupOpenid, used: usedToday, limit: this.limits.perGroupDaily }),
+        t("send_quota_daily", {
+          group: groupOpenid,
+          used: usedToday,
+          limit: this.limits.perGroupDaily,
+        }),
       );
     }
 
     // 令牌桶：bot 级 → 单关系级
-    const waitOf = (r: { ok: boolean; waitMs: number }): number => Math.max(1, Math.ceil(r.waitMs / 1000));
+    const waitOf = (r: { ok: boolean; waitMs: number }): number =>
+      Math.max(1, Math.ceil(r.waitMs / 1000));
     const botBucket = this.botBucket(botId);
     const botTake = botBucket.tryTake();
     if (!botTake.ok) {
       throw new Error(
-        t('send_rate_limited_bot', { qpm: this.limits.qpm, level: this.deps.config.authLevel, wait: waitOf(botTake) }),
+        t("send_rate_limited_bot", {
+          qpm: this.limits.qpm,
+          level: this.deps.config.authLevel,
+          wait: waitOf(botTake),
+        }),
       );
     }
     const relTake = this.relationBucket(botId, groupOpenid).tryTake();
     if (!relTake.ok) {
-      throw new Error(t('send_rate_limited_relation', { wait: waitOf(relTake) }));
+      throw new Error(
+        t("send_rate_limited_relation", { wait: waitOf(relTake) }),
+      );
     }
 
     const reservation = repo.insertSend({
       bot_id: botId,
       target_openid: groupOpenid,
-      kind: 'proactive',
+      kind: "proactive",
       reply_msg_id: null,
       msg_seq: null,
       payload_hash: sha256(`text\0${content}`),
-      status: 'reserved',
+      status: "reserved",
     });
     try {
-      const resp = await this.api(app).sendRaw('group', groupOpenid, credsOf(app), { msg_type: 0, content });
-      repo.updateSendStatus(reservation, 'sent', resp.id);
+      const resp = await this.api(app).sendRaw(
+        "group",
+        groupOpenid,
+        credsOf(app),
+        { msg_type: 0, content },
+      );
+      repo.updateSendStatus(reservation, "sent", resp.id);
       repo.incrQuotaDaily(botId, groupOpenid, date);
-      this.log.info('proactive sent', { group: groupOpenid, provider: resp.id });
-      return { status: 'sent', provider_msg_id: resp.id };
+      this.log.info("proactive sent", {
+        group: groupOpenid,
+        provider: resp.id,
+      });
+      return { status: "sent", provider_msg_id: resp.id };
     } catch (e) {
       const biz = extractBizCode(e);
       if (isAuditPendingCode(biz)) {
         // 审核受理同样占用官方当日额度，记账保守 +1
-        repo.updateSendStatus(reservation, 'pending_audit', undefined, biz ?? undefined);
+        repo.updateSendStatus(
+          reservation,
+          "pending_audit",
+          undefined,
+          biz ?? undefined,
+        );
         repo.incrQuotaDaily(botId, groupOpenid, date);
-        return { status: 'pending_audit', detail: t('send_audit_pending', { code: biz ?? 0 }) };
+        return {
+          status: "pending_audit",
+          detail: t("send_audit_pending", { code: biz ?? 0 }),
+        };
       }
-      repo.updateSendStatus(reservation, 'failed', undefined, biz ?? undefined);
+      repo.updateSendStatus(reservation, "failed", undefined, biz ?? undefined);
       throw new Error(describeSendError(e));
     }
   }
 
   // —— 撤回 ——
 
-  async recall(botId: string, groupOpenid: string, messageId: string): Promise<{ recalled: string }> {
+  async recall(
+    botId: string,
+    groupOpenid: string,
+    messageId: string,
+  ): Promise<{ recalled: string }> {
     const app = this.gate(botId, groupOpenid);
     const reservation = this.deps.repo.insertSend({
       bot_id: botId,
       target_openid: groupOpenid,
-      kind: 'recall',
+      kind: "recall",
       reply_msg_id: messageId,
       msg_seq: null,
       payload_hash: sha256(`recall\0${messageId}`),
-      status: 'reserved',
+      status: "reserved",
     });
     try {
-      await this.api(app).recallMessage('group', groupOpenid, messageId, credsOf(app));
-      this.deps.repo.updateSendStatus(reservation, 'sent');
-      this.log.info('message recalled', { group: groupOpenid, messageId });
+      await this.api(app).recallMessage(
+        "group",
+        groupOpenid,
+        messageId,
+        credsOf(app),
+      );
+      this.deps.repo.updateSendStatus(reservation, "sent");
+      this.log.info("message recalled", { group: groupOpenid, messageId });
       return { recalled: messageId };
     } catch (e) {
-      this.deps.repo.updateSendStatus(reservation, 'failed', undefined, extractBizCode(e) ?? undefined);
+      this.deps.repo.updateSendStatus(
+        reservation,
+        "failed",
+        undefined,
+        extractBizCode(e) ?? undefined,
+      );
       throw new Error(describeSendError(e));
     }
   }
@@ -357,7 +477,10 @@ export class Sender {
     return {
       limits: this.limits,
       bot_bucket_remaining: this.botBucket(botId).remaining,
-      today_by_group: allowGroups.map((g) => ({ group: g, used: this.deps.repo.proactiveCountFor(botId, g, date) })),
+      today_by_group: allowGroups.map((g) => ({
+        group: g,
+        used: this.deps.repo.proactiveCountFor(botId, g, date),
+      })),
       relation_remaining: Object.fromEntries(
         allowGroups.map((g) => [g, this.relationBucket(botId, g).remaining]),
       ),
@@ -377,7 +500,10 @@ export class Sender {
     const key = `${appid}:${groupOpenid}`;
     let b = this.relationBuckets.get(key);
     if (b === undefined) {
-      b = new TokenBucket(this.limits.perRelationQpm, this.limits.perRelationQpm);
+      b = new TokenBucket(
+        this.limits.perRelationQpm,
+        this.limits.perRelationQpm,
+      );
       this.relationBuckets.set(key, b);
     }
     return b;
@@ -390,5 +516,5 @@ function credsOf(app: BotApp): { appId: string; clientSecret: string } {
 }
 
 function sha256(s: string): string {
-  return createHash('sha256').update(s).digest('hex');
+  return createHash("sha256").update(s).digest("hex");
 }

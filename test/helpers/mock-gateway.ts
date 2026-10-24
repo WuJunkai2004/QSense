@@ -1,8 +1,8 @@
 // Mock QQ 网关：本机 ws 服务，按官方 op 语义模拟 HELLO/IDENTIFY/READY/心跳/DISPATCH/RESUME/op9/关闭码。
 // 用途：M1 验收——不依赖真实QQ消息即可端到端验证接入器（含断线补发不丢消息）。
 
-import { createServer, type Server } from 'node:http';
-import { WebSocketServer, WebSocket } from 'ws';
+import { createServer, type Server } from "node:http";
+import { WebSocketServer, WebSocket } from "ws";
 
 const OP = {
   DISPATCH: 0,
@@ -41,7 +41,7 @@ export class MockGateway {
   readonly heartbeats: Array<number | null> = [];
 
   private s = 0;
-  private sessionId = '';
+  private sessionId = "";
   private identifyCount = 0;
   private ws: WebSocket | null = null;
   /** 断线期间排队的事件（Resume 后按序补发——官方语义） */
@@ -53,13 +53,15 @@ export class MockGateway {
   constructor(private readonly opts: MockGatewayOptions = {}) {
     this.server = createServer();
     this.wss = new WebSocketServer({ server: this.server });
-    this.wss.on('connection', (ws) => this.onConnection(ws));
+    this.wss.on("connection", (ws) => this.onConnection(ws));
   }
 
   async listen(): Promise<void> {
-    await new Promise<void>((resolve) => this.server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) =>
+      this.server.listen(0, "127.0.0.1", resolve),
+    );
     const addr = this.server.address();
-    this.portValue = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    this.portValue = typeof addr === "object" && addr !== null ? addr.port : 0;
   }
 
   get url(): string {
@@ -87,7 +89,7 @@ export class MockGateway {
 
   /** 模拟官方指定关闭码（如 4004 token 失效） */
   closeWithCode(code: number): void {
-    this.ws?.close(code, 'mock close');
+    this.ws?.close(code, "mock close");
   }
 
   async close(): Promise<void> {
@@ -102,17 +104,17 @@ export class MockGateway {
       op: OP.HELLO,
       d: { heartbeat_interval: this.opts.heartbeatIntervalMs ?? 100 },
     });
-    ws.on('message', (raw) => {
+    ws.on("message", (raw) => {
       try {
         this.onMessage(ws, JSON.parse(String(raw)) as Payload);
       } catch {
         // 非 JSON 帧直接忽略（测试不依赖）
       }
     });
-    ws.on('close', () => {
+    ws.on("close", () => {
       if (this.ws === ws) this.ws = null;
     });
-    ws.on('error', () => {});
+    ws.on("error", () => {});
   }
 
   private onMessage(ws: WebSocket, payload: Payload): void {
@@ -120,27 +122,35 @@ export class MockGateway {
       case OP.IDENTIFY: {
         this.identifyCount += 1;
         const d = payload.d as { token?: string; intents?: number } | undefined;
-        this.identifies.push({ token: d?.token ?? '', intents: d?.intents ?? 0 });
-        if (this.opts.invalidSessionOnFirstIdentify && this.identifyCount === 1) {
+        this.identifies.push({
+          token: d?.token ?? "",
+          intents: d?.intents ?? 0,
+        });
+        if (
+          this.opts.invalidSessionOnFirstIdentify &&
+          this.identifyCount === 1
+        ) {
           this.send(ws, { op: OP.INVALID_SESSION, d: false });
-          ws.close(4000, 'invalid session');
+          ws.close(4000, "invalid session");
           return;
         }
-        this.sessionId = `${this.opts.sessionPrefix ?? 'sess'}-${this.identifyCount}`;
+        this.sessionId = `${this.opts.sessionPrefix ?? "sess"}-${this.identifyCount}`;
         this.s = 0;
         this.send(ws, {
           op: OP.DISPATCH,
-          t: 'READY',
+          t: "READY",
           s: ++this.s,
-          d: { session_id: this.sessionId, user: { id: 'mock-bot' } },
+          d: { session_id: this.sessionId, user: { id: "mock-bot" } },
         });
         break;
       }
       case OP.RESUME: {
-        const d = payload.d as { token?: string; session_id?: string; seq?: number | null } | undefined;
+        const d = payload.d as
+          | { token?: string; session_id?: string; seq?: number | null }
+          | undefined;
         this.resumes.push({
-          token: d?.token ?? '',
-          session_id: d?.session_id ?? '',
+          token: d?.token ?? "",
+          session_id: d?.session_id ?? "",
           seq: d?.seq ?? null,
         });
         this.s = d?.seq ?? 0;
@@ -148,14 +158,14 @@ export class MockGateway {
         for (const ev of this.pending.splice(0)) this.sendDispatch(ev.t, ev.d);
         this.send(ws, {
           op: OP.DISPATCH,
-          t: 'RESUMED',
+          t: "RESUMED",
           s: ++this.s,
           d: { session_id: this.sessionId },
         });
         break;
       }
       case OP.HEARTBEAT: {
-        this.heartbeats.push(typeof payload.d === 'number' ? payload.d : null);
+        this.heartbeats.push(typeof payload.d === "number" ? payload.d : null);
         this.send(ws, { op: OP.HEARTBEAT_ACK });
         break;
       }
