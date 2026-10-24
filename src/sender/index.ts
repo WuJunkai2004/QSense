@@ -267,14 +267,28 @@ export class Sender {
         payload_hash: sha256(`${asMarkdown ? "md" : "text"}\0${content}`),
         status: "reserved",
       });
+      // 官方群聊引用块（2026-03 v2 autogen 文档收录 message_reference，真机实测返回 ext_info.ref_idx）：
+      // 填引用后 QQ 客户端以引用形式展示；ignore_get_message_error=true 兜底——
+      // 原消息详情拉取失败（如被撤回）时仍送达，仅丢失引用样式（送达优先于样式）。
+      const messageReference = {
+        message_id: replyMsgId,
+        ignore_get_message_error: true,
+      };
       const body: Record<string, unknown> = asMarkdown
         ? {
             msg_type: 2,
             markdown: { content },
             msg_id: replyMsgId,
             msg_seq: seq,
+            message_reference: messageReference,
           }
-        : { msg_type: 0, content, msg_id: replyMsgId, msg_seq: seq };
+        : {
+            msg_type: 0,
+            content,
+            msg_id: replyMsgId,
+            msg_seq: seq,
+            message_reference: messageReference,
+          };
       try {
         const resp = await this.api(app).sendRaw(
           "group",
