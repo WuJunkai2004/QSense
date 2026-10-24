@@ -132,7 +132,13 @@ export default function App() {
               if (r.messages.length === 0) return;
               setMessages((prev) => [
                 ...prev,
-                ...r.messages.filter((n) => !prev.some((p) => p.rid === n.rid)),
+                // rid 去重（服务端重复推送）+ msg_id 去重（本机外发的乐观行已带官方 msg_id）
+                ...r.messages.filter(
+                  (n) =>
+                    !prev.some(
+                      (p) => p.rid === n.rid || (n.msg_id !== "" && p.msg_id === n.msg_id),
+                    ),
+                ),
               ]);
             })
             .catch(() => undefined);
@@ -227,6 +233,15 @@ export default function App() {
             ? "回复已送达"
             : "主动消息已送达",
       );
+      // 把官方返回的消息 ID 写回乐观行：之后 4s 轮询按 msg_id 去重，不会出现双气泡
+      const msgId = r.result.provider_msg_id;
+      if (msgId !== undefined && msgId !== "") {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.rid === pending.rid ? { ...m, msg_id: msgId, out: true, pending: false } : m,
+          ),
+        );
+      }
       loadSide();
       loadQuota();
     } catch (e) {

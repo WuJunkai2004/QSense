@@ -151,7 +151,7 @@ export default function ChatView(props: Props) {
               </div>
             )}
             {messages.map((m) => {
-              const self = m.pending === true;
+              const self = m.pending === true || m.out === true;
               return (
                 <div key={m.msg_id !== "" ? m.msg_id : `pending-${m.rid}`} className={`msg-row${self ? " self" : ""}`}>
                   <Avatar
@@ -165,7 +165,7 @@ export default function ChatView(props: Props) {
                   <div className="bubble-wrap">
                     <div className="bubble-meta">
                       {self ? (
-                        <span>{botName}（本机发送）</span>
+                        <span>{botName}</span>
                       ) : (
                         <>
                           <span>{m.author.name ?? m.author.openid ?? "未知"}</span>
@@ -178,7 +178,6 @@ export default function ChatView(props: Props) {
                       {m.content !== null && m.content !== "" ? m.content : "（无文本内容）"}
                       {m.has_attachments && <span className="attach-tag">[图片/文件]</span>}
                       {m.has_ark && <span className="attach-tag">[卡片]</span>}
-                      {self && <span className="attach-tag">[仅本机显示]</span>}
                     </div>
                     {!self && (
                       <div style={{ marginTop: 2 }}>

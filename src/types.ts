@@ -48,6 +48,8 @@ export interface MsgItem {
   has_elements: boolean;
   /** 本机乐观追加的发送消息（仅存在于前端会话内） */
   pending?: boolean;
+  /** 本机外发消息（服务端发送成功后已落库，刷新后仍在） */
+  out?: boolean;
 }
 
 export interface MemberItem {
