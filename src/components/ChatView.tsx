@@ -34,6 +34,11 @@ function replyExpired(m: MsgItem): boolean {
   return Date.now() - new Date(m.ts).getTime() > REPLY_WINDOW_MS;
 }
 
+/** 本机行（乐观上屏/外发补记）不能作为被动回复目标 */
+function isSelfRow(m: MsgItem): boolean {
+  return m.pending === true || m.out === true;
+}
+
 /** 聊天主区：群头 + 消息流（QQ 风格气泡）+ 发送框（被动回复 / 主动消息） */
 export default function ChatView(props: Props) {
   const { boot, botName, botAppid, group, messages, hasMore, busyOlder, onLoadOlder, onSend, onShowDetail } = props;
@@ -97,19 +102,38 @@ export default function ChatView(props: Props) {
     groupOpenid !== null &&
     boot.allow_groups.includes(groupOpenid);
 
+  // 智能默认：无显式引用目标时，自动引用回复窗口内最新一条入站消息（被动，不耗主动额度）。
+  // 官方每条群消息最多被动回复 5 次：本地计数防止自动回复把同一目标的槽位耗尽，超额自动降级主动发送。
+  const replyCountRef = useRef(new Map<string, number>());
+  const autoTarget = ((): MsgItem | null => {
+    const latest = [...messages].reverse().find((m) => !isSelfRow(m));
+    if (
+      latest === undefined ||
+      replyExpired(latest) ||
+      (replyCountRef.current.get(latest.msg_id) ?? 0) >= 5
+    ) {
+      return null;
+    }
+    return latest;
+  })();
+
   const doSend = async (): Promise<void> => {
     const t = text.trim();
     if (t === "" || groupOpenid === null || sending) return;
-    // 兜底校验：回复目标出窗时不打服务端（渲染间隙内过期的行按钮仍是可点状态）
+    // 兜底校验：显式引用目标出窗时不打服务端（渲染间隙内过期的行按钮仍是可点状态）
     if (replyTo !== null && replyExpired(replyTo)) {
       void msg.warning(
         "引用的消息已超过 5 分钟被动回复窗口（官方限制），无法被动回复；可取消引用后直接作为主动消息发送。",
       );
       return;
     }
+    const target = replyTo ?? autoTarget;
     setSending(true);
     try {
-      await onSend(t, replyTo?.msg_id ?? null);
+      await onSend(t, target?.msg_id ?? null);
+      if (target !== null) {
+        replyCountRef.current.set(target.msg_id, (replyCountRef.current.get(target.msg_id) ?? 0) + 1);
+      }
       setText("");
       setReplyTo(null);
       pinBottom.current = true;
@@ -218,7 +242,7 @@ export default function ChatView(props: Props) {
                               style={{ color: "#9aa0a8", fontSize: 12 }}
                               onClick={() => setReplyTo(m)}
                             >
-                              回复
+                              引用
                             </Button>
                           </span>
                         </Tooltip>
@@ -233,14 +257,23 @@ export default function ChatView(props: Props) {
       </div>
 
       <div className="send-box">
-        {replyTo !== null && (
+        {replyTo !== null ? (
           <div className="reply-banner">
             <RollbackOutlined />
             <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              回复 {replyTo.author.name ?? "?"}：{(replyTo.content ?? "").slice(0, 40)}
+              引用 {replyTo.author.name ?? "?"}：{(replyTo.content ?? "").slice(0, 40)}
             </span>
             <a onClick={() => setReplyTo(null)}>取消</a>
           </div>
+        ) : (
+          autoTarget !== null && (
+            <div className="reply-banner auto">
+              <RollbackOutlined />
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                发送将自动引用回复 {autoTarget.author.name ?? "?"} 的最新消息（被动回复，不消耗主动额度）
+              </span>
+            </div>
+          )
         )}
         {groupOpenid !== null && !sendAllowed && (
           <Alert
@@ -258,7 +291,13 @@ export default function ChatView(props: Props) {
           <Input.TextArea
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder={replyTo !== null ? "被动回复（不消耗主动额度，5 分钟窗口）…" : "主动消息（消耗额度：bot 级 30/60 每分钟、单群 20 每分钟、1000/天）…"}
+            placeholder={
+              replyTo !== null
+                ? "引用回复（被动，不消耗主动额度，5 分钟窗口）…"
+                : autoTarget !== null
+                  ? `发送 = 自动引用回复 ${autoTarget.author.name ?? "?"}（被动，不消耗主动额度）…`
+                  : "主动消息（消耗额度：bot 级 30/60 每分钟、单群 20 每分钟、1000/天）…"
+            }
             autoSize={{ minRows: 1, maxRows: 4 }}
             disabled={groupOpenid === null}
             onPressEnter={(e) => {
