@@ -9,6 +9,7 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  overflow: hidden; /* 视口锁死：任何滚动都发生在内部面板，不整页滚 */
   font-family:
     -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
     "Segoe UI", sans-serif;
@@ -85,11 +86,11 @@ body,
 .session-pane {
   width: 248px;
   flex: none;
+  min-height: 0;
   background: #f7f8fa;
   border-right: 1px solid #e5e6eb;
   display: flex;
   flex-direction: column;
-  min-height: 0;
 }
 .session-pane .search {
   padding: 10px;
@@ -97,7 +98,9 @@ body,
 }
 .session-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .session-item {
   display: flex;
@@ -146,6 +149,8 @@ body,
 .chat-pane {
   flex: 1;
   min-width: 0;
+  min-height: 0; /* 纵向 flex 链关键：允许收缩，滚动收敛到 message-list */
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   background: #f5f6f8;
@@ -165,7 +170,9 @@ body,
 }
 .message-list {
   flex: 1;
+  min-height: 0; /* flex 收缩许可：内容再长也只有这一块滚 */
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 12px 0 4px;
 }
 .load-older {
