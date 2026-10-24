@@ -11,7 +11,12 @@ interface Props {
 }
 
 /** 消息详情抽屉：展开文本/提及/附件/卡片/官方原始载荷——智能体（MCP 工具）所见即所得 */
-export default function MessageDetailDrawer({ bot, group, msg, onClose }: Props) {
+export default function MessageDetailDrawer({
+  bot,
+  group,
+  msg,
+  onClose,
+}: Props) {
   const { message: tip } = AntApp.useApp();
   const [detail, setDetail] = useState<MessageDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -24,13 +29,20 @@ export default function MessageDetailDrawer({ bot, group, msg, onClose }: Props)
       `/message?bot=${encodeURIComponent(bot)}&group=${encodeURIComponent(group)}&msg_id=${encodeURIComponent(msg.msg_id)}`,
     )
       .then(setDetail)
-      .catch((e: unknown) => void tip.error(e instanceof Error ? e.message : String(e)))
+      .catch(
+        (e: unknown) =>
+          void tip.error(e instanceof Error ? e.message : String(e)),
+      )
       .finally(() => setLoading(false));
   }, [bot, group, msg, tip]);
 
   return (
     <Drawer
-      title={msg !== null ? `消息详情 · ${msg.author.name ?? msg.author.openid ?? "?"}` : ""}
+      title={
+        msg !== null
+          ? `消息详情 · ${msg.author.name ?? msg.author.openid ?? "?"}`
+          : ""
+      }
       open={msg !== null}
       onClose={onClose}
       width={520}

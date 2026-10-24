@@ -12,7 +12,10 @@ export default function Login({ version, onReady }: Props) {
   const { message } = AntApp.useApp();
   return (
     <div className="login-wrap">
-      <Card style={{ width: 360 }} title={<span>🤖 QQ Bot 网关{version ? ` v${version}` : ""}</span>}>
+      <Card
+        style={{ width: 360 }}
+        title={<span>🤖 QQ Bot 网关{version ? ` v${version}` : ""}</span>}
+      >
         <Form
           layout="vertical"
           onFinish={async (v: { token?: string }) => {
@@ -39,7 +42,9 @@ export default function Login({ version, onReady }: Props) {
               onReady((await res.json()) as Bootstrap);
             } catch (e) {
               clearToken();
-              void message.error(`无法连接服务：${e instanceof Error ? e.message : String(e)}`);
+              void message.error(
+                `无法连接服务：${e instanceof Error ? e.message : String(e)}`,
+              );
             }
           }}
         >
@@ -48,7 +53,10 @@ export default function Login({ version, onReady }: Props) {
             label="MCP_TOKEN"
             rules={[{ required: true, message: "粘贴 .env 里的 MCP_TOKEN" }]}
           >
-            <Input.Password placeholder="MCP_TOKEN（与服务端 .env 一致）" autoFocus />
+            <Input.Password
+              placeholder="MCP_TOKEN（与服务端 .env 一致）"
+              autoFocus
+            />
           </Form.Item>
           <Button type="primary" htmlType="submit" block>
             登录

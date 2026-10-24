@@ -1,6 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Alert, Avatar, Button, Input, Modal, Spin, Tag, Tooltip, App as AntApp } from "antd";
-import { EditOutlined, RollbackOutlined, SendOutlined } from "@ant-design/icons";
+import {
+  Alert,
+  Avatar,
+  Button,
+  Input,
+  Modal,
+  Spin,
+  Tag,
+  Tooltip,
+  App as AntApp,
+} from "antd";
+import {
+  EditOutlined,
+  RollbackOutlined,
+  SendOutlined,
+} from "@ant-design/icons";
 import dayjs from "dayjs";
 import type { Bootstrap, GroupItem, MsgItem } from "../types";
 import { getAlias, setAlias } from "../api";
@@ -15,13 +29,19 @@ interface Props {
   hasMore: boolean;
   busyOlder: boolean;
   onLoadOlder: () => void;
-  onSend: (text: string, replyMsgId: string | null, quote: boolean) => Promise<void>;
+  onSend: (
+    text: string,
+    replyMsgId: string | null,
+    quote: boolean,
+  ) => Promise<void>;
   onShowDetail: (m: MsgItem) => void;
 }
 
 function RoleTag({ role }: { role: string | null }) {
-  if (role === "owner") return <span className="role-tag role-owner">群主</span>;
-  if (role === "admin") return <span className="role-tag role-admin">管理员</span>;
+  if (role === "owner")
+    return <span className="role-tag role-owner">群主</span>;
+  if (role === "admin")
+    return <span className="role-tag role-admin">管理员</span>;
   return null;
 }
 
@@ -41,7 +61,18 @@ function isSelfRow(m: MsgItem): boolean {
 
 /** 聊天主区：群头 + 消息流（QQ 风格气泡）+ 发送框（被动回复 / 主动消息） */
 export default function ChatView(props: Props) {
-  const { boot, botName, botAppid, group, messages, hasMore, busyOlder, onLoadOlder, onSend, onShowDetail } = props;
+  const {
+    boot,
+    botName,
+    botAppid,
+    group,
+    messages,
+    hasMore,
+    busyOlder,
+    onLoadOlder,
+    onSend,
+    onShowDetail,
+  } = props;
   const { message: msg } = AntApp.useApp();
   const [text, setText] = useState("");
   const [replyTo, setReplyTo] = useState<MsgItem | null>(null);
@@ -63,7 +94,8 @@ export default function ChatView(props: Props) {
     if (el === null) return;
     const first = messages[0];
     const prev = prevFirstRef.current;
-    prevFirstRef.current = first !== undefined ? { rid: first.rid, height: el.scrollHeight } : null;
+    prevFirstRef.current =
+      first !== undefined ? { rid: first.rid, height: el.scrollHeight } : null;
     if (pinBottom.current) {
       el.scrollTop = el.scrollHeight;
     } else if (prev !== null && first !== undefined && first.rid !== prev.rid) {
@@ -96,7 +128,11 @@ export default function ChatView(props: Props) {
   const groupOpenid = group?.group_openid ?? null;
   const alias = groupOpenid !== null ? getAlias(groupOpenid) : "";
   const title =
-    groupOpenid === null ? "" : alias !== "" ? alias : `群 ${groupOpenid.slice(0, 12)}…`;
+    groupOpenid === null
+      ? ""
+      : alias !== ""
+        ? alias
+        : `群 ${groupOpenid.slice(0, 12)}…`;
   const sendAllowed =
     boot.send_enabled === true &&
     groupOpenid !== null &&
@@ -133,7 +169,10 @@ export default function ChatView(props: Props) {
       // 显式「引用」→ 被动回复附带官方引用块；智能默认 → 纯回复（仅窗口绑定，不带引用块）
       await onSend(t, target?.msg_id ?? null, replyTo !== null);
       if (target !== null) {
-        replyCountRef.current.set(target.msg_id, (replyCountRef.current.get(target.msg_id) ?? 0) + 1);
+        replyCountRef.current.set(
+          target.msg_id,
+          (replyCountRef.current.get(target.msg_id) ?? 0) + 1,
+        );
       }
       setText("");
       setReplyTo(null);
@@ -149,8 +188,14 @@ export default function ChatView(props: Props) {
     <div className="chat-pane">
       <div className="chat-header">
         <span className="g-name">{title}</span>
-        {group !== null && <span style={{ color: "#9aa0a8", fontSize: 12 }}>{group.member_count} 位成员</span>}
-        {group !== null && group.full_msg_enabled === false && <Tag color="orange">全量消息受限</Tag>}
+        {group !== null && (
+          <span style={{ color: "#9aa0a8", fontSize: 12 }}>
+            {group.member_count} 位成员
+          </span>
+        )}
+        {group !== null && group.full_msg_enabled === false && (
+          <Tag color="orange">全量消息受限</Tag>
+        )}
         <span className="spacer" style={{ flex: 1 }} />
         {groupOpenid !== null && (
           <Tooltip title="设置备注名（仅本机浏览器）">
@@ -172,7 +217,8 @@ export default function ChatView(props: Props) {
         ref={listRef}
         onScroll={(e) => {
           const el = e.currentTarget;
-          pinBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+          pinBottom.current =
+            el.scrollHeight - el.scrollTop - el.clientHeight < 60;
         }}
       >
         {groupOpenid === null ? (
@@ -184,26 +230,40 @@ export default function ChatView(props: Props) {
                 {busyOlder ? (
                   <Spin size="small" />
                 ) : (
-                  <span style={{ color: "#9aa0a8", fontSize: 12 }}>上滑加载更早…</span>
+                  <span style={{ color: "#9aa0a8", fontSize: 12 }}>
+                    上滑加载更早…
+                  </span>
                 )}
               </div>
             )}
             {!hasMore && messages.length > 0 && (
               <div className="load-older">
-                <span style={{ color: "#c3c8cf", fontSize: 12 }}>没有更早的消息了</span>
+                <span style={{ color: "#c3c8cf", fontSize: 12 }}>
+                  没有更早的消息了
+                </span>
               </div>
             )}
             {messages.map((m) => {
               const self = m.pending === true || m.out === true;
               const expired = self ? false : replyExpired(m);
               return (
-                <div key={m.msg_id !== "" ? m.msg_id : `pending-${m.rid}`} className={`msg-row${self ? " self" : ""}`}>
+                <div
+                  key={m.msg_id !== "" ? m.msg_id : `pending-${m.rid}`}
+                  className={`msg-row${self ? " self" : ""}`}
+                >
                   <Avatar
                     className="avatar"
                     shape="square"
                     size={34}
-                    style={{ borderRadius: 8, background: self ? "#0099ff" : "#c9d4e0" }}
-                    src={!self && m.author.openid ? qqAvatar(botAppid, m.author.openid) : undefined}
+                    style={{
+                      borderRadius: 8,
+                      background: self ? "#0099ff" : "#c9d4e0",
+                    }}
+                    src={
+                      !self && m.author.openid
+                        ? qqAvatar(botAppid, m.author.openid)
+                        : undefined
+                    }
                   >
                     {(self ? botName : (m.author.name ?? "?")).slice(0, 1)}
                   </Avatar>
@@ -213,15 +273,23 @@ export default function ChatView(props: Props) {
                         <span>{botName}</span>
                       ) : (
                         <>
-                          <span>{m.author.name ?? m.author.openid ?? "未知"}</span>
+                          <span>
+                            {m.author.name ?? m.author.openid ?? "未知"}
+                          </span>
                           <RoleTag role={m.author.role} />
                         </>
                       )}
-                      <span>{m.ts !== null ? dayjs(m.ts).format("MM-DD HH:mm") : ""}</span>
+                      <span>
+                        {m.ts !== null ? dayjs(m.ts).format("MM-DD HH:mm") : ""}
+                      </span>
                     </div>
                     <div className="bubble" onClick={() => onShowDetail(m)}>
-                      {m.content !== null && m.content !== "" ? m.content : "（无文本内容）"}
-                      {m.has_attachments && <span className="attach-tag">[图片/文件]</span>}
+                      {m.content !== null && m.content !== ""
+                        ? m.content
+                        : "（无文本内容）"}
+                      {m.has_attachments && (
+                        <span className="attach-tag">[图片/文件]</span>
+                      )}
                       {m.has_ark && <span className="attach-tag">[卡片]</span>}
                     </div>
                     {!self && (
@@ -261,8 +329,16 @@ export default function ChatView(props: Props) {
         {replyTo !== null ? (
           <div className="reply-banner">
             <RollbackOutlined />
-            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              引用 {replyTo.author.name ?? "?"}：{(replyTo.content ?? "").slice(0, 40)}
+            <span
+              style={{
+                flex: 1,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              引用 {replyTo.author.name ?? "?"}：
+              {(replyTo.content ?? "").slice(0, 40)}
             </span>
             <a onClick={() => setReplyTo(null)}>取消</a>
           </div>
@@ -270,8 +346,16 @@ export default function ChatView(props: Props) {
           autoTarget !== null && (
             <div className="reply-banner auto">
               <RollbackOutlined />
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                发送将自动回复 {autoTarget.author.name ?? "?"} 的最新消息（被动回复，不消耗主动额度）
+              <span
+                style={{
+                  flex: 1,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                发送将自动回复 {autoTarget.author.name ?? "?"}{" "}
+                的最新消息（被动回复，不消耗主动额度）
               </span>
             </div>
           )
@@ -334,7 +418,11 @@ export default function ChatView(props: Props) {
         okText="保存"
         cancelText="取消"
       >
-        <Input value={aliasDraft} onChange={(e) => setAliasDraft(e.target.value)} placeholder={`原始：${groupOpenid ?? ""}`} />
+        <Input
+          value={aliasDraft}
+          onChange={(e) => setAliasDraft(e.target.value)}
+          placeholder={`原始：${groupOpenid ?? ""}`}
+        />
       </Modal>
     </div>
   );

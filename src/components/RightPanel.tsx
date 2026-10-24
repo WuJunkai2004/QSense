@@ -1,4 +1,15 @@
-import { Avatar, Button, Descriptions, Empty, List, Statistic, Tabs, Tag, Tooltip, App as AntApp } from "antd";
+import {
+  Avatar,
+  Button,
+  Descriptions,
+  Empty,
+  List,
+  Statistic,
+  Tabs,
+  Tag,
+  Tooltip,
+  App as AntApp,
+} from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import type { GroupItem, MemberItem, QuotaInfo, SendItem } from "../types";
@@ -27,7 +38,14 @@ const SEND_STATUS: Record<string, { color: string; text: string }> = {
 };
 
 /** 右栏（智能体视角）：群资料与成员名册 / 发送账本 / 额度水位 */
-export default function RightPanel({ group, botAppid, members, sends, quota, onRefresh }: Props) {
+export default function RightPanel({
+  group,
+  botAppid,
+  members,
+  sends,
+  quota,
+  onRefresh,
+}: Props) {
   const { message: msg } = AntApp.useApp();
   return (
     <div className="right-panel">
@@ -39,7 +57,10 @@ export default function RightPanel({ group, botAppid, members, sends, quota, onR
             label: "群资料",
             children:
               group === null ? (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未选择群" />
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="未选择群"
+                />
               ) : (
                 <>
                   <Descriptions
@@ -72,14 +93,35 @@ export default function RightPanel({ group, botAppid, members, sends, quota, onR
                       {
                         key: "full",
                         label: "全量消息",
-                        children: group.full_msg_enabled === true ? <Tag color="green">开启</Tag> : <Tag color="orange">受限</Tag>,
+                        children:
+                          group.full_msg_enabled === true ? (
+                            <Tag color="green">开启</Tag>
+                          ) : (
+                            <Tag color="orange">受限</Tag>
+                          ),
                       },
-                      { key: "count", label: "成员数（自建名册）", children: group.member_count },
+                      {
+                        key: "count",
+                        label: "成员数（自建名册）",
+                        children: group.member_count,
+                      },
                     ]}
                   />
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "10px 0 4px" }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      margin: "10px 0 4px",
+                    }}
+                  >
                     <b style={{ fontSize: 13 }}>成员名册</b>
-                    <Button size="small" type="text" icon={<ReloadOutlined />} onClick={onRefresh} />
+                    <Button
+                      size="small"
+                      type="text"
+                      icon={<ReloadOutlined />}
+                      onClick={onRefresh}
+                    />
                   </div>
                   <List
                     size="small"
@@ -95,9 +137,15 @@ export default function RightPanel({ group, botAppid, members, sends, quota, onR
                           >
                             {(m.username ?? "?").slice(0, 1)}
                           </Avatar>
-                          <span className="m-name">{m.username ?? m.member_openid}</span>
-                          {m.member_role === "owner" && <span className="role-tag role-owner">群主</span>}
-                          {m.member_role === "admin" && <span className="role-tag role-admin">管理员</span>}
+                          <span className="m-name">
+                            {m.username ?? m.member_openid}
+                          </span>
+                          {m.member_role === "owner" && (
+                            <span className="role-tag role-owner">群主</span>
+                          )}
+                          {m.member_role === "admin" && (
+                            <span className="role-tag role-admin">管理员</span>
+                          )}
                           <span className="m-count">{m.msg_count} 条</span>
                         </div>
                       </List.Item>
@@ -111,25 +159,47 @@ export default function RightPanel({ group, botAppid, members, sends, quota, onR
             label: "发送记录",
             children: (
               <>
-                <div style={{ fontSize: 12, color: "#9aa0a8", marginBottom: 6 }}>
+                <div
+                  style={{ fontSize: 12, color: "#9aa0a8", marginBottom: 6 }}
+                >
                   发送账本（含审核回填状态；仅存 openid 与结果，不含内容）
                 </div>
-                {sends.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无发送" />}
+                {sends.length === 0 && (
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="暂无发送"
+                  />
+                )}
                 {sends.map((s) => {
-                  const st = SEND_STATUS[s.status] ?? { color: "default", text: s.status };
+                  const st = SEND_STATUS[s.status] ?? {
+                    color: "default",
+                    text: s.status,
+                  };
                   return (
                     <div key={s.id} className="send-row">
                       <div className="row1">
                         <Tag color={st.color} style={{ marginRight: 0 }}>
                           {st.text}
                         </Tag>
-                        <span>{s.kind === "reply" ? "被动回复" : "主动消息"}</span>
-                        <span className="muted">{s.created_at !== null ? dayjs(s.created_at).format("MM-DD HH:mm") : ""}</span>
+                        <span>
+                          {s.kind === "reply" ? "被动回复" : "主动消息"}
+                        </span>
+                        <span className="muted">
+                          {s.created_at !== null
+                            ? dayjs(s.created_at).format("MM-DD HH:mm")
+                            : ""}
+                        </span>
                       </div>
                       <div className="muted">
                         {s.msg_seq !== null && <>msg_seq={s.msg_seq} · </>}
-                        {s.provider_msg_id !== null && <>官方ID {s.provider_msg_id.slice(0, 18)}… · </>}
-                        {s.error_code !== null && <span style={{ color: "#ff4d4f" }}>错误码 {s.error_code}</span>}
+                        {s.provider_msg_id !== null && (
+                          <>官方ID {s.provider_msg_id.slice(0, 18)}… · </>
+                        )}
+                        {s.error_code !== null && (
+                          <span style={{ color: "#ff4d4f" }}>
+                            错误码 {s.error_code}
+                          </span>
+                        )}
                       </div>
                     </div>
                   );
@@ -142,19 +212,38 @@ export default function RightPanel({ group, botAppid, members, sends, quota, onR
             label: "额度",
             children:
               quota === null ? (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未选择 bot/群" />
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="未选择 bot/群"
+                />
               ) : (
                 <>
-                  <Statistic title="今日主动消息已发" value={quota.proactive_sent_today} suffix="/ 1000" />
+                  <Statistic
+                    title="今日主动消息已发"
+                    value={quota.proactive_sent_today}
+                    suffix="/ 1000"
+                  />
                   <div style={{ margin: "10px 0 6px" }}>
                     <Tag color={quota.send_enabled === true ? "green" : "red"}>
                       发送{quota.send_enabled === true ? "已开启" : "已关闭"}
                     </Tag>
-                    <Tag color="blue">{quota.auth_level === "certified" ? "已认证 60/min" : "未认证 30/min"}</Tag>
+                    <Tag color="blue">
+                      {quota.auth_level === "certified"
+                        ? "已认证 60/min"
+                        : "未认证 30/min"}
+                    </Tag>
                   </div>
                   {quota.buckets !== undefined && (
                     <>
-                      <div style={{ fontSize: 12, color: "#9aa0a8", margin: "8px 0 4px" }}>令牌桶快照（JSON）</div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "#9aa0a8",
+                          margin: "8px 0 4px",
+                        }}
+                      >
+                        令牌桶快照（JSON）
+                      </div>
                       <pre className="json-pre" style={{ maxHeight: 200 }}>
                         {JSON.stringify(quota.buckets, null, 2)}
                       </pre>

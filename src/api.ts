@@ -23,7 +23,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/ui/api${path}`, {
     ...init,
     headers: {
-      ...(init?.body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(init?.body !== undefined
+        ? { "Content-Type": "application/json" }
+        : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init?.headers,
     },
@@ -44,10 +46,10 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export const get = <T,>(path: string): Promise<T> => api<T>(path);
-export const post = <T,>(path: string, body: unknown): Promise<T> =>
+export const get = <T>(path: string): Promise<T> => api<T>(path);
+export const post = <T>(path: string, body: unknown): Promise<T> =>
   api<T>(path, { method: "POST", body: JSON.stringify(body) });
-export const del = <T,>(path: string): Promise<T> =>
+export const del = <T>(path: string): Promise<T> =>
   api<T>(path, { method: "DELETE" });
 
 // —— 本地偏好（群备注名 / 记住的 bot） ——
@@ -55,7 +57,8 @@ export const del = <T,>(path: string): Promise<T> =>
 export const getAlias = (groupOpenid: string): string =>
   localStorage.getItem(`qqgateway.alias.${groupOpenid}`) ?? "";
 export const setAlias = (groupOpenid: string, alias: string): void => {
-  if (alias.trim() === "") localStorage.removeItem(`qqgateway.alias.${groupOpenid}`);
+  if (alias.trim() === "")
+    localStorage.removeItem(`qqgateway.alias.${groupOpenid}`);
   else localStorage.setItem(`qqgateway.alias.${groupOpenid}`, alias.trim());
 };
 export const getLastBot = (): string | null =>

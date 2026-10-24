@@ -43,14 +43,18 @@ export default function AddBotModal({ open, onClose, onAdded }: Props) {
         <Form.Item
           name="appid"
           label="AppID"
-          rules={[{ required: true, message: "q.qq.com → 开发设置 里的 AppID" }]}
+          rules={[
+            { required: true, message: "q.qq.com → 开发设置 里的 AppID" },
+          ]}
         >
           <Input placeholder="开放平台 AppID（数字）" />
         </Form.Item>
         <Form.Item
           name="secret"
           label="AppSecret"
-          rules={[{ required: true, message: "q.qq.com → 开发设置 里的 AppSecret" }]}
+          rules={[
+            { required: true, message: "q.qq.com → 开发设置 里的 AppSecret" },
+          ]}
         >
           <Input.Password placeholder="AppSecret（保存于服务端 SQLite，详见安全说明）" />
         </Form.Item>

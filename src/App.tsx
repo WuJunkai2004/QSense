@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useReducer, useState } from "react";
 import { Badge, Button, Spin, Tag, App as AntApp } from "antd";
-import { clearToken, getLastBot, getToken, setLastBot, get, post, UNAUTHORIZED_EVENT } from "./api";
+import {
+  clearToken,
+  getLastBot,
+  getToken,
+  setLastBot,
+  get,
+  post,
+  UNAUTHORIZED_EVENT,
+} from "./api";
 import type {
   Bootstrap,
   GroupItem,
@@ -71,7 +79,8 @@ export default function App() {
   // currentBot 失效（被移除/不存在）→ 落到第一个
   useEffect(() => {
     if (boot === null) return;
-    if (currentBot !== null && boot.bots.some((b) => b.appid === currentBot)) return;
+    if (currentBot !== null && boot.bots.some((b) => b.appid === currentBot))
+      return;
     const first = boot.bots[0]?.appid ?? null;
     setCurrentBot(first);
     if (first !== null) setLastBot(first);
@@ -96,12 +105,16 @@ export default function App() {
       if (currentGroup !== null) setCurrentGroup(null);
       return;
     }
-    if (currentGroup === null || !groups.some((g) => g.group_openid === currentGroup)) {
+    if (
+      currentGroup === null ||
+      !groups.some((g) => g.group_openid === currentGroup)
+    ) {
       setCurrentGroup(groups[0].group_openid);
     }
   }, [groups, currentGroup]);
 
-  const currentGroupItem = groups.find((g) => g.group_openid === currentGroup) ?? null;
+  const currentGroupItem =
+    groups.find((g) => g.group_openid === currentGroup) ?? null;
 
   // 消息：切群拉最新页
   useEffect(() => {
@@ -123,7 +136,10 @@ export default function App() {
     if (boot === null || currentBot === null || currentGroup === null) return;
     const t = setInterval(() => {
       setMessages((cur) => {
-        const lastRid = cur.reduce((a, m) => (m.rid > a && m.pending !== true ? m.rid : a), 0);
+        const lastRid = cur.reduce(
+          (a, m) => (m.rid > a && m.pending !== true ? m.rid : a),
+          0,
+        );
         if (lastRid > 0) {
           get<{ messages: MsgItem[] }>(
             `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}&after=${lastRid}&limit=100`,
@@ -136,7 +152,9 @@ export default function App() {
                 ...r.messages.filter(
                   (n) =>
                     !prev.some(
-                      (p) => p.rid === n.rid || (n.msg_id !== "" && p.msg_id === n.msg_id),
+                      (p) =>
+                        p.rid === n.rid ||
+                        (n.msg_id !== "" && p.msg_id === n.msg_id),
                     ),
                 ),
               ]);
@@ -150,7 +168,13 @@ export default function App() {
   }, [boot, currentBot, currentGroup]);
 
   const loadOlder = async (): Promise<void> => {
-    if (boot === null || currentBot === null || currentGroup === null || messages.length === 0) return;
+    if (
+      boot === null ||
+      currentBot === null ||
+      currentGroup === null ||
+      messages.length === 0
+    )
+      return;
     setBusyOlder(true);
     try {
       const before = messages[0].rid;
@@ -204,9 +228,14 @@ export default function App() {
   }, [loadQuota]);
 
   // 发送：乐观追加（成功保留标记本机、失败移除），账本/额度即时刷新
-  const handleSend = async (text: string, replyMsgId: string | null, quote: boolean = false): Promise<void> => {
+  const handleSend = async (
+    text: string,
+    replyMsgId: string | null,
+    quote: boolean = false,
+  ): Promise<void> => {
     if (boot === null || currentBot === null || currentGroup === null) return;
-    const botName = boot.bots.find((b) => b.appid === currentBot)?.name ?? currentBot;
+    const botName =
+      boot.bots.find((b) => b.appid === currentBot)?.name ?? currentBot;
     const pending: MsgItem = {
       rid: -Date.now(),
       msg_id: "",
@@ -238,7 +267,9 @@ export default function App() {
       if (msgId !== undefined && msgId !== "") {
         setMessages((prev) =>
           prev.map((m) =>
-            m.rid === pending.rid ? { ...m, msg_id: msgId, out: true, pending: false } : m,
+            m.rid === pending.rid
+              ? { ...m, msg_id: msgId, out: true, pending: false }
+              : m,
           ),
         );
       }
@@ -260,7 +291,10 @@ export default function App() {
 
   if (checking) {
     return (
-      <div className="empty-hint" style={{ height: "100%", flexDirection: "column", gap: 12 }}>
+      <div
+        className="empty-hint"
+        style={{ height: "100%", flexDirection: "column", gap: 12 }}
+      >
         <Spin />
         <span>连接网关…</span>
       </div>
@@ -295,10 +329,13 @@ export default function App() {
         <Tag color={boot.send_enabled === true ? "green" : "red"}>
           发送{boot.send_enabled === true ? "开" : "关"}
         </Tag>
-        <Tag color="blue">{boot.auth_level === "certified" ? "已认证" : "未认证"}</Tag>
+        <Tag color="blue">
+          {boot.auth_level === "certified" ? "已认证" : "未认证"}
+        </Tag>
         <span className="spacer" />
         <span style={{ color: "#9aa0a8", fontSize: 12 }}>
-          运行 {Math.floor(boot.uptime_s / 60)} 分钟 · 白名单 {boot.allow_groups.length} 群
+          运行 {Math.floor(boot.uptime_s / 60)} 分钟 · 白名单{" "}
+          {boot.allow_groups.length} 群
         </span>
         <Button size="small" onClick={logout}>
           退出
@@ -322,7 +359,7 @@ export default function App() {
         />
         <ChatView
           boot={boot}
-          botName={bot?.name ?? (currentBot ?? "")}
+          botName={bot?.name ?? currentBot ?? ""}
           botAppid={currentBot ?? ""}
           group={currentGroupItem}
           messages={messages}

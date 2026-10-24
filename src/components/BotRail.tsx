@@ -20,7 +20,14 @@ const STATE_COLOR: Record<string, string> = {
   unknown: "#bfbfbf",
 };
 
-const AVATAR_BG = ["#0099ff", "#722ed1", "#13c2c2", "#eb2f96", "#fa8c16", "#52c41a"];
+const AVATAR_BG = [
+  "#0099ff",
+  "#722ed1",
+  "#13c2c2",
+  "#eb2f96",
+  "#fa8c16",
+  "#52c41a",
+];
 
 function gatewayText(state: string): string {
   switch (state) {
@@ -71,7 +78,13 @@ export default function BotRail({ bots, current, onSelect, onRefresh }: Props) {
             items:
               b.dynamic === true
                 ? [{ key: "remove", label: "移除该机器人", danger: true }]
-                : [{ key: "info", label: "QQ_APPS 配置 bot（不可在此移除）", disabled: true }],
+                : [
+                    {
+                      key: "info",
+                      label: "QQ_APPS 配置 bot（不可在此移除）",
+                      disabled: true,
+                    },
+                  ],
             onClick: (info) => {
               if (info.key === "remove") removeBot(b);
             },
@@ -90,12 +103,19 @@ export default function BotRail({ bots, current, onSelect, onRefresh }: Props) {
               }
               placement="right"
             >
-              <Badge dot color={STATE_COLOR[b.gateway] ?? "#bfbfbf"} offset={[-4, 30]}>
+              <Badge
+                dot
+                color={STATE_COLOR[b.gateway] ?? "#bfbfbf"}
+                offset={[-4, 30]}
+              >
                 <Avatar
                   shape="square"
                   size={40}
                   style={{
-                    background: b.appid === current ? AVATAR_BG[i % AVATAR_BG.length] : "#c6cad2",
+                    background:
+                      b.appid === current
+                        ? AVATAR_BG[i % AVATAR_BG.length]
+                        : "#c6cad2",
                     borderRadius: 10,
                   }}
                   icon={<RobotOutlined />}
@@ -109,7 +129,12 @@ export default function BotRail({ bots, current, onSelect, onRefresh }: Props) {
         <Avatar
           shape="square"
           size={40}
-          style={{ background: "#d5d9e0", color: "#4e5969", borderRadius: 10, cursor: "pointer" }}
+          style={{
+            background: "#d5d9e0",
+            color: "#4e5969",
+            borderRadius: 10,
+            cursor: "pointer",
+          }}
           icon={<PlusOutlined />}
           onClick={() => setAddOpen(true)}
         />
