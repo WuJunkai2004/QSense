@@ -29,6 +29,13 @@ export interface ServerDeps {
   botStatuses?: () => GatewayStatus[];
 }
 
+/** Authorization: Bearer <token> 提取；无效返回 null */
+function bearerOf(header: unknown): string | null {
+  if (typeof header !== "string" || !header.startsWith("Bearer ")) return null;
+  const t = header.slice(7).trim();
+  return t === "" ? null : t;
+}
+
 export function buildServer(deps: ServerDeps) {
   const { config, log, db, repo, version } = deps;
   // 关闭 fastify 内置日志，统一用自研 logger；请求日志只记方法+路径（去掉 query，防泄漏）
@@ -56,33 +63,40 @@ export function buildServer(deps: ServerDeps) {
     };
   });
 
-  // MCP Streamable HTTP（M3）：Bearer 鉴权 + 会话管理；Fastify 解析 JSON 体后交 SDK transport
+  // MCP Streamable HTTP（M3→M8）：Bearer 鉴权改为「token→bot」绑定制——
+  // admin token 不再通行 /mcp；一个 agent_token 只对应 bots 表中的一行。
   const handleMcp = createMcpHandler({
     config,
     log,
     repo,
     sender: deps.sender,
     bots: deps.registry,
-    botStatuses: deps.botStatuses,
+    supervisor: deps.supervisor,
     version,
   });
   app.route({
     method: ["GET", "POST", "DELETE"],
     url: "/mcp",
     handler: async (req, reply) => {
-      if (!bearerOk(req.headers.authorization, config.mcpToken)) {
+      const bearer = bearerOf(req.headers.authorization);
+      const botId =
+        bearer === null || deps.registry === undefined
+          ? null
+          : deps.registry.appIdByToken(bearer);
+      if (botId === null) {
         reply.code(401).send({
           jsonrpc: "2.0",
           error: {
             code: -32001,
-            message: "Unauthorized：缺少或错误的 Bearer token。",
+            message:
+              "Unauthorized：token 无效或未绑定 bot。请用 qq_register_bot 返回的 agent_token，或在 WebUI 设置页重新生成。",
           },
           id: null,
         });
         return;
       }
       reply.hijack(); // 响应由 SDK transport 直接写原生 res
-      await handleMcp(req.raw, reply.raw, req.body);
+      await handleMcp(req.raw, reply.raw, req.body, botId);
     },
   });
 

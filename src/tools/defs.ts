@@ -1,10 +1,12 @@
-// MCP 工具面定义（DESIGN.md §3.4）：10 只读（含 qq_list_bots）+ 3 写 + qq_forget。
+// MCP 工具面定义（DESIGN.md §3.4）：11 只读 + 3 写 + qq_forget + 2 管理（M8）。
 // 只读为纯函数：入参 → Repo 查询 → 结构化结果。
-// 写工具经 Sender（真实官方API）：硬约束——SEND_ENABLE=true 且群在 ALLOW_GROUPS 才生效，否则硬拒绝；
-// 工具描述均标注"真实写操作"。每个返回体首行固定注入不可信内容提示。
-// 多机器人：全部工具带可选 bot 参数（resolveBotId）；qq_list_bots 供发现，多 bot 时其他工具必填。
+// 写工具经 Sender（真实官方API）：硬约束——发送总开关（SQLite）开启且群在目标 bot 的
+// allow_groups（bots 表，按 bot 隔离）才生效，否则硬拒绝；工具描述均标注"真实写操作"。
+// 每个返回体首行固定注入不可信内容提示。
+// 多机器人（M8）：token 绑定制——一个 agent_token 只属于一个 bot，工具作用域即该 bot
+// （resolveBotId 强校验）；qq_register_bot / qq_token_refresh 为自服务管理操作。
 
-import type { Config } from '../config';
+import type { BotApp, Config } from '../config';
 import type { BotRegistry } from '../bots';
 import type { GatewayStatus } from '../gateway';
 import { t } from '../i18n';
@@ -30,10 +32,12 @@ export interface ToolContext {
   config: Config;
   /** M4 发送器：写工具必需；缺省=发送功能未装配，硬拒绝 */
   sender?: Sender;
-  /** 机器人注册表（含运行时动态 bot）；缺省回落 config.apps */
+  /** 机器人注册表（bots 表域层：注册/轮换/白名单） */
   bots?: BotRegistry;
-  /** 各 bot 网关状态快照（qq_list_bots 展示用）；缺省=状态未知 */
-  botStatuses?: () => GatewayStatus[];
+  /** M8：本请求 Bearer token 绑定的 bot（一个 token 只属一个 bot）；缺省=未认证 */
+  botId?: string;
+  /** 网关接入器：qq_register_bot 注册成功后立即拉起连接；缺省=测试环境不接 */
+  supervisor?: { addBot: (app: BotApp) => void };
 }
 
 // —— 参数校验（显式 validate，错误可操作） ——
@@ -63,18 +67,21 @@ function optInt(args: Record<string, unknown>, key: string, min: number, max: nu
   return n;
 }
 
-/** bot 解析：多 bot 时必须显式指定；单 bot 缺省即用 */
+/** bot 解析（M8 语义）：token 绑定制——一个 agent_token 只属于一个 bot，工具作用域即该 bot。 */
 function resolveBotId(args: Record<string, unknown>, ctx: ToolContext): string {
-  const bots = ctx.bots?.list() ?? ctx.config.apps;
-  const asked = optStr(args, 'bot');
-  if (asked !== undefined) {
-    if (!bots.some((b) => b.appid === asked)) {
-      throw new ToolError(`bot 不存在：${asked}。已注册：${bots.map((b) => b.appid).join(', ') || '（无）'}。可先调 qq_list_bots 查看列表。`);
-    }
-    return asked;
+  const bound = ctx.botId;
+  if (bound === undefined) {
+    throw new ToolError(
+      '当前 token 未绑定任何 bot（鉴权缺失）。请用注册时返回的 agent_token 连接 /mcp。',
+    );
   }
-  if (bots.length === 1) return bots[0].appid;
-  throw new ToolError(`当前注册了多个 bot（${bots.map((b) => b.appid).join(', ')}），请先用 qq_list_bots 查看列表，再用 bot 参数指定。`);
+  const asked = optStr(args, 'bot');
+  if (asked !== undefined && asked !== bound) {
+    throw new ToolError(
+      `token 权限域不符：本 token 绑定 bot ${bound}，不能操作 bot ${asked}。请改用该 bot 自己的 agent_token。`,
+    );
+  }
+  return bound;
 }
 
 /** 写工具取发送器；未装配=双重门禁未开，硬拒绝（不发任何请求） */
@@ -121,25 +128,55 @@ function groupRowOut(r: Record<string, unknown>): Record<string, unknown> {
 
 export const TOOLS: ToolDef[] = [
   {
-    name: 'qq_list_bots',
+    name: 'qq_register_bot',
     description:
-      '列出本服务注册的全部机器人（appid/名称/来源/网关状态）与发送开关。多 bot 环境下，其他 qq_* 工具必须用 bot 参数指定 appid。',
+      '【管理操作】注册新机器人：直接传 appid 与 secret（q.qq.com 开发设置页获取）。' +
+      '服务端校验凭据后落库，并生成随机 agent_token——它只在本次返回中出现一次，必须立即保存。' +
+      '此后本服务所有 qq_* 工具连接时都应使用该 token（一个 token 只绑定这一个 bot）。' +
+      'token 丢失时可用 qq_token_refresh 轮换（需持有旧 token）或在 WebUI 设置页重置。',
+    inputSchema: {
+      type: 'object',
+      required: ['appid', 'secret'],
+      properties: {
+        appid: { type: 'string', description: '开放平台 AppID（q.qq.com → 开发设置）' },
+        secret: { type: 'string', description: '对应的 AppSecret' },
+        name: { type: 'string', description: '备注名（缺省用 appid）' },
+      },
+    },
+    handler: async (args, ctx) => {
+      if (ctx.bots === undefined) {
+        throw new ToolError('机器人注册表未装配（服务端配置缺失）。');
+      }
+      const appid = str(args, 'appid', '开放平台 AppID');
+      const secret = str(args, 'secret', 'AppSecret');
+      const name = optStr(args, 'name');
+      const registered = await ctx.bots.add({ appid, secret, name });
+      ctx.supervisor?.addBot(registered.app);
+      return {
+        bot: { appid: registered.app.appid, name: registered.app.name },
+        agent_token: registered.agentToken,
+        note: 'agent_token 仅本次返回：请立即保存。再次获取请走 qq_token_refresh 或 WebUI 设置页。',
+      };
+    },
+  },
+  {
+    name: 'qq_token_refresh',
+    description:
+      '【管理操作】轮换当前 token：注销正在使用的 agent_token，返回一个新的 agent_token（仅此一次返回，请立即保存）。' +
+      '适合 token 疑似泄漏或定期轮换；旧 token 在本调用成功后立即失效，请保存好新值再断开。',
     inputSchema: { type: 'object', properties: {} },
     handler: (_args, ctx) => {
-      const statuses = new Map(
-        (ctx.botStatuses?.() ?? []).map((s) => [s.botId, s]),
-      );
-      const bots = (ctx.bots?.list() ?? ctx.config.apps).map((a) => ({
-        appid: a.appid,
-        name: a.name,
-        source: ctx.bots?.isDynamic(a.appid) === true ? 'runtime' : 'config',
-        gateway: statuses.get(a.appid)?.state ?? 'unknown',
-      }));
+      if (ctx.bots === undefined) {
+        throw new ToolError('机器人注册表未装配（服务端配置缺失）。');
+      }
+      if (ctx.botId === undefined) {
+        throw new ToolError('当前 token 未绑定任何 bot，无法轮换。');
+      }
+      const agentToken = ctx.bots.rotateToken(ctx.botId);
       return {
-        count: bots.length,
-        send_enabled: ctx.config.sendEnabled,
-        auth_level: ctx.config.authLevel,
-        bots,
+        bot: ctx.botId,
+        agent_token: agentToken,
+        note: '旧 token 已失效。新 agent_token 仅本次返回：请立即更新到 MCP 客户端配置并保存。',
       };
     },
   },

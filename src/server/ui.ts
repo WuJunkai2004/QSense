@@ -132,8 +132,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
   app.register(
     async function uiApi(plugin) {
       plugin.addHook("onRequest", async (req, reply) => {
-        if (!bearerOk(req.headers.authorization, config.mcpToken)) {
-          reply.code(401).send({ error: "Unauthorized：缺少或错误的 Bearer token。" });
+        // M8：WebUI 用 admin token（SQLite admin:token:v1 播种自 env MCP_TOKEN）
+        const admin = deps.repo.getAdminToken();
+        if (admin === null || !bearerOk(req.headers.authorization, admin)) {
+          reply.code(401).send({ error: "Unauthorized：缺少或错误的 admin token。" });
         }
       });
 
@@ -180,21 +182,20 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
 
       plugin.get("/bootstrap", async () => {
         const statuses = new Map<string, GatewayStatus>();
-        for (const s of deps.botStatuses()) statuses.set(s.botId, s);
+        for (const st of deps.botStatuses()) statuses.set(st.botId, st);
         return {
           version,
           uptime_s: Math.round(process.uptime()),
-          send_enabled: config.sendEnabled,
+          send_enabled: deps.repo.getSendEnable(),
           auth_level: config.authLevel,
-          allow_groups: config.allowGroups,
           bots: registry.list().map((a) => {
-            const s = statuses.get(a.appid);
+            const st = statuses.get(a.appid);
             return {
               appid: a.appid,
               name: a.name,
-              dynamic: registry.isDynamic(a.appid),
-              gateway: s?.state ?? "unknown",
-              detail: s?.detail,
+              allow_groups: registry.allowGroupsOf(a.appid),
+              gateway: st?.state ?? "unknown",
+              detail: st?.detail,
             };
           }),
         };
@@ -206,10 +207,82 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const appid = typeof body.appid === "string" ? body.appid : "";
           const secret = typeof body.secret === "string" ? body.secret : "";
           const name = typeof body.name === "string" ? body.name : undefined;
-          const added = await registry.add({ appid, secret, name });
-          supervisor.addBot(added);
-          uiLog.info("bot added via ui", { appid: added.appid });
-          return { ok: true, bot: { appid: added.appid, name: added.name } };
+          const registered = await registry.add({ appid, secret, name });
+          supervisor.addBot(registered.app);
+          uiLog.info("bot added via ui", { appid: registered.app.appid });
+          // M8：agent_token 仅此一次返回——WebUI 弹窗提示"立即保存"，服务端不留展示通道
+          return {
+            ok: true,
+            bot: { appid: registered.app.appid, name: registered.app.name },
+            agent_token: registered.agentToken,
+            note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换或 qq_token_refresh。",
+          };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      // —— M8 设置页：发送总开关 + 每 bot 白名单（全部落 SQLite）——
+
+      const settingsPayload = () => ({
+        send_enabled: deps.repo.getSendEnable(),
+        bots: registry.list().map((a) => ({
+          appid: a.appid,
+          name: a.name,
+          allow_groups: registry.allowGroupsOf(a.appid),
+          gateway:
+            deps.botStatuses().find((st) => st.botId === a.appid)?.state ??
+            "unknown",
+        })),
+      });
+
+      plugin.get("/settings", async () => settingsPayload());
+
+      plugin.put("/settings", async (req, reply) => {
+        try {
+          const body = (req.body ?? {}) as Record<string, unknown>;
+          if (typeof body.send_enabled === "boolean") {
+            deps.repo.setSendEnable(body.send_enabled);
+            uiLog.info("send toggle via ui", { enabled: body.send_enabled });
+          }
+          if (Array.isArray(body.allow_groups)) {
+            for (const item of body.allow_groups) {
+              const rec = (item ?? {}) as Record<string, unknown>;
+              const appid = typeof rec.appid === "string" ? rec.appid : "";
+              const groups = rec.groups;
+              if (
+                registry.get(appid) === undefined ||
+                !Array.isArray(groups) ||
+                !groups.every((g) => typeof g === "string" && g !== "")
+              ) {
+                throw new BotRegistryError(
+                  "allow_groups 项无效：需要 { appid, groups: string[] }，且 appid 已注册、groups 全为非空字符串。",
+                );
+              }
+              registry.setAllowGroups(appid, groups);
+              uiLog.info("allow groups via ui", { appid, count: groups.length });
+            }
+          }
+          return settingsPayload();
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      /** 轮换 agent token（管理员操作，无需旧 token）：新值仅本次返回 */
+      plugin.post("/bots/:appid/agent-token", async (req, reply) => {
+        try {
+          const appid = (req.params as { appid: string }).appid;
+          const token = registry.rotateToken(appid);
+          uiLog.info("agent token rotated via ui", { appid });
+          return {
+            ok: true,
+            bot: appid,
+            agent_token: token,
+            note: "agent_token 仅本次返回：旧 token 已立即失效。请立即更新到 MCP 客户端配置。",
+          };
         } catch (e) {
           const m = mapError(uiLog, e);
           reply.code(m.status).send({ error: m.message });

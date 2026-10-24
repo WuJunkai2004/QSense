@@ -36,10 +36,13 @@ async function main(): Promise<void> {
   // 事件入库（M2）+ 发送器（M4）+ 机器人注册表（M7 运行时动态 bot）：
   // 单一 Repo 实例贯穿缓存/账本/MCP 工具；registry 贯穿网关/发送器/工具面/UI
   const repo = new Repo(db);
+  // M8 运行时设置播种（幂等，kv 已有值不覆盖）：发送总开关 / admin token。
+  // .env 的 SEND_ENABLE / MCP_TOKEN 从"运行时权威"降级为"首次播种源"。
+  repo.seedRuntime(config.sendEnabled, config.mcpToken);
   const tokens = new TokenService(log.child("token"));
   const registry = new BotRegistry({
-    base: config.apps,
     db,
+    seed: { apps: config.apps, allowGroups: config.allowGroups },
     verify: async (app) => {
       // 两级凭据校验：token 接口（appid/secret 正确性）+ 网关地址接口（IP 白名单 11298 等
       // 网关入口问题——token 接口不校验白名单，只验 token 会出现"添加成功但连不上"）

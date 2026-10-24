@@ -181,15 +181,16 @@ export class Sender {
     return app;
   }
 
-  /** 双重门禁：SEND_ENABLE + 白名单。硬拒绝不发任何请求。通过则解析出 bot 配置。 */
+  /** 双重门禁（M8 读库版）：发送总开关（kv settings）+ 该 bot 白名单（bots 表）。硬拒绝不发任何请求。 */
   private gate(botId: string, groupOpenid: string): BotApp {
-    const { config } = this.deps;
-    if (!config.sendEnabled || !config.allowGroups.includes(groupOpenid)) {
+    const sendEnabled = this.deps.repo.getSendEnable();
+    const allowGroups = this.deps.bots?.allowGroupsOf(botId) ?? [];
+    if (!sendEnabled || !allowGroups.includes(groupOpenid)) {
       throw new Error(
-        config.allowGroups.includes(groupOpenid)
+        allowGroups.includes(groupOpenid)
           ? t("send_disabled", {
-              enabled: String(config.sendEnabled),
-              allow: config.allowGroups.length,
+              enabled: String(sendEnabled),
+              allow: allowGroups.length,
             })
           : t("send_not_allowlisted", { group: groupOpenid }),
       );
@@ -496,7 +497,7 @@ export class Sender {
     relation_remaining: Record<string, number>;
   } {
     const date = beijingDate();
-    const allowGroups = this.deps.config.allowGroups;
+    const allowGroups = this.deps.bots?.allowGroupsOf(botId) ?? [];
     return {
       limits: this.limits,
       bot_bucket_remaining: this.botBucket(botId).remaining,

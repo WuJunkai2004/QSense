@@ -1,5 +1,6 @@
-// M7 验收（注册表）：运行时添加/移除 bot、kv 持久化与重载、env 基座优先、凭据校验失败不入库、
-// 多 bot 工具面（qq_list_bots 发现 + resolveBotId 强制指定）。
+// M8 验收（注册表）：bots 表唯一存储、agent_token 生命周期（生成/轮换/反查）、
+// 每 bot 白名单、旧 kv bots:dynamic:v1 迁移、env seed 幂等、
+// qq_register_bot / qq_token_refresh 工具面与 token 绑定 bot 强校验。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -7,17 +8,31 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotRegistry, BotRegistryError } from "../src/bots";
-import { loadConfig } from "../src/config";
-import { createLogger } from "../src/logger";
+import type { Config } from "../src/config";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
-import { runTool, UNTRUSTED_NOTICE, type ToolContext } from "../src/tools/defs";
+import { runTool, ToolError, UNTRUSTED_NOTICE, type ToolContext } from "../src/tools/defs";
 
-const BASE = { appid: "10001", secret: "s1", name: "基座" };
+const SEED = { appid: "10001", secret: "s1", name: "主bot" };
+const GROUP_A = "GROUP_A";
+
+const TEST_CONFIG: Config = {
+  apps: [],
+  mcpToken: "x".repeat(20),
+  host: "127.0.0.1",
+  port: 0,
+  dataDir: ".",
+  sendEnabled: false,
+  allowGroups: [],
+  logContent: false,
+  logLevel: "error",
+  retentionDays: 90,
+  authLevel: "uncertified",
+};
 
 function setupDb(): { db: DB; close: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), "qqbot-m7-bots-"));
+  const dir = mkdtempSync(join(tmpdir(), "qqbot-m8-bots-"));
   const db = openDatabase(dir);
   runMigrations(db, migrations);
   return {
@@ -33,168 +48,196 @@ function setupDb(): { db: DB; close: () => void } {
   };
 }
 
-function kvRaw(db: DB): unknown {
-  const row = db.prepare("SELECT v FROM kv WHERE k = 'bots:dynamic:v1'").get() as
-    | { v: string }
-    | undefined;
-  return row === undefined ? null : JSON.parse(row.v);
+function newRegistry(db: DB, verify?: (app: { appid: string }) => Promise<void>): BotRegistry {
+  return new BotRegistry({
+    db,
+    seed: { apps: [SEED], allowGroups: [GROUP_A] },
+    ...(verify ? { verify } : {}),
+  });
 }
 
-test("M7-B1 add：校验通过 → 列表含动态 bot、kv 持久化、新实例重载恢复", async () => {
+function ctxOf(db: DB, reg: BotRegistry, botId: string): ToolContext {
+  return { repo: new Repo(db), config: TEST_CONFIG, bots: reg, botId };
+}
+
+test("M8-B1 env seed：构造即灌表（幂等），token/白名单就位，重启不丢不重", () => {
   const fx = setupDb();
   try {
-    const verifyed: string[] = [];
-    const reg = new BotRegistry({
-      base: [BASE],
-      db: fx.db,
-      verify: async (app) => {
-        verifyed.push(app.appid);
-      },
+    const reg = newRegistry(fx.db);
+    assert.deepEqual(
+      reg.list().map((a) => a.appid),
+      ["10001"],
+    );
+    assert.deepEqual(reg.allowGroupsOf("10001"), [GROUP_A]);
+    // 重启（新实例）：不重复播种、数据不丢
+    const reg2 = newRegistry(fx.db);
+    assert.equal(reg2.list().length, 1);
+    assert.equal(reg2.get("10001")?.secret, "s1");
+  } finally {
+    fx.close();
+  }
+});
+
+test("M8-B2 add：verify → 落库 + 生成 token（仅返回一次语义），重启恢复", async () => {
+  const fx = setupDb();
+  try {
+    const verified: string[] = [];
+    const reg = newRegistry(fx.db, async (app) => {
+      verified.push(app.appid);
     });
     const added = await reg.add({ appid: "20002", secret: "s2", name: "二号" });
-    assert.equal(added.appid, "20002");
-    assert.deepEqual(verifyed, ["20002"]);
-    assert.equal(reg.isDynamic("20002"), true);
-    assert.equal(reg.list().length, 2);
-    assert.deepEqual(kvRaw(fx.db), [{ appid: "20002", secret: "s2", name: "二号" }]);
+    assert.deepEqual(verified, ["20002"]);
+    assert.equal(added.app.appid, "20002");
+    assert.match(added.agentToken, /^[0-9a-f]{48}$/); // 24 字节随机 hex
+    assert.equal(reg.appIdByToken(added.agentToken), "20002");
+    assert.deepEqual(reg.allowGroupsOf("20002"), []); // 新注册默认无白名单（安全默认）
 
-    // 新实例（模拟重启）从 kv 恢复
-    const reg2 = new BotRegistry({ base: [BASE], db: fx.db });
+    const reg2 = newRegistry(fx.db);
     assert.equal(reg2.get("20002")?.name, "二号");
-    assert.equal(reg2.isDynamic("20002"), true);
   } finally {
     fx.close();
   }
 });
 
-test("M7-B2 add：重复（env 基座或已存在动态）与空参数 → 明确报错", async () => {
+test("M8-B3 add：重复 appid / 空参数 / verify 失败 → 明确报错且不入库", async () => {
   const fx = setupDb();
   try {
-    const reg = new BotRegistry({ base: [BASE], db: fx.db });
+    const reg = newRegistry(fx.db);
     await assert.rejects(
-      reg.add({ appid: "10001", secret: "x" }),
-      /已注册/,
+      () => reg.add({ appid: "10001", secret: "x" }),
+      /已存在/,
     );
-    await reg.add({ appid: "20002", secret: "s2" });
-    await assert.rejects(reg.add({ appid: "20002", secret: "y" }), /已注册/);
-    await assert.rejects(
-      reg.add({ appid: "", secret: "y" }),
-      /不能为空/,
-    );
-    await assert.rejects(reg.add({ appid: "30003", secret: "  " }), /不能为空/);
-  } finally {
-    fx.close();
-  }
-});
-
-test("M7-B3 add：凭据校验失败 → 拒绝且不落库（列表与 kv 均不变）", async () => {
-  const fx = setupDb();
-  try {
-    const reg = new BotRegistry({
-      base: [BASE],
+    await assert.rejects(() => reg.add({ appid: "", secret: "x" }), /不能为空/);
+    const bad = new BotRegistry({
       db: fx.db,
+      seed: { apps: [], allowGroups: [] },
       verify: async () => {
-        throw new Error("401 Unauthorized from official");
+        throw new Error("接口访问源IP不在白名单(code 11298)");
       },
     });
-    await assert.rejects(
-      reg.add({ appid: "20002", secret: "bad" }),
-      (e: unknown) =>
-        e instanceof BotRegistryError && /凭据校验失败/.test(e.message),
-    );
-    assert.equal(reg.list().length, 1);
-    assert.equal(kvRaw(fx.db), null);
+    await assert.rejects(() => bad.add({ appid: "30003", secret: "s3" }), /11298/);
+    assert.equal(reg.get("30003"), undefined); // 校验失败不入库
   } finally {
     fx.close();
   }
 });
 
-test("M7-B4 remove：动态可移除并持久化；env 基座/未知 → 明确报错", async () => {
+test("M8-B4 轮换：旧 token 立即失效、新 token 反查命中；未注册报错", async () => {
   const fx = setupDb();
   try {
-    const reg = new BotRegistry({ base: [BASE], db: fx.db });
-    await reg.add({ appid: "20002", secret: "s2", name: "二号" });
-    const removed = reg.remove("20002");
-    assert.equal(removed.appid, "20002");
-    assert.deepEqual(kvRaw(fx.db), []);
-    assert.throws(() => reg.remove("10001"), /QQ_APPS/);
-    assert.throws(() => reg.remove("99999"), /不在运行时列表/);
+    const reg = newRegistry(fx.db);
+    const added = await reg.add({ appid: "20002", secret: "s2" });
+    const fresh = reg.rotateToken("20002");
+    assert.notEqual(fresh, added.agentToken);
+    assert.equal(reg.appIdByToken(added.agentToken), null);
+    assert.equal(reg.appIdByToken(fresh), "20002");
+    assert.throws(() => reg.rotateToken("99999"), /不在注册表中/);
   } finally {
     fx.close();
   }
 });
 
-test("M7-B5 load：kv 中与 env 基座撞 appid 的残留条目被跳过（env 优先）", () => {
+test("M8-B5 白名单：setAllowGroups 即时生效，remove 后反查全空", async () => {
+  const fx = setupDb();
+  try {
+    const reg = newRegistry(fx.db);
+    const added = await reg.add({ appid: "20002", secret: "s2" });
+    reg.setAllowGroups("20002", [GROUP_A, "GROUP_B"]);
+    assert.deepEqual(reg.allowGroupsOf("20002"), [GROUP_A, "GROUP_B"]);
+    const removed = reg.remove("20002");
+    assert.equal(removed.appid, "20002");
+    assert.equal(reg.appIdByToken(added.agentToken), null); // 移除连带 token 失效
+    assert.deepEqual(reg.allowGroupsOf("20002"), []);
+    assert.throws(() => reg.remove("20002"), /不在注册表中/);
+  } finally {
+    fx.close();
+  }
+});
+
+test("M8-B6 旧 kv bots:dynamic:v1 迁移：灌表 + 删键", () => {
   const fx = setupDb();
   try {
     fx.db
       .prepare("INSERT INTO kv(k, v) VALUES ('bots:dynamic:v1', ?)")
-      .run(
-        JSON.stringify([
-          { appid: "10001", secret: "stale", name: "残影" },
-          { appid: "20002", secret: "s2", name: "二号" },
-        ]),
-      );
-    const reg = new BotRegistry({ base: [BASE], db: fx.db });
-    assert.equal(reg.get("10001")?.secret, "s1"); // env 权威
-    assert.equal(reg.isDynamic("10001"), false);
-    assert.equal(reg.get("20002")?.name, "二号");
+      .run(JSON.stringify([{ appid: "30003", secret: "s3", name: "旧动态" }]));
+    const reg = newRegistry(fx.db); // 构造时迁移
+    assert.equal(reg.get("30003")?.name, "旧动态");
+    assert.equal(
+      fx.db.prepare("SELECT v FROM kv WHERE k = 'bots:dynamic:v1'").get(),
+      undefined,
+    );
+    // 二次构造：无旧键、无重复行
+    const reg2 = newRegistry(fx.db);
+    assert.equal(reg2.list().length, 2);
   } finally {
     fx.close();
   }
 });
 
-test("M7-B6 工具面：qq_list_bots 发现（含动态/状态）+ 多 bot 必须显式指定", async () => {
+test("M8-B7 qq_register_bot：返回一次 token + 表内可反查；重复注册拒绝", async () => {
   const fx = setupDb();
   try {
-    const repo = new Repo(fx.db);
-    const config = loadConfig({
-      QQ_APPS: '[{"appid":"10001","secret":"s1","name":"基座"},{"appid":"20002","secret":"s2","name":"二号"}]',
-      MCP_TOKEN: "m7-test-token-0123456789abcdef",
-      DATA_DIR: "unused",
-    });
-    const reg = new BotRegistry({
-      base: config.apps,
-      db: fx.db,
-      verify: async () => {}, // 直接种动态 bot（绕过校验，聚焦工具面行为）
-    });
-    await reg.add({ appid: "30003", secret: "s3", name: "三号" });
-    const ctx: ToolContext = {
-      repo,
-      config,
-      bots: reg,
-      botStatuses: () => [
-        { botId: "10001", state: "ready" },
-        { botId: "30003", state: "fatal", detail: "close=4914" },
-      ],
-    };
-
-    // qq_list_bots：3 个 bot、来源与网关状态正确
-    const listed = await runTool("qq_list_bots", {}, ctx);
-    assert.equal(listed.isError, undefined);
-    const payload = JSON.parse(listed.text.split("\n").slice(1).join("\n")) as {
-      count: number;
-      bots: Array<{ appid: string; source: string; gateway: string }>;
-    };
-    assert.equal(payload.count, 3);
-    assert.deepEqual(
-      payload.bots.map((b) => [b.appid, b.source, b.gateway]),
-      [
-        ["10001", "config", "ready"],
-        ["20002", "config", "unknown"],
-        ["30003", "runtime", "fatal"],
-      ],
+    const reg = newRegistry(fx.db);
+    const ctx = ctxOf(fx.db, reg, "10001");
+    const raw = await runTool(
+      "qq_register_bot",
+      { appid: "40004", secret: "s4", name: "四号" },
+      ctx,
     );
+    assert.equal(raw.isError, undefined);
+    const out = JSON.parse(raw.text.split("\n").slice(1).join("\n")) as Record<
+      string,
+      unknown
+    >;
+    assert.match(String(out.agent_token), /^[0-9a-f]{48}$/);
+    assert.equal(reg.appIdByToken(String(out.agent_token)), "40004");
+    const dup = await runTool(
+      "qq_register_bot",
+      { appid: "40004", secret: "s4" },
+      ctx,
+    );
+    assert.equal(dup.isError, true);
+  } finally {
+    fx.close();
+  }
+});
 
-    // 多 bot 不指定 → 报错文案引导 qq_list_bots；指定不存在 → 报错列出全部
-    const noBot = await runTool("qq_list_groups", {}, ctx);
-    assert.equal(noBot.isError, true);
-    assert.match(noBot.text, /qq_list_bots/);
-    const badBot = await runTool("qq_list_groups", { bot: "99999" }, ctx);
-    assert.equal(badBot.isError, true);
-    assert.match(badBot.text, /10001, 20002, 30003/);
-    // 首行注入提示恒在
-    assert.ok(noBot.text.startsWith(UNTRUSTED_NOTICE));
+test("M8-B8 qq_token_refresh：换发新 token，旧 token 立即失效", async () => {
+  const fx = setupDb();
+  try {
+    const reg = newRegistry(fx.db);
+    const added = await reg.add({ appid: "20002", secret: "s2" });
+    const ctx = ctxOf(fx.db, reg, "20002");
+    const raw = await runTool("qq_token_refresh", {}, ctx);
+    const out = JSON.parse(raw.text.split("\n").slice(1).join("\n")) as Record<
+      string,
+      unknown
+    >;
+    const fresh = String(out.agent_token);
+    assert.notEqual(fresh, added.agentToken);
+    assert.equal(reg.appIdByToken(added.agentToken), null);
+    assert.equal(reg.appIdByToken(fresh), "20002");
+  } finally {
+    fx.close();
+  }
+});
+
+test("M8-B9 token 绑定：bot 参数跨 bot → ToolError；qq_list_bots 已移除", async () => {
+  const fx = setupDb();
+  try {
+    const reg = newRegistry(fx.db);
+    const ctx = ctxOf(fx.db, reg, "10001");
+    // runTool 把 ToolError 转成 isError 返回（不向外抛），断言返回体
+    const cross = await runTool("qq_list_groups", { bot: "20002" }, ctx);
+    assert.equal(cross.isError, true);
+    assert.match(cross.text, /绑定/);
+    assert.equal(
+      (await runTool("qq_list_groups", { bot: "10001" }, ctx)).isError,
+      undefined,
+    );
+    const gone = await runTool("qq_list_bots", {}, ctx);
+    assert.equal(gone.isError, true);
+    assert.match(gone.text, /未知工具/);
   } finally {
     fx.close();
   }

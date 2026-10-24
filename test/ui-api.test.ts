@@ -87,9 +87,12 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
     ALLOW_GROUPS: GROUP,
   });
 
+  // M8：admin token 与发送开关走 SQLite 播种（.env 仅首次）
+  repo.seedRuntime(config.sendEnabled, TOKEN);
+
   const registry = new BotRegistry({
-    base: config.apps,
     db,
+    seed: { apps: config.apps, allowGroups: config.allowGroups },
     verify: async (app) => {
       if (app.secret === "bad") throw new Error("401 invalid credentials");
     },
@@ -101,6 +104,7 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
     log: createLogger("error"),
     db,
     repo,
+    bots: registry,
     tokenManager: {} as never,
     apiFor: () => api,
   });
@@ -222,14 +226,18 @@ test("M7-U3 bootstrap：bots 含来源/网关状态，发送与白名单口径�
     const body = (await res.json()) as {
       version: string;
       send_enabled: boolean;
-      allow_groups: string[];
-      bots: Array<{ appid: string; dynamic: boolean; gateway: string; name: string }>;
+      bots: Array<{
+        appid: string;
+        allow_groups: string[];
+        gateway: string;
+        name: string;
+      }>;
     };
     assert.equal(body.version, "0.2.0");
     assert.equal(body.send_enabled, true);
-    assert.deepEqual(body.allow_groups, [GROUP]);
+    // M8：白名单按 bot 落库（bots 表），不再是顶层全局字段
     assert.deepEqual(body.bots, [
-      { appid: BOT, dynamic: false, gateway: "ready", name: "基座" },
+      { appid: BOT, name: "基座", allow_groups: [GROUP], gateway: "ready" },
     ]);
   } finally {
     await fx.close();
@@ -326,8 +334,8 @@ test("M7-U7 运行时添加 bot：联动 supervisor.addBot、bootstrap 可见、
       await get(fx.baseUrl, "/ui/api/bootstrap", authHeaders())
     ).json()) as { bots: Array<{ appid: string; dynamic: boolean }> };
     assert.deepEqual(
-      boot.bots.map((b) => [b.appid, b.dynamic]),
-      [[BOT, false], ["20002", true]],
+      boot.bots.map((b) => b.appid),
+      [BOT, "20002"],
     );
 
     const dup = await fetch(`${fx.baseUrl}/ui/api/bots`, {
@@ -358,13 +366,13 @@ test("M7-U8 移除 bot：env 基座 400；动态 200 且联动 removeBot + token
       headers: h,
       body: JSON.stringify({ appid: "20002", secret: "s2" }),
     });
-    // 预埋该 bot 的网关会话，移除后应被清理
-    const baseDel = await fetch(`${fx.baseUrl}/ui/api/bots/${BOT}`, {
+    // M8：bots 表是唯一权威——删除不存在的 appid → 400（env 基座概念已废除）
+    const missing = await fetch(`${fx.baseUrl}/ui/api/bots/99999`, {
       method: "DELETE",
-      headers: authHeaders(), // DELETE 无 body：不可带 json Content-Type（Fastify 会解析空体报 400）
+      headers: authHeaders(), // DELETE 无 body：不能带 json Content-Type（Fastify 会因空体报 400）
     });
-    assert.equal(baseDel.status, 400);
-    assert.match(((await baseDel.json()) as { error: string }).error, /QQ_APPS/);
+    assert.equal(missing.status, 400);
+    assert.match(((await missing.json()) as { error: string }).error, /不在注册表中/);
 
     const del = await fetch(`${fx.baseUrl}/ui/api/bots/20002`, { method: "DELETE", headers: authHeaders() });
     assert.equal(del.status, 200);

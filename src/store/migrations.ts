@@ -150,4 +150,21 @@ export const migrations: Migration[] = [
       ALTER TABLE c2c_messages ADD COLUMN direction INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 5,
+    name: "bots-registry",
+    // M8 机器人注册表：唯一 bot 权威存储（.env QQ_APPS / 旧 kv bots:dynamic:v1 只作首次播种源）。
+    // agent_token 明文存储（2026-10-25 用户拍板：单机管理面，不做加密）；每个 token 只绑定一个 bot，
+    // WebUI 设置页 / qq_token_refresh 可轮换，旧 token 立即失效，新值仅返回一次。
+    up: `
+      CREATE TABLE bots(
+        appid TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        secret TEXT NOT NULL,
+        agent_token TEXT NOT NULL UNIQUE,
+        allow_groups TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL
+      );
+    `,
+  },
 ];

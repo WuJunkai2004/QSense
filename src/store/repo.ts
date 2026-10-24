@@ -662,7 +662,47 @@ export class Repo {
       cursors: number;
     };
   }
+
+  // —— M8 运行时设置（kv）：bots 表归 BotRegistry 管，这里只管非 bot 维度设置 ——
+
+  /** 发送总开关（kv settings:runtime:v1）。缺省=关闭（安全默认），.env SEND_ENABLE 仅作首次播种 */
+  getSendEnable(): boolean {
+    const row = this.kvGetStmt.get(SETTINGS_KEY) as { v: string } | undefined;
+    if (row === undefined) return false;
+    try {
+      return (JSON.parse(row.v) as { sendEnable?: boolean }).sendEnable === true;
+    } catch {
+      return false; // 坏数据按关闭处理（安全默认）
+    }
+  }
+
+  setSendEnable(v: boolean): void {
+    this.kvSetStmt.run(SETTINGS_KEY, JSON.stringify({ sendEnable: v }));
+  }
+
+  /**
+   * M8 首次播种（幂等）：kv 已有键不覆盖——运行时改过设置后，重启不会回滚到 env 值。
+   * env 的 SEND_ENABLE / MCP_TOKEN 从"运行时权威"降级为"首次播种源"。
+   */
+  seedRuntime(sendEnableFromEnv: boolean, adminTokenFromEnv: string): void {
+    const insert = this.db.prepare("INSERT OR IGNORE INTO kv(k, v) VALUES (?, ?)");
+    insert.run(SETTINGS_KEY, JSON.stringify({ sendEnable: sendEnableFromEnv }));
+    insert.run(ADMIN_TOKEN_KEY, adminTokenFromEnv);
+  }
+
+  /** admin token（kv admin:token:v1）：WebUI/设置页管理凭证。null=尚未播种 */
+  getAdminToken(): string | null {
+    const row = this.kvGetStmt.get(ADMIN_TOKEN_KEY) as { v: string } | undefined;
+    return row?.v ?? null;
+  }
+
+  setAdminToken(v: string): void {
+    this.kvSetStmt.run(ADMIN_TOKEN_KEY, v);
+  }
 }
+
+const SETTINGS_KEY = "settings:runtime:v1";
+const ADMIN_TOKEN_KEY = "admin:token:v1";
 
 function messageParams(
   m: NormalizedMessage,

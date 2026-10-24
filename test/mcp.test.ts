@@ -13,6 +13,7 @@ import { buildServer } from "../src/server/http";
 import { createLogger } from "../src/logger";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
+import { BotRegistry } from "../src/bots";
 import { Repo } from "../src/store/repo";
 import { UNTRUSTED_NOTICE } from "../src/tools/defs";
 
@@ -21,6 +22,7 @@ const GROUP = "GROUP_OPENID_G1";
 
 interface Fixture {
   baseUrl: string;
+  agentToken: string;
   close: () => Promise<void>;
 }
 
@@ -98,11 +100,20 @@ async function setupServer(): Promise<Fixture> {
     MCP_TOKEN: TOKEN,
     DATA_DIR: dir,
   });
+  // M8：admin token 供 /ui/api；/mcp 只认 bot agent token（播种后轮换取出）
+  repo.seedRuntime(false, TOKEN);
+  const registry = new BotRegistry({
+    db,
+    seed: { apps: config.apps, allowGroups: [GROUP] },
+  });
+  const agentToken = registry.rotateToken("10001");
+
   const app = buildServer({
     config,
     log: createLogger("debug"),
     db,
     repo,
+    registry,
     version: "0.1.0",
   });
   await app.listen({ port: 0, host: "127.0.0.1" });
@@ -111,6 +122,7 @@ async function setupServer(): Promise<Fixture> {
 
   return {
     baseUrl: `http://127.0.0.1:${port}`,
+    agentToken,
     close: async () => {
       await app.close();
       db.close();
@@ -128,11 +140,11 @@ async function setupServer(): Promise<Fixture> {
   };
 }
 
-async function connectClient(baseUrl: string): Promise<Client> {
+async function connectClient(baseUrl: string, agentToken = TOKEN): Promise<Client> {
   const transport = new StreamableHTTPClientTransport(
     new URL(`${baseUrl}/mcp`),
     {
-      requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } },
+      requestInit: { headers: { Authorization: `Bearer ${agentToken}` } },
     },
   );
   const client = new Client({ name: "m3-test", version: "0.0.1" });
@@ -189,11 +201,11 @@ test("M3-1 未带 token / 错 token → 401", async () => {
   }
 });
 
-test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", async () => {
+test("M3-2 listTools 含 15 个工具；未开启发送时写工具硬拒绝", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
-    client = await connectClient(fx.baseUrl);
+    client = await connectClient(fx.baseUrl, fx.agentToken);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
@@ -203,14 +215,15 @@ test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", a
       "qq_cursor_set",
       "qq_forget",
       "qq_get_new",
-      "qq_list_bots",
       "qq_list_groups",
       "qq_list_members",
       "qq_quota",
       "qq_recall",
+      "qq_register_bot",
       "qq_reply",
       "qq_search",
       "qq_send_proactive",
+      "qq_token_refresh",
     ]);
     // 双重门禁未开（SEND_ENABLE 缺省 false）→ 写工具硬拒绝且不炸
     const denied = (await client.callTool({
@@ -236,7 +249,7 @@ test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", a
 test("M3-3 闭环：列群 → 取新消息 → 关键词搜索；游标断点续拉", async () => {
   const fx = await setupServer();
   try {
-    const client = await connectClient(fx.baseUrl);
+    const client = await connectClient(fx.baseUrl, fx.agentToken);
 
     // 列群
     const groups = payloadOf(
@@ -313,7 +326,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
   const fx = await setupServer();
   let client: Client | null = null;
   try {
-    client = await connectClient(fx.baseUrl);
+    client = await connectClient(fx.baseUrl, fx.agentToken);
 
     const ctx = payloadOf(
       (await client.callTool({
