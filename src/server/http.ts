@@ -6,6 +6,8 @@ import Fastify from 'fastify';
 import type { Config } from '../config';
 import type { Logger } from '../logger';
 import type { DB } from '../store/db';
+import { Repo } from '../store/repo';
+import { bearerOk, createMcpHandler } from '../tools/mcp';
 
 export interface ServerDeps {
   config: Config;
@@ -41,7 +43,24 @@ export function buildServer(deps: ServerDeps) {
     };
   });
 
-  // M3 占位：app.route({ url: '/mcp', ... }) —— Streamable HTTP + Bearer 鉴权
+  // MCP Streamable HTTP（M3）：Bearer 鉴权 + 会话管理；Fastify 解析 JSON 体后交 SDK transport
+  const handleMcp = createMcpHandler({ config, log, repo: new Repo(db), version });
+  app.route({
+    method: ['GET', 'POST', 'DELETE'],
+    url: '/mcp',
+    handler: async (req, reply) => {
+      if (!bearerOk(req.headers.authorization, config.mcpToken)) {
+        reply.code(401).send({
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'Unauthorized：缺少或错误的 Bearer token。' },
+          id: null,
+        });
+        return;
+      }
+      reply.hijack(); // 响应由 SDK transport 直接写原生 res
+      await handleMcp(req.raw, reply.raw, req.body);
+    },
+  });
 
   return app;
 }

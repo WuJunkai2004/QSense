@@ -3,3 +3,7 @@ dist/
 data/
 .env
 *.log
+
+# 调试输出
+*.out.txt
+m*-out.txt
