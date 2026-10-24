@@ -114,7 +114,8 @@ export class BotRegistry {
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       throw new BotRegistryError(
-        `凭据校验失败：官方 token 接口拒绝（${reason}）。请核对 appid 与 AppSecret（q.qq.com → 开发设置）。`,
+        `凭据校验失败：官方接口拒绝（${reason}）。请核对 appid 与 AppSecret（q.qq.com → 开发设置）；` +
+          "若报「接口访问源IP不在白名单」（code 11298），需在该机器人管理端关闭 IP 白名单或把本机公网 IP 加入白名单。",
       );
     }
     this.dyn.set(appid, app);

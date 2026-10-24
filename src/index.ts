@@ -4,6 +4,7 @@
 import { loadConfig, loadDotEnv } from "./config";
 import { BotRegistry } from "./bots";
 import { GatewaySupervisor, type GatewayStatus } from "./gateway";
+import { fetchGatewayUrl } from "./gateway/url";
 import { TokenService } from "./gateway/token";
 import { t } from "./i18n";
 import { createLogger } from "./logger";
@@ -40,7 +41,10 @@ async function main(): Promise<void> {
     base: config.apps,
     db,
     verify: async (app) => {
-      await tokens.getAccessToken(app); // 官方凭据校验：拉真 token，失败即拒绝添加
+      // 两级凭据校验：token 接口（appid/secret 正确性）+ 网关地址接口（IP 白名单 11298 等
+      // 网关入口问题——token 接口不校验白名单，只验 token 会出现"添加成功但连不上"）
+      const token = await tokens.getAccessToken(app);
+      await fetchGatewayUrl(token);
     },
   });
   const sender = new Sender({
