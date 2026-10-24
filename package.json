@@ -1,0 +1,27 @@
+{
+  "name": "qqbot-webui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QQ Bot 网关 WebUI：QQ 桌面风格的智能体视角客户端（React + antd），由 qqbot-websocket-mcp 以 /ui 托管",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:only": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^5.6.1",
+    "antd": "^5.29.0",
+    "dayjs": "^1.11.18",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.28",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.2",
+    "vite": "^6.3.7"
+  }
+}
