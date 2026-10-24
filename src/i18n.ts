@@ -21,6 +21,11 @@ const zh = {
   boot_db_fail: '数据库初始化失败：{path}（{reason}）。检查 DATA_DIR 是否存在且可写。',
   boot_listen_fail: '监听失败：{addr} 无法绑定（{reason}）。检查 PORT/HOST 是否被占用或无权限。',
   boot_ok: 'qqbot-websocket-mcp 已启动：http://{addr} ，已注册 {bots} 个bot，数据目录 {dataDir}，发送开关 {send}。',
+  // —— 网关（M1） ——
+  gw_url_fail: '获取网关地址失败（HTTP {status}）：{reason}。检查到 api.bot.qq.com 的网络连通性与 access_token 有效性。',
+  gw_fatal_close: '网关连接致命关闭，已停止重连（{detail}）。若为 4914/4915：intents 未授权或机器人状态异常，需到开放平台人工核查。',
+  gw_disconnected_final: '网关断开且不再重连（code={code}，{reason}）。',
+  gw_event_dedup: '重复事件已去重丢弃：type={type}，id={id}。',
   // —— 退出 ——
   shutdown_done: '已优雅退出。',
 } as const;
@@ -44,6 +49,10 @@ const en: Translation = {
   boot_db_fail: 'Database init failed: {path} ({reason}). Check DATA_DIR exists and is writable.',
   boot_listen_fail: 'Listen failed: cannot bind {addr} ({reason}). Check if PORT/HOST is occupied or permission denied.',
   boot_ok: 'qqbot-websocket-mcp started: http://{addr} , {bots} bot(s) registered, data dir {dataDir}, send={send}.',
+  gw_url_fail: 'Failed to fetch gateway URL (HTTP {status}): {reason}. Check network to api.bot.qq.com and access_token validity.',
+  gw_fatal_close: 'Gateway connection closed fatally, reconnect stopped ({detail}). For 4914/4915: unauthorized intents or abnormal bot status, resolve manually on the open platform.',
+  gw_disconnected_final: 'Gateway disconnected and will not reconnect (code={code}, {reason}).',
+  gw_event_dedup: 'Duplicate event dropped: type={type}, id={id}.',
   shutdown_done: 'Graceful shutdown complete.',
 };
 

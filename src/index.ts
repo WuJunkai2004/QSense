@@ -2,6 +2,7 @@
 // Fastify（/healthz；M3 起 /mcp）→ 优雅退出（SIGINT/SIGTERM）。
 
 import { loadConfig, loadDotEnv } from './config';
+import { GatewaySupervisor } from './gateway';
 import { t } from './i18n';
 import { createLogger } from './logger';
 import { buildServer } from './server/http';
@@ -28,12 +29,31 @@ async function main(): Promise<void> {
 
   const app = buildServer({ config, log, db, version: VERSION });
 
+  // 事件接入器：WS 出站长连接，逐 bot 连接官方网关（M2 起事件入缓存，当前仅记类型）
+  const gateway = new GatewaySupervisor({
+    config,
+    log,
+    db,
+    handlers: {
+      onEvent: (e) => {
+        // 硬约束：日志不含消息正文，只记事件类型与来源
+        log.debug('event', { botId: e.botId, type: e.type });
+      },
+      onStatus: (s) => {
+        log.info('gateway status', { botId: s.botId, state: s.state, detail: s.detail });
+      },
+    },
+  });
+  const gatewayStart = gateway.start();
+
   let closing = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (closing) return;
     closing = true;
     log.info('shutdown', { signal });
     try {
+      gateway.stop();
+      await gatewayStart.catch(() => undefined); // 等连接排空（含会话落盘）
       await app.close();
       db.close();
       log.info(t('shutdown_done'));
