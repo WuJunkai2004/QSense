@@ -43,4 +43,6 @@ export interface NormalizedMessage {
   ark?: unknown;
   /** 官方事件原始载荷（受 LOG_CONTENT 约束，仅入库不进日志） */
   raw: unknown;
+  /** 本机外发标记：1=发送成功后本地补记（省略=网关接收） */
+  direction?: 0 | 1;
 }

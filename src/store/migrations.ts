@@ -140,4 +140,14 @@ export const migrations: Migration[] = [
       END;
     `,
   },
+  {
+    version: 4,
+    name: "message-direction",
+    // 本机外发标记：0=网关接收（默认），1=发送成功后本地补记（官方不回推 bot 自发消息，
+    // 不落库则 WebUI 刷新后发送记录消失）。两张消息表同构，保持 messageParams 单一来源。
+    up: `
+      ALTER TABLE messages ADD COLUMN direction INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE c2c_messages ADD COLUMN direction INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];

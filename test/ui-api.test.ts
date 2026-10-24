@@ -391,6 +391,28 @@ test("M7-U9 send：被动回复走账本（msg_seq=1、status sent）；非白�
     assert.equal(fx.api.calls.length, 1);
     assert.equal(fx.api.calls[0].targetId, GROUP);
 
+    // 外发消息补记：messages 里出现 out=true 行，作者=机器人名（不进成员名册）
+    const msgs = (await (
+      await get(
+        fx.baseUrl,
+        `/ui/api/messages?bot=${BOT}&group=${GROUP}&limit=50`,
+        authHeaders(),
+      )
+    ).json()) as {
+      messages: Array<{
+        msg_id: string;
+        out: boolean;
+        content: string | null;
+        author: { name: string | null; role: string | null };
+      }>;
+    };
+    const sent = msgs.messages.find((m) => m.out === true);
+    assert.ok(sent !== undefined, "发送后应有 out=true 的外发消息行");
+    assert.equal(sent.content, "UI 回复");
+    assert.equal(sent.msg_id, "PROVIDER_1");
+    assert.equal(sent.author.name, "基座");
+    assert.equal(sent.author.role, null);
+
     const sends = (await (
       await get(fx.baseUrl, `/ui/api/sends?bot=${BOT}&group=${GROUP}`, authHeaders())
     ).json()) as { sends: Array<{ status: string; kind: string }> };

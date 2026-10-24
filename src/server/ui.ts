@@ -278,6 +278,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               has_attachments: r.attachments_json !== null,
               has_ark: r.ark_json !== null,
               has_elements: r.elements_json !== null,
+              /** 本机外发（发送成功后补记） */
+              out: r.direction === 1,
             }));
           if (q.after !== undefined && q.after !== "") {
             // 轮询模式：rowid > after 的增量（升序）
@@ -328,6 +330,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               role: row.author_role,
             },
             content: row.content,
+            out: row.direction === 1,
             mentions: row.mentions_json ? JSON.parse(row.mentions_json) : null,
             attachments: row.attachments_json
               ? JSON.parse(row.attachments_json)
@@ -433,6 +436,21 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             replyMsgId !== undefined
               ? await sender.reply(botId, group, replyMsgId, text)
               : await sender.proactive(botId, group, text);
+          // 官方不回推 bot 自发消息：发送成功后本地补记，WebUI 刷新后仍可见。
+          // 落库失败不影响发送结果（消息已出账，只记日志）。
+          try {
+            repo.saveOutgoingGroupMessage({
+              botId,
+              groupOpenid: group,
+              msgId: result.provider_msg_id ?? `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              content: text,
+              ts: Date.now(),
+              authorName: registry.list().find((b) => b.appid === botId)?.name ?? null,
+            });
+          } catch (pe) {
+            const pm = pe instanceof Error ? pe.message : String(pe);
+            uiLog.error("outgoing message persist failed", { reason: pm.slice(0, 200) });
+          }
           uiLog.info("send via ui", {
             bot: botId,
             group,

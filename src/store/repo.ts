@@ -77,19 +77,23 @@ export class Repo {
     this.insertGroupMsg = db.prepare(`
       INSERT OR IGNORE INTO messages(
         bot_id, group_openid, msg_id, author_openid, author_name, author_role,
-        ts, content, mentions_json, elements_json, attachments_json, ark_json, raw_json
+        ts, content, mentions_json, elements_json, attachments_json, ark_json, raw_json,
+        direction
       ) VALUES (
         @bot_id, @group_openid, @msg_id, @author_openid, @author_name, @author_role,
-        @ts, @content, @mentions_json, @elements_json, @attachments_json, @ark_json, @raw_json
+        @ts, @content, @mentions_json, @elements_json, @attachments_json, @ark_json, @raw_json,
+        @direction
       )
     `);
     this.insertC2cMsg = db.prepare(`
       INSERT OR IGNORE INTO c2c_messages(
         bot_id, user_openid, msg_id, author_openid, author_name, author_role,
-        ts, content, mentions_json, elements_json, attachments_json, ark_json, raw_json
+        ts, content, mentions_json, elements_json, attachments_json, ark_json, raw_json,
+        direction
       ) VALUES (
         @bot_id, @user_openid, @msg_id, @author_openid, @author_name, @author_role,
-        @ts, @content, @mentions_json, @elements_json, @attachments_json, @ark_json, @raw_json
+        @ts, @content, @mentions_json, @elements_json, @attachments_json, @ark_json, @raw_json,
+        @direction
       )
     `);
     this.upsertGroupStmt = db.prepare(`
@@ -167,6 +171,37 @@ export class Repo {
     const info = this.insertC2cMsg.run(
       messageParams(m, "user_openid", m.scopeId),
     );
+    return info.changes > 0;
+  }
+
+  /**
+   * 本机外发消息补记（官方不回推 bot 自发消息，发送成功后调用）。
+   * 与接收共用 messages 表；不写成员名册（作者是自己）。msg_id 重复=幂等重放，静默忽略。
+   */
+  saveOutgoingGroupMessage(p: {
+    botId: string;
+    groupOpenid: string;
+    msgId: string;
+    content: string;
+    ts: number;
+    authorName: string | null;
+  }): boolean {
+    const info = this.insertGroupMsg.run({
+      bot_id: p.botId,
+      group_openid: p.groupOpenid,
+      msg_id: p.msgId,
+      author_openid: null,
+      author_name: p.authorName,
+      author_role: null,
+      ts: p.ts,
+      content: p.content,
+      mentions_json: null,
+      elements_json: null,
+      attachments_json: null,
+      ark_json: null,
+      raw_json: null,
+      direction: 1,
+    });
     return info.changes > 0;
   }
 
@@ -649,5 +684,6 @@ function messageParams(
       m.attachments.length > 0 ? JSON.stringify(m.attachments) : null,
     ark_json: m.ark !== undefined ? JSON.stringify(m.ark) : null,
     raw_json: JSON.stringify(m.raw),
+    direction: m.direction ?? 0,
   };
 }
