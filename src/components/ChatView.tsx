@@ -25,6 +25,15 @@ function RoleTag({ role }: { role: string | null }) {
   return null;
 }
 
+/** 官方群聊被动回复窗口：消息时间起 5 分钟内可引用回复（每条消息上限 5 次） */
+const REPLY_WINDOW_MS = 5 * 60_000;
+
+/** 引用回复目标是否已出窗（缺 msg_id / 缺时间戳 / 超 5 分钟均视为不可回复） */
+function replyExpired(m: MsgItem): boolean {
+  if (m.msg_id === "" || m.ts === null) return true;
+  return Date.now() - new Date(m.ts).getTime() > REPLY_WINDOW_MS;
+}
+
 /** 聊天主区：群头 + 消息流（QQ 风格气泡）+ 发送框（被动回复 / 主动消息） */
 export default function ChatView(props: Props) {
   const { boot, botName, botAppid, group, messages, hasMore, busyOlder, onLoadOlder, onSend, onShowDetail } = props;
@@ -91,6 +100,13 @@ export default function ChatView(props: Props) {
   const doSend = async (): Promise<void> => {
     const t = text.trim();
     if (t === "" || groupOpenid === null || sending) return;
+    // 兜底校验：回复目标出窗时不打服务端（渲染间隙内过期的行按钮仍是可点状态）
+    if (replyTo !== null && replyExpired(replyTo)) {
+      void msg.warning(
+        "引用的消息已超过 5 分钟被动回复窗口（官方限制），无法被动回复；可取消引用后直接作为主动消息发送。",
+      );
+      return;
+    }
     setSending(true);
     try {
       await onSend(t, replyTo?.msg_id ?? null);
@@ -154,6 +170,7 @@ export default function ChatView(props: Props) {
             )}
             {messages.map((m) => {
               const self = m.pending === true || m.out === true;
+              const expired = self ? false : replyExpired(m);
               return (
                 <div key={m.msg_id !== "" ? m.msg_id : `pending-${m.rid}`} className={`msg-row${self ? " self" : ""}`}>
                   <Avatar
@@ -184,16 +201,26 @@ export default function ChatView(props: Props) {
                     </div>
                     {!self && (
                       <div style={{ marginTop: 2 }}>
-                        <Tooltip title="以此消息为被动回复目标（5 分钟窗口）">
-                          <Button
-                            size="small"
-                            type="text"
-                            icon={<RollbackOutlined />}
-                            style={{ color: "#9aa0a8", fontSize: 12 }}
-                            onClick={() => setReplyTo(m)}
-                          >
-                            回复
-                          </Button>
+                        <Tooltip
+                          title={
+                            expired
+                              ? "该消息已超过 5 分钟被动回复窗口（官方限制），不能引用回复"
+                              : "以此消息为被动回复目标（5 分钟窗口）"
+                          }
+                        >
+                          {/* disabled Button 吞掉 hover，包一层 span 让 Tooltip 仍可提示 */}
+                          <span>
+                            <Button
+                              size="small"
+                              type="text"
+                              icon={<RollbackOutlined />}
+                              disabled={expired}
+                              style={{ color: "#9aa0a8", fontSize: 12 }}
+                              onClick={() => setReplyTo(m)}
+                            >
+                              回复
+                            </Button>
+                          </span>
                         </Tooltip>
                       </div>
                     )}
