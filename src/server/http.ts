@@ -27,6 +27,8 @@ export interface ServerDeps {
   supervisor?: GatewaySupervisor;
   tokens?: TokenService;
   botStatuses?: () => GatewayStatus[];
+  /** MCP 工具执行全局并发上限（测试注入口；缺省 8，语义见 mcp.ts McpDeps） */
+  maxConcurrent?: number;
 }
 
 /** Authorization: Bearer <token> 提取；无效返回 null */
@@ -72,6 +74,7 @@ export function buildServer(deps: ServerDeps) {
     sender: deps.sender,
     bots: deps.registry,
     supervisor: deps.supervisor,
+    maxConcurrent: deps.maxConcurrent,
     version,
   });
   app.route({

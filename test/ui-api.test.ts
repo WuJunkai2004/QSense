@@ -357,7 +357,7 @@ test("M7-U7 运行时添加 bot：联动 supervisor.addBot、bootstrap 可见、
   }
 });
 
-test("M7-U8 移除 bot：env 基座 400；动态 200 且联动 removeBot + token/会话清理", async () => {
+test("M7-U8 移除 bot：不存在 → 400（不在注册表）；存在 → 200 且联动 removeBot + token/会话清理", async () => {
   const fx = await setupServer(false);
   try {
     const h = authHeaders({ "Content-Type": "application/json" });

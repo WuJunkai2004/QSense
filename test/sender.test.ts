@@ -158,7 +158,7 @@ test("M4-1 幂等重放：同 msg_id+同文本 两次调用只发一条，第二
   }
 });
 
-test("M4-2 不同文本 → msg_seq 递增为 2，两条都在账本", async () => {
+test("M4-2 不同文本 → 第二次以 msg_seq=2 真实发出（账本落库断言见 M4-8）", async () => {
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "M1");
@@ -300,16 +300,9 @@ test("M4-4 次数耗尽（5次后）→ 明确报错；failed 行不占次数", 
 test("M4-5 双重门禁：开关关/白名单外 → 硬拒绝，API 零调用", async () => {
   const fx = setupDb();
   try {
-    const configOff = loadConfig({
-      QQ_APPS: `[{"appid":"${BOT}","secret":"s","name":"t"}]`,
-      MCP_TOKEN: "m4-test-token-0123456789abcdef",
-      DATA_DIR: fx.db.name.replace(/[/\\]qqbot\.db$/, ""),
-      SEND_ENABLE: "false",
-      ALLOW_GROUPS: GROUP,
-    });
     const mock = makeApiMock();
     const sender = new Sender({
-      config: configOff,
+      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -317,7 +310,7 @@ test("M4-5 双重门禁：开关关/白名单外 → 硬拒绝，API 零调用",
       bots: fx.registry,
       apiFor: () => mock,
     });
-    // M8：门禁读库，直接落库关开关
+    // M8：门禁权威在 SQLite（config.sendEnabled 已不参与判定）——落库关开关
     fx.repo.setSendEnable(false);
     await assert.rejects(
       () => sender.proactive(BOT, GROUP, "hi"),
@@ -329,14 +322,18 @@ test("M4-5 双重门禁：开关关/白名单外 → 硬拒绝，API 零调用",
     );
     await assert.rejects(() => sender.recall(BOT, GROUP, "X"), /SEND_ENABLE/);
 
-    // 开关开但群不在白名单（M8：白名单按 bot 落库，运行时清空）
+    // 开关开且白名单含 G1：白名单外群拒绝——区分「空表全拒」与「精确判断某群不在名单」
     fx.repo.setSendEnable(true);
-    fx.registry.setAllowGroups(BOT, []);
+    fx.registry.setAllowGroups(BOT, [GROUP]);
     await assert.rejects(
       () => sender.proactive(BOT, "OTHER_GROUP", "hi"),
       /ALLOW_GROUPS/,
     );
     assert.equal(mock.calls.length, 0, "任何拒绝都不得触发 API 调用");
+    // 正向对照：白名单内群放行
+    const ok = await sender.proactive(BOT, GROUP, "白名单内放行");
+    assert.equal(ok.status, "sent");
+    assert.equal(mock.calls.length, 1);
   } finally {
     fx.close();
   }
@@ -515,6 +512,16 @@ test("M6-13 qq_forget：需显式 confirm；执行后消息/名册/注册表/游
     seedInbound(fx.repo, "M1");
     fx.repo.setGroupSwitch(BOT, GROUP, true);
     fx.repo.setCursor(BOT, GROUP, "5");
+    // 账本行先于 purge 落库：forget 后仍在，才是「sends 保留」的真实检验
+    fx.repo.insertSend({
+      bot_id: BOT,
+      target_openid: GROUP,
+      kind: "proactive",
+      reply_msg_id: null,
+      msg_seq: null,
+      payload_hash: "x",
+      status: "sent",
+    });
     const ctx = { repo: fx.repo, config: fx.config, botId: BOT, sender: undefined };
 
     // 读权限即可调用（合规退出通道，不走 SEND_ENABLE 门禁），但必须显式 confirm
@@ -557,16 +564,7 @@ test("M6-13 qq_forget：需显式 confirm；执行后消息/名册/注册表/游
       0,
     );
     assert.equal(fx.repo.getCursor(BOT, GROUP), null);
-    // 发送审计账本保留
-    fx.repo.insertSend({
-      bot_id: BOT,
-      target_openid: GROUP,
-      kind: "proactive",
-      reply_msg_id: null,
-      msg_seq: null,
-      payload_hash: "x",
-      status: "sent",
-    });
+    // 发送审计账本保留：purge 不清 sends（合规审计要求，行在 purge 前已落库）
     assert.equal(
       (fx.db.prepare("SELECT COUNT(*) AS n FROM sends").get() as { n: number })
         .n,
@@ -577,12 +575,12 @@ test("M6-13 qq_forget：需显式 confirm；执行后消息/名册/注册表/游
   }
 });
 
-test("M6-14 MCP 并发限制：超上限快速失败不排队", async () => {
+test("runTool 未知工具名 → isError 快速失败（并发闸集成测试见 mcp.test.ts M6-14）", async () => {
   const fx = setupDb();
   try {
-    // 占满并发：直接以低上限构造 handler 不可行（handler 内部闭包），
-    // 此处验证 runTool 语义即可——并发闸在 mcp.ts CallToolRequestSchema 包装层，集成验证由 8 并发以上压测覆盖。
-    // 这里断言 runTool 对未知工具/异常路径 isError（快速失败语义的基础）。
+    // runTool 是工具分发层：未知工具名不走任何实现，直接 isError。
+    // mcp.ts CallToolRequestSchema 包装层的并发闸（active >= maxConcurrent → 服务繁忙）
+    // 由 mcp.test.ts M6-14 以 maxConcurrent=1 + 挂起发送器做真实覆盖。
     const bad = await runTool(
       "no_such_tool",
       {},

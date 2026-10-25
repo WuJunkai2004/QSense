@@ -11,6 +11,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { loadConfig } from "../src/config";
 import { buildServer } from "../src/server/http";
 import { createLogger } from "../src/logger";
+import { Sender } from "../src/sender";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { BotRegistry } from "../src/bots";
@@ -23,10 +24,22 @@ const GROUP = "GROUP_OPENID_G1";
 interface Fixture {
   baseUrl: string;
   agentToken: string;
+  db: DB;
+  /** hangSend 模式下解锁挂起的 sendRaw（幂等；其余模式为 no-op） */
+  hang: { release: () => void };
   close: () => Promise<void>;
 }
 
-async function setupServer(): Promise<Fixture> {
+interface SetupOpts {
+  /** 发送总开关入库值（缺省 false——多数用例验证写工具被拒） */
+  sendEnabled?: boolean;
+  /** MCP 并发上限注入口（缺省 8，见 mcp.ts McpDeps） */
+  maxConcurrent?: number;
+  /** 注入「挂起的发送器」：sendRaw 阻塞到 hang.release()，供并发闸测试占用并发槽 */
+  hangSend?: boolean;
+}
+
+async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
   const dir = mkdtempSync(join(tmpdir(), "qqbot-m3-test-"));
   const db = openDatabase(dir);
   runMigrations(db, migrations);
@@ -101,12 +114,37 @@ async function setupServer(): Promise<Fixture> {
     DATA_DIR: dir,
   });
   // M8：admin token 供 /ui/api；/mcp 只认 bot agent token（播种后轮换取出）
-  repo.seedRuntime(false, TOKEN);
+  repo.seedRuntime(opts.sendEnabled ?? false, TOKEN);
   const registry = new BotRegistry({
     db,
     seed: { apps: config.apps, allowGroups: [GROUP] },
   });
   const agentToken = registry.rotateToken("10001");
+
+  // 可选：挂起的发送器——sendRaw 阻塞到 release()，供 M6-14 并发闸测试占住并发槽
+  let releaseHang: () => void = () => {};
+  let sender: Sender | undefined;
+  if (opts.hangSend === true) {
+    const gate = new Promise<void>((resolve) => {
+      releaseHang = resolve;
+    });
+    sender = new Sender({
+      config,
+      log: createLogger("error"),
+      db,
+      repo,
+      tokenManager: {} as never,
+      bots: registry,
+      apiFor: () =>
+        ({
+          async sendRaw() {
+            await gate;
+            return { id: "PROVIDER_HUNG" };
+          },
+          async recallMessage() {},
+        }) as never,
+    });
+  }
 
   const app = buildServer({
     config,
@@ -115,6 +153,8 @@ async function setupServer(): Promise<Fixture> {
     repo,
     registry,
     version: "0.1.0",
+    sender,
+    maxConcurrent: opts.maxConcurrent,
   });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const addr = app.server.address();
@@ -123,6 +163,8 @@ async function setupServer(): Promise<Fixture> {
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     agentToken,
+    db,
+    hang: { release: releaseHang },
     close: async () => {
       await app.close();
       db.close();
@@ -258,7 +300,7 @@ test("M3-3 闭环：列群 → 取新消息 → 关键词搜索；游标断点�
         arguments: {},
       })) as never,
     );
-    assert.equal(groups.count ?? undefined, undefined);
+    assert.ok(!("count" in groups), "qq_list_groups 返回体不应有 count 字段");
     const groupList = groups.groups as Array<Record<string, unknown>>;
     assert.equal(groupList.length, 2);
     const g1 = groupList.find((g) => g.group_openid === GROUP)!;
@@ -296,19 +338,24 @@ test("M3-3 闭环：列群 → 取新消息 → 关键词搜索；游标断点�
     );
     assert.equal(second.count, 0);
 
-    // 搜索（4 字关键词走 FTS trigram）
+    // 搜索（≥3 字走 FTS trigram 路径，见 repo.searchMessages：[...q].length >= 3）
+    // "排期表" 命中 M4/M5；M1 仅含「排期」二字，短语不应命中——同时验证 FTS JOIN 真实执行
     const search = payloadOf(
       (await client.callTool({
         name: "qq_search",
-        arguments: { group: GROUP, query: "排期" },
+        arguments: { group: GROUP, query: "排期表" },
       })) as never,
     );
     const hitIds = (search.messages as Array<Record<string, unknown>>).map(
       (m) => m.msg_id,
     );
-    assert.ok(hitIds.includes("M1"), "FTS 应命中 M1");
     assert.ok(hitIds.includes("M4"), "FTS 应命中 M4");
-    // 2 字降级 LIKE 也应命中
+    assert.ok(hitIds.includes("M5"), "FTS 应命中 M5");
+    assert.ok(
+      !hitIds.includes("M1"),
+      "短语「排期表」不应命中仅含「排期」的 M1",
+    );
+    // 2 字降级 LIKE 子串路径（"开会" 仅 M1）
     const search2 = payloadOf(
       (await client.callTool({
         name: "qq_search",
@@ -318,6 +365,67 @@ test("M3-3 闭环：列群 → 取新消息 → 关键词搜索；游标断点�
     assert.equal((search2.messages as unknown[]).length, 1);
     await client.close();
   } finally {
+    await fx.close();
+  }
+});
+
+test("M6-14 MCP 并发闸（真实路径）：占满上限后第二请求立即报服务繁忙，不排队", async () => {
+  const fx = await setupServer({
+    sendEnabled: true,
+    maxConcurrent: 1,
+    hangSend: true,
+  });
+  let client: Client | null = null;
+  try {
+    client = await connectClient(fx.baseUrl, fx.agentToken);
+    // 请求 A：进闸（active=1）并卡在挂起的 sendRaw——账本出现 reserved 行即视为已进闸
+    const slowP = client.callTool({
+      name: "qq_send_proactive",
+      arguments: { group: GROUP, text: "慢请求" },
+    }) as Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
+    let reserved = 0;
+    for (let i = 0; i < 500 && reserved === 0; i++) {
+      reserved = (
+        fx.db.prepare("SELECT COUNT(*) AS n FROM sends").get() as { n: number }
+      ).n;
+      if (reserved === 0) await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.equal(
+      reserved,
+      1,
+      "慢请求应已进入挂起的 sendRaw（账本已记 reserved 行）",
+    );
+
+    // 请求 B：闸满 → 立即得到「服务繁忙」（此刻 A 仍挂起，B 未排队等待）
+    const busy = (await client.callTool({
+      name: "qq_list_groups",
+      arguments: {},
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(busy.isError, true);
+    assert.ok(
+      busy.content[0]!.text.includes("服务繁忙"),
+      `应报服务繁忙：${busy.content[0]!.text}`,
+    );
+
+    // 释放 A：正常完成且并发槽归还——后续请求不再繁忙（无占位泄漏）
+    fx.hang.release();
+    const slow = await slowP;
+    assert.ok(
+      slow.isError !== true,
+      `挂起请求释放后应成功：${slow.content[0]?.text}`,
+    );
+    const after = (await client.callTool({
+      name: "qq_list_groups",
+      arguments: {},
+    })) as { isError?: boolean };
+    assert.ok(after.isError !== true, "释放后并发槽应已归还");
+  } finally {
+    fx.hang.release();
+    try {
+      await client?.close();
+    } catch {
+      /* 已关闭则忽略 */
+    }
     await fx.close();
   }
 });

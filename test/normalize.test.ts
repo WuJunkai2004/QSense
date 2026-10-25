@@ -101,10 +101,20 @@ test("M2-1 msg_elements 递归展开：文本/卡片/并行/合并转发多层/�
   assert.ok(text.includes("并行分支"));
   assert.ok(text.includes("[卡片] 投票卡片"));
   assert.ok(text.includes("未知类型兜底文本"));
-  // 缩进体现层级：二层转发比一层深
-  const nestedIdx = text.indexOf("二层转发");
-  const firstIdx = text.indexOf("转发里的第一条");
-  assert.ok(nestedIdx > firstIdx);
+  // 缩进体现层级：depth 缩进真实生效——一层子消息恰好 2 空格、二层 4 空格（树序本身不保证缩进）
+  const allLines = text.split("\n");
+  const firstLine = allLines.find((l) => l.includes("转发里的第一条"));
+  const nestedLine = allLines.find((l) => l.includes("二层转发"));
+  assert.ok(firstLine !== undefined, "应展开出一层转发消息");
+  assert.ok(nestedLine !== undefined, "应展开出二层转发消息");
+  assert.ok(
+    firstLine.startsWith("  ") && !firstLine.startsWith("    "),
+    `一层子消息应恰好 2 空格缩进：${JSON.stringify(firstLine)}`,
+  );
+  assert.ok(
+    nestedLine.startsWith("    "),
+    `二层子消息应有 4 空格缩进：${JSON.stringify(nestedLine)}`,
+  );
 });
 
 test("M2-2 迁移 v2/v3：业务表齐全，FTS 触发器同步可检索", () => {
