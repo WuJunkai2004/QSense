@@ -298,7 +298,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               registry.setAuthLevel(appid, rec.auth_level);
               uiLog.info("auth level via ui", {
                 appid,
-                level: rec.auth_level,
+                auth_level: rec.auth_level,
               });
             }
           }
