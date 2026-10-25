@@ -13,7 +13,7 @@ import {
   Typography,
 } from "antd";
 import { get, post, put } from "../api";
-import type { AgentTokenResult, SettingsInfo } from "../types";
+import type { AgentTokenResult, AuthLevel, SettingsInfo } from "../types";
 
 interface Props {
   open: boolean;
@@ -87,6 +87,27 @@ export default function SettingsView({ open, onChanged }: Props) {
       void message.error(errMsg(e));
     } finally {
       setSavingKey(null);
+    }
+  };
+
+  // M9：认证等级按 bot 即时改（主动消息频控预算 30/60 qpm）
+  const saveAuthLevel = async (appid: string, level: AuthLevel): Promise<void> => {
+    try {
+      const r = await put<SettingsInfo>("/settings", {
+        auth_levels: [{ appid, auth_level: level }],
+      });
+      setInfo(r);
+      setDrafts(
+        Object.fromEntries(r.bots.map((b) => [b.appid, b.allow_groups])),
+      );
+      void message.success(
+        level === "certified"
+          ? "已标记为认证 bot：主动消息预算 60 条/分钟"
+          : "已标记为未认证 bot：主动消息预算 30 条/分钟",
+      );
+      onChanged();
+    } catch (e) {
+      void message.error(errMsg(e));
     }
   };
 
@@ -185,6 +206,34 @@ export default function SettingsView({ open, onChanged }: Props) {
                     保存
                   </Button>
                 </Space.Compact>
+                <div
+                  style={{
+                    marginTop: 12,
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "center",
+                  }}
+                >
+                  <Typography.Text type="secondary">
+                    认证等级（主动消息频控预算）
+                  </Typography.Text>
+                  <Select<AuthLevel>
+                    size="small"
+                    value={b.auth_level}
+                    style={{ width: 170 }}
+                    onChange={(v) => void saveAuthLevel(b.appid, v)}
+                    options={[
+                      {
+                        value: "uncertified",
+                        label: "未认证（30 条/分钟）",
+                      },
+                      {
+                        value: "certified",
+                        label: "已认证（60 条/分钟）",
+                      },
+                    ]}
+                  />
+                </div>
               </Card>
             );
           })}

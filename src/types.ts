@@ -1,10 +1,14 @@
 // 与 qqbot-websocket-mcp /ui/api 的载荷契约（字段与服务端 ui.ts 输出一一对应）
 
+export type AuthLevel = "certified" | "uncertified";
+
 export interface BotInfo {
   appid: string;
   name: string;
   /** M8：白名单按 bot 独立落库（bots 表），不再是顶层全局字段 */
   allow_groups: string[];
+  /** M9：认证等级按 bot 落库（主动消息频控预算 certified=60qpm / uncertified=30qpm） */
+  auth_level: AuthLevel;
   gateway: "ready" | "resumed" | "disconnected" | "fatal" | "unknown";
   detail?: string;
 }
@@ -13,7 +17,6 @@ export interface Bootstrap {
   version: string;
   uptime_s: number;
   send_enabled: boolean;
-  auth_level: "certified" | "uncertified";
   bots: BotInfo[];
 }
 
@@ -24,6 +27,7 @@ export interface SettingsInfo {
     appid: string;
     name: string;
     allow_groups: string[];
+    auth_level: AuthLevel;
     gateway: string;
   }>;
 }

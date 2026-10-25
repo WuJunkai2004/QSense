@@ -340,7 +340,7 @@ export default function App() {
           发送{boot.send_enabled === true ? "开" : "关"}
         </Tag>
         <Tag color="blue">
-          {boot.auth_level === "certified" ? "已认证" : "未认证"}
+          {bot?.auth_level === "certified" ? "已认证" : "未认证"}
         </Tag>
         <span className="spacer" />
         <span style={{ color: "#9aa0a8", fontSize: 12 }}>

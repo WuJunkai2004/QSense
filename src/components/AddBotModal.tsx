@@ -6,10 +6,11 @@ import {
   Form,
   Input,
   Modal,
+  Select,
   Typography,
 } from "antd";
 import { post } from "../api";
-import type { AddBotResult } from "../types";
+import type { AddBotResult, AuthLevel } from "../types";
 
 interface Props {
   open: boolean;
@@ -18,7 +19,8 @@ interface Props {
 }
 
 /** 添加机器人：appid + AppSecret（服务端先过官方凭据校验）。
- *  M8：成功后 agent_token 仅本次返回——成功态强制展示、确认保存后才能关闭。 */
+ *  M8：成功后 agent_token 仅本次返回——成功态强制展示、确认保存后才能关闭。
+ *  M9：可填认证等级（主动消息频控预算），此后可在设置页修改。 */
 export default function AddBotModal({ open, onClose, onAdded }: Props) {
   const { message } = AntApp.useApp();
   const [form] = Form.useForm();
@@ -39,6 +41,7 @@ export default function AddBotModal({ open, onClose, onAdded }: Props) {
       appid: string;
       secret: string;
       name?: string;
+      auth_level?: AuthLevel;
     };
     setBusy(true);
     try {
@@ -103,6 +106,14 @@ export default function AddBotModal({ open, onClose, onAdded }: Props) {
           </Form.Item>
           <Form.Item name="name" label="备注名（可选）">
             <Input placeholder="缺省使用 AppID" />
+          </Form.Item>
+          <Form.Item name="auth_level" label="认证等级" initialValue="uncertified">
+            <Select
+              options={[
+                { value: "uncertified", label: "未认证（主动消息 30 条/分钟）" },
+                { value: "certified", label: "已认证（主动消息 60 条/分钟）" },
+              ]}
+            />
           </Form.Item>
         </Form>
       ) : (
