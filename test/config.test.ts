@@ -1,109 +1,66 @@
-// M0 验收：配置校验——合法通过、缺项/非法报错可操作（不依赖真实QQ凭据）。
+// M0/M9 验收：配置校验——env 只承担部署拓扑与运维参数；
+// bot 注册（appid/secret/认证等级）、admin token、发送开关、白名单一律以 SQLite 为权威，
+// 相关 env 键即使存在也被忽略（不再读取，报错通道走 WebUI / qq_register_bot）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadConfig } from "../src/config";
 
-const baseEnv = {
-  QQ_APPS: '[{"appid":"123456","secret":"s3cr3t-value","name":"主bot"}]',
-  MCP_TOKEN: "x".repeat(32),
-};
-
-test("合法配置通过校验并给出默认值", () => {
-  const cfg = loadConfig({ ...baseEnv });
-  assert.equal(cfg.apps.length, 1);
-  assert.equal(cfg.apps[0].appid, "123456");
-  assert.equal(cfg.apps[0].name, "主bot");
+test("空 env 即合法：全部缺省值就位（M9 起 bot/token 不再来自 env）", () => {
+  const cfg = loadConfig({});
   assert.equal(cfg.port, 8787);
   assert.equal(cfg.host, "127.0.0.1");
   assert.equal(cfg.dataDir, "./data");
-  assert.equal(cfg.sendEnabled, false);
-  assert.equal(cfg.allowGroups.length, 0);
   assert.equal(cfg.logContent, false);
+  assert.equal(cfg.retentionDays, 90);
 });
 
-test("多bot解析：name 缺省回落 appid，重复 appid 拒绝", () => {
+test("已退役的 env 键被忽略（QQ_APPS/MCP_TOKEN/SEND_ENABLE/ALLOW_GROUPS/QQ_AUTH_LEVEL）", () => {
+  // M9 前这些值非法会直接拒绝启动；现在一律不读取——即使内容是坏的
   const cfg = loadConfig({
-    ...baseEnv,
-    QQ_APPS: '[{"appid":"111","secret":"a"},{"appid":"222","secret":"b"}]',
+    QQ_APPS: "{oops",
+    MCP_TOKEN: "short",
+    SEND_ENABLE: "yes",
+    ALLOW_GROUPS: "abc",
+    QQ_AUTH_LEVEL: "gold",
   });
-  assert.deepEqual(
-    cfg.apps.map((a) => a.appid),
-    ["111", "222"],
-  );
-  assert.equal(cfg.apps[0].name, "111");
-
-  assert.throws(
-    () =>
-      loadConfig({
-        ...baseEnv,
-        QQ_APPS: '[{"appid":"111","secret":"a"},{"appid":"111","secret":"b"}]',
-      }),
-    (e: Error) => e.message.includes("111"),
-  );
+  assert.equal(cfg.port, 8787); // 其余字段照常解析
 });
 
-test("ALLOW_GROUPS 按逗号/空白拆分", () => {
-  const cfg = loadConfig({
-    ...baseEnv,
-    SEND_ENABLE: "true",
-    ALLOW_GROUPS: "abc, def\nghi",
-  });
-  assert.deepEqual(cfg.allowGroups, ["abc", "def", "ghi"]);
-  assert.equal(cfg.sendEnabled, true);
-});
-
-test("缺 QQ_APPS / MCP_TOKEN 报可操作错误", () => {
-  assert.throws(
-    () => loadConfig({}),
-    (e: Error) => e.message.includes("QQ_APPS"),
-  );
-  assert.throws(
-    () => loadConfig({ QQ_APPS: baseEnv.QQ_APPS }),
-    (e: Error) => e.message.includes("MCP_TOKEN"),
-  );
-});
-
-test("QQ_APPS 非法 JSON / 非数组 / 缺字段 报可操作错误", () => {
-  assert.throws(
-    () => loadConfig({ ...baseEnv, QQ_APPS: "{oops" }),
-    (e: Error) => e.message.includes("QQ_APPS"),
-  );
-  assert.throws(
-    () => loadConfig({ ...baseEnv, QQ_APPS: '{"appid":"1"}' }),
-    (e: Error) => e.message.includes("QQ_APPS"),
-  );
-  assert.throws(
-    () => loadConfig({ ...baseEnv, QQ_APPS: '[{"appid":"111"}]' }),
-    (e: Error) => e.message.includes("secret"),
-  );
-});
-
-test("MCP_TOKEN 过短拒绝", () => {
-  assert.throws(
-    () => loadConfig({ ...baseEnv, MCP_TOKEN: "short" }),
-    (e: Error) => e.message.includes("MCP_TOKEN"),
-  );
-});
-
-test("SEND_ENABLE=true 而无白名单直接拒绝（双重门禁）", () => {
-  assert.throws(
-    () => loadConfig({ ...baseEnv, SEND_ENABLE: "true" }),
-    (e: Error) => e.message.includes("ALLOW_GROUPS"),
-  );
+test("HOST/DATA_DIR 自定义生效", () => {
+  const cfg = loadConfig({ HOST: " 0.0.0.0 ", DATA_DIR: "/var/lib/qqbot" });
+  assert.equal(cfg.host, "0.0.0.0"); // trim
+  assert.equal(cfg.dataDir, "/var/lib/qqbot");
 });
 
 test("非法布尔值与端口拒绝", () => {
   assert.throws(
-    () => loadConfig({ ...baseEnv, SEND_ENABLE: "yes" }),
-    (e: Error) => e.message.includes("SEND_ENABLE"),
+    () => loadConfig({ LOG_CONTENT: "yes" }),
+    (e: Error) => e.message.includes("LOG_CONTENT"),
   );
   assert.throws(
-    () => loadConfig({ ...baseEnv, PORT: "0" }),
+    () => loadConfig({ PORT: "0" }),
     (e: Error) => e.message.includes("PORT"),
   );
   assert.throws(
-    () => loadConfig({ ...baseEnv, PORT: "abc" }),
+    () => loadConfig({ PORT: "abc" }),
     (e: Error) => e.message.includes("PORT"),
+  );
+  assert.throws(
+    () => loadConfig({ PORT: "70000" }),
+    (e: Error) => e.message.includes("PORT"),
+  );
+});
+
+test("LOG_CONTENT=true 生效；RETENTION_DAYS 边界校验", () => {
+  assert.equal(loadConfig({ LOG_CONTENT: "true" }).logContent, true);
+  assert.equal(loadConfig({ RETENTION_DAYS: "30" }).retentionDays, 30);
+  assert.throws(
+    () => loadConfig({ RETENTION_DAYS: "0" }),
+    (e: Error) => e.message.includes("RETENTION_DAYS"),
+  );
+  assert.throws(
+    () => loadConfig({ RETENTION_DAYS: "9999" }),
+    (e: Error) => e.message.includes("RETENTION_DAYS"),
   );
 });

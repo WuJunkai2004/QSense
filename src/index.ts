@@ -1,5 +1,6 @@
 // 入口：dotenv → 配置校验（缺项报可操作错误并退出1）→ 日志 → SQLite 迁移 →
-// Fastify（/healthz；M3 起 /mcp）→ 优雅退出（SIGINT/SIGTERM）。
+// 运行时引导（发送开关缺省 false；admin token 缺失则现场生成并打印一次）→
+// Fastify（/healthz；M3 起 /mcp；M7 起 /ui）→ 优雅退出（SIGINT/SIGTERM）。
 
 import { loadConfig, loadDotEnv } from "./config";
 import { BotRegistry } from "./bots";
@@ -36,13 +37,19 @@ async function main(): Promise<void> {
   // 事件入库（M2）+ 发送器（M4）+ 机器人注册表（M7 运行时动态 bot）：
   // 单一 Repo 实例贯穿缓存/账本/MCP 工具；registry 贯穿网关/发送器/工具面/UI
   const repo = new Repo(db);
-  // M8 运行时设置播种（幂等，kv 已有值不覆盖）：发送总开关 / admin token。
-  // .env 的 SEND_ENABLE / MCP_TOKEN 从"运行时权威"降级为"首次播种源"。
-  repo.seedRuntime(config.sendEnabled, config.mcpToken);
+  // M9 运行时引导（幂等）：发送开关缺省 false；admin token 缺失时现场生成，
+  // 仅在首次生成时打印一次（之后只存 kv admin:token:v1，遗失需自行轮换）。
+  const runtime = repo.ensureRuntime();
+  if (runtime.adminCreated) {
+    process.stdout.write(
+      "\n[初始化] 已生成初始 admin token（仅此一次打印，请立即登录 WebUI 并妥善保存）：\n" +
+        `  ${runtime.adminToken}\n\n`,
+    );
+    log.warn("initial admin token generated (printed once to stdout)");
+  }
   const tokens = new TokenService(log.child("token"));
   const registry = new BotRegistry({
     db,
-    seed: { apps: config.apps, allowGroups: config.allowGroups },
     verify: async (app) => {
       // 两级凭据校验：token 接口（appid/secret 正确性）+ 网关地址接口（IP 白名单 11298 等
       // 网关入口问题——token 接口不校验白名单，只验 token 会出现"添加成功但连不上"）
@@ -51,7 +58,6 @@ async function main(): Promise<void> {
     },
   });
   const sender = new Sender({
-    config,
     log,
     db,
     repo,
@@ -67,7 +73,6 @@ async function main(): Promise<void> {
 
   // 事件接入器：WS 出站长连接，逐 bot 连接官方网关（共享 tokens；运行时可经 UI 增删）
   const gateway = new GatewaySupervisor({
-    config,
     log,
     db,
     tokens,
@@ -105,7 +110,6 @@ async function main(): Promise<void> {
   });
 
   const app = buildServer({
-    config,
     log,
     db,
     repo,
@@ -168,7 +172,7 @@ async function main(): Promise<void> {
       addr,
       bots: registry.list().length,
       dataDir: config.dataDir,
-      send: config.sendEnabled ? "on" : "off",
+      send: repo.getSendEnable() ? "on" : "off",
     }),
   );
 }

@@ -9,29 +9,23 @@ import { t } from "./i18n";
 export interface BotApp {
   /** 开放平台 AppID（数字串），同时作为缓存表主键中的 bot_id */
   appid: string;
-  /** AppSecret，仅存 .env，不落日志（logger 兜底剥离） */
+  /** AppSecret，仅存 SQLite bots 表，不落日志（logger 兜底剥离） */
   secret: string;
   /** 备注名，缺省回落 appid */
   name: string;
 }
 
+export type AuthLevel = "certified" | "uncertified";
+
 export interface Config {
-  apps: BotApp[];
-  mcpToken: string;
   host: string;
   port: number;
   dataDir: string;
-  sendEnabled: boolean;
-  allowGroups: string[];
   logContent: boolean;
   logLevel: Level;
   /** 缓存消息保留天数（DESIGN.md §3.3 保留策略），默认 90 */
   retentionDays: number;
-  /** 机器人认证等级：决定主动消息 bot 级频控（certified=60qpm / uncertified=30qpm），默认未认证（保守） */
-  authLevel: AuthLevel;
 }
-
-export type AuthLevel = "certified" | "uncertified";
 
 /** 读取 .env（不覆盖已存在的进程环境变量）；零依赖轻实现，仅需 KEY=VALUE 语法。 */
 export function loadDotEnv(path = ".env"): void {
@@ -69,64 +63,11 @@ function parseBool(
   throw new Error(t("cfg_bad_bool", { key, value: raw }));
 }
 
-function parseApps(raw: string | undefined): BotApp[] {
-  if (raw === undefined || raw.trim() === "") {
-    throw new Error(
-      t("cfg_missing", {
-        key: "QQ_APPS",
-        hint: '示例：QQ_APPS=[{"appid":"123456","secret":"xxx","name":"主bot"}]（支持多bot）',
-      }),
-    );
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    throw new Error(
-      t("cfg_qqapps_bad_json", {
-        reason: e instanceof Error ? e.message : String(e),
-      }),
-    );
-  }
-  if (!Array.isArray(parsed)) throw new Error(t("cfg_qqapps_not_array"));
-  const apps: BotApp[] = [];
-  const seen = new Set<string>();
-  for (const [i, item] of parsed.entries()) {
-    const entry = item as Record<string, unknown>;
-    const appid = typeof entry.appid === "string" ? entry.appid.trim() : "";
-    const secret = typeof entry.secret === "string" ? entry.secret.trim() : "";
-    if (!appid)
-      throw new Error(t("cfg_app_bad", { index: i + 1, field: "appid" }));
-    if (!secret)
-      throw new Error(t("cfg_app_bad", { index: i + 1, field: "secret" }));
-    if (seen.has(appid)) throw new Error(t("cfg_app_duplicate", { appid }));
-    seen.add(appid);
-    const name =
-      typeof entry.name === "string" && entry.name.trim() !== ""
-        ? entry.name.trim()
-        : appid;
-    apps.push({ appid, secret, name });
-  }
-  return apps;
-}
-
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
 ): Config {
-  const apps = parseApps(env.QQ_APPS);
-
-  const mcpToken = env.MCP_TOKEN ?? "";
-  if (mcpToken === "") {
-    throw new Error(
-      t("cfg_missing", {
-        key: "MCP_TOKEN",
-        hint: "生成：openssl rand -hex 32，写入 .env",
-      }),
-    );
-  }
-  if (mcpToken.length < 16) {
-    throw new Error(t("cfg_mcp_token_short", { len: mcpToken.length }));
-  }
+  // M9 起 env 只承担部署拓扑与运维参数：bot 注册（appid/secret/认证等级）、
+  // admin token、发送开关、白名单一律以 SQLite 为唯一权威（WebUI / qq_register_bot 管理）。
 
   const portRaw = env.PORT;
   let port = 8787;
@@ -139,15 +80,6 @@ export function loadConfig(
       throw new Error(t("cfg_bad_port", { value: portRaw }));
     }
     port = Number(portRaw);
-  }
-
-  const sendEnabled = parseBool(env, "SEND_ENABLE", false);
-  const allowGroups = (env.ALLOW_GROUPS ?? "")
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (sendEnabled && allowGroups.length === 0) {
-    throw new Error(t("cfg_send_needs_allowlist"));
   }
 
   let retentionDays = 90;
@@ -163,26 +95,12 @@ export function loadConfig(
     retentionDays = Number(retentionRaw);
   }
 
-  let authLevel: AuthLevel = "uncertified";
-  const authRaw = env.QQ_AUTH_LEVEL;
-  if (authRaw !== undefined && authRaw !== "") {
-    if (authRaw !== "certified" && authRaw !== "uncertified") {
-      throw new Error(t("cfg_bad_authlevel", { value: authRaw }));
-    }
-    authLevel = authRaw;
-  }
-
   return {
-    apps,
-    mcpToken,
     host: env.HOST?.trim() || "127.0.0.1",
     port,
     dataDir: env.DATA_DIR?.trim() || "./data",
-    sendEnabled,
-    allowGroups,
     logContent: parseBool(env, "LOG_CONTENT", false),
     logLevel: levelFromEnv(env.LOG_LEVEL),
     retentionDays,
-    authLevel,
   };
 }

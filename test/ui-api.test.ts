@@ -8,7 +8,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotRegistry } from "../src/bots";
-import { loadConfig } from "../src/config";
 import type { GatewaySupervisor } from "../src/gateway";
 import type { TokenService } from "../src/gateway/token";
 import { createLogger } from "../src/logger";
@@ -79,28 +78,25 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
     repo.setGroupSwitch(BOT, GROUP, true);
   }
 
-  const config = loadConfig({
-    QQ_APPS: `[{"appid":"${BOT}","secret":"s1","name":"基座"}]`,
-    MCP_TOKEN: TOKEN,
-    DATA_DIR: dir,
-    SEND_ENABLE: "true",
-    ALLOW_GROUPS: GROUP,
-  });
-
-  // M8：admin token 与发送开关走 SQLite 播种（.env 仅首次）
-  repo.seedRuntime(config.sendEnabled, TOKEN);
-
+  // M9：注册制台架——admin token 固定为 TOKEN（鉴权用），基座 bot 入表，发送开关走库
+  repo.ensureRuntime();
+  repo.setAdminToken(TOKEN);
+  repo.setSendEnable(true);
   const registry = new BotRegistry({
     db,
-    seed: { apps: config.apps, allowGroups: config.allowGroups },
     verify: async (app) => {
       if (app.secret === "bad") throw new Error("401 invalid credentials");
     },
   });
+  await registry.add({
+    appid: BOT,
+    secret: "s1",
+    name: "基座",
+    allowGroups: [GROUP],
+  });
 
   const api = makeApiMock();
   const sender = new Sender({
-    config,
     log: createLogger("error"),
     db,
     repo,
@@ -134,7 +130,6 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
   process.env.UI_DIST_DIR = uiDir;
 
   const app = buildServer({
-    config,
     log: createLogger("error"),
     db,
     repo,
@@ -235,9 +230,15 @@ test("M7-U3 bootstrap：bots 含来源/网关状态，发送与白名单口径�
     };
     assert.equal(body.version, "0.2.0");
     assert.equal(body.send_enabled, true);
-    // M8：白名单按 bot 落库（bots 表），不再是顶层全局字段
+    // M8：白名单按 bot 落库（bots 表），不再是顶层全局字段；M9：含 auth_level
     assert.deepEqual(body.bots, [
-      { appid: BOT, name: "基座", allow_groups: [GROUP], gateway: "ready" },
+      {
+        appid: BOT,
+        name: "基座",
+        allow_groups: [GROUP],
+        auth_level: "uncertified",
+        gateway: "ready",
+      },
     ]);
   } finally {
     await fx.close();

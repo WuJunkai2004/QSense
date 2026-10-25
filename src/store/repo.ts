@@ -1,6 +1,7 @@
 // 缓存仓储：规范化产物的 SQLite 写入与查询原语（M3 工具面在此基础上组装）。
 // 写路径全部幂等：messages 主键去重、roster upsert、开关状态幂等更新。
 
+import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { DB } from "./db";
 import type { NormalizedMessage } from "../normalize/types";
@@ -681,13 +682,25 @@ export class Repo {
   }
 
   /**
-   * M8 首次播种（幂等）：kv 已有键不覆盖——运行时改过设置后，重启不会回滚到 env 值。
-   * env 的 SEND_ENABLE / MCP_TOKEN 从"运行时权威"降级为"首次播种源"。
+   * M9 启动引导（幂等）：发送总开关缺省 false（硬约束4：写操作默认关）；
+   * admin token 缺失时现场生成（48hex，与 agent_token 同规格），created=true 时
+   * 调用方必须打印一次（仅此一次，之后只存 kv admin:token:v1）。
+   * env 的 SEND_ENABLE / MCP_TOKEN 播种通道已退役——一切以库为准。
    */
-  seedRuntime(sendEnableFromEnv: boolean, adminTokenFromEnv: string): void {
-    const insert = this.db.prepare("INSERT OR IGNORE INTO kv(k, v) VALUES (?, ?)");
-    insert.run(SETTINGS_KEY, JSON.stringify({ sendEnable: sendEnableFromEnv }));
-    insert.run(ADMIN_TOKEN_KEY, adminTokenFromEnv);
+  ensureRuntime(): { adminToken: string; adminCreated: boolean } {
+    const insert = this.db.prepare(
+      "INSERT OR IGNORE INTO kv(k, v) VALUES (?, ?)",
+    );
+    insert.run(SETTINGS_KEY, JSON.stringify({ sendEnable: false }));
+    const existing = this.kvGetStmt.get(ADMIN_TOKEN_KEY) as
+      | { v: string }
+      | undefined;
+    if (existing !== undefined) {
+      return { adminToken: existing.v, adminCreated: false };
+    }
+    const token = newAdminToken();
+    insert.run(ADMIN_TOKEN_KEY, token);
+    return { adminToken: token, adminCreated: true };
   }
 
   /** admin token（kv admin:token:v1）：WebUI/设置页管理凭证。null=尚未播种 */
@@ -703,6 +716,11 @@ export class Repo {
 
 const SETTINGS_KEY = "settings:runtime:v1";
 const ADMIN_TOKEN_KEY = "admin:token:v1";
+
+function newAdminToken(): string {
+  // 与 agent_token 同规格（48hex）；生成后仅存 kv，首次生成时打印一次
+  return randomBytes(24).toString("hex");
+}
 
 function messageParams(
   m: NormalizedMessage,

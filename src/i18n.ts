@@ -4,24 +4,10 @@
 
 const zh = {
   // —— 配置校验 ——
-  cfg_missing: "配置缺失：{key} 未设置。{hint}",
   cfg_bad_bool: "配置无效：{key}={value}，只接受 true / false。",
   cfg_bad_port: "配置无效：PORT={value}，必须是 1-65535 的整数。",
-  cfg_qqapps_bad_json:
-    '配置无效：QQ_APPS 不是合法 JSON（{reason}）。示例：QQ_APPS=[{"appid":"123456","secret":"xxx","name":"主bot"}]',
-  cfg_qqapps_not_array:
-    '配置无效：QQ_APPS 必须是 JSON 数组。示例：QQ_APPS=[{"appid":"123456","secret":"xxx","name":"主bot"}]',
-  cfg_app_bad:
-    "配置无效：QQ_APPS 第 {index} 个条目缺少 {field}（appid 为开放平台数字AppID，secret 为 AppSecret，均在 q.qq.com 获取）。",
-  cfg_app_duplicate: "配置无效：QQ_APPS 中 appid={appid} 重复出现，请去重。",
-  cfg_mcp_token_short:
-    "配置无效：MCP_TOKEN 长度不足 16 位（当前 {len} 位）。生成：openssl rand -hex 32",
-  cfg_send_needs_allowlist:
-    "配置无效：SEND_ENABLE=true 但 ALLOW_GROUPS 为空。写操作需要显式群白名单（双重门禁），格式：ALLOW_GROUPS=abc123,def456（group_openid 逗号分隔）。",
   cfg_bad_retention:
     "配置无效：RETENTION_DAYS={value}，必须是 1-3650 的整数（缓存消息保留天数）。",
-  cfg_bad_authlevel:
-    "配置无效：QQ_AUTH_LEVEL={value}，只接受 uncertified（未认证，主动消息30条/分钟）或 certified（已认证，60条/分钟）。",
   // —— 启动 ——
   boot_db_fail:
     "数据库初始化失败：{path}（{reason}）。检查 DATA_DIR 是否存在且可写。",
@@ -90,24 +76,10 @@ const zh = {
 type Translation = Record<keyof typeof zh, string>;
 
 const en: Translation = {
-  cfg_missing: "Missing config: {key} is not set. {hint}",
   cfg_bad_bool: "Invalid config: {key}={value}, only true / false accepted.",
   cfg_bad_port: "Invalid config: PORT={value}, must be an integer in 1-65535.",
-  cfg_qqapps_bad_json:
-    'Invalid config: QQ_APPS is not valid JSON ({reason}). Example: QQ_APPS=[{"appid":"123456","secret":"xxx","name":"bot"}]',
-  cfg_qqapps_not_array:
-    'Invalid config: QQ_APPS must be a JSON array. Example: QQ_APPS=[{"appid":"123456","secret":"xxx","name":"bot"}]',
-  cfg_app_bad:
-    "Invalid config: entry #{index} of QQ_APPS lacks {field} (appid = numeric AppID, secret = AppSecret, both from q.qq.com).",
-  cfg_app_duplicate: "Invalid config: duplicate appid={appid} in QQ_APPS.",
-  cfg_mcp_token_short:
-    "Invalid config: MCP_TOKEN shorter than 16 chars (got {len}). Generate: openssl rand -hex 32",
-  cfg_send_needs_allowlist:
-    "Invalid config: SEND_ENABLE=true but ALLOW_GROUPS is empty. Writes require an explicit group allowlist, format: ALLOW_GROUPS=abc123,def456 (comma-separated group_openid).",
   cfg_bad_retention:
     "Invalid config: RETENTION_DAYS={value}, must be an integer in 1-3650 (cached message retention days).",
-  cfg_bad_authlevel:
-    "Invalid config: QQ_AUTH_LEVEL={value}, only uncertified (30 proactive msg/min) or certified (60/min) accepted.",
   boot_db_fail:
     "Database init failed: {path} ({reason}). Check DATA_DIR exists and is writable.",
   boot_listen_fail:

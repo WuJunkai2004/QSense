@@ -12,16 +12,14 @@ import {
   ListToolsRequestSchema,
   isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js';
-import type { Config } from '../config';
-import type { BotRegistry } from '../bots';
 import type { BotApp } from '../config';
+import type { BotRegistry } from '../bots';
 import type { Logger } from '../logger';
 import type { Sender } from '../sender';
 import type { Repo } from '../store/repo';
 import { TOOLS, UNTRUSTED_NOTICE, runTool } from './defs';
 
 export interface McpDeps {
-  config: Config;
   log: Logger;
   repo: Repo;
   /** M4 发送器：写工具走这里；缺省=写工具硬拒绝 */
@@ -60,7 +58,7 @@ function rpcError(res: ServerResponse, status: number, code: number, message: st
 export function createMcpHandler(
   deps: McpDeps,
 ): (req: IncomingMessage, res: ServerResponse, body?: unknown, botId?: string) => Promise<void> {
-  const { config, log, repo, version } = deps;
+  const { log, repo, version } = deps;
   const mcpLog = log.child('mcp');
   const maxConcurrent = deps.maxConcurrent ?? 8;
   let active = 0;
@@ -74,7 +72,6 @@ export function createMcpHandler(
 
   const createContext = (session: { botId: string }) => ({
     repo,
-    config,
     sender: deps.sender,
     bots: deps.bots,
     supervisor: deps.supervisor,

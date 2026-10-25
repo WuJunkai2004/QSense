@@ -17,7 +17,7 @@ import {
   type GatewayStatus,
   type RawEvent,
 } from "../src/gateway";
-import { loadConfig } from "../src/config";
+import { BotRegistry } from "../src/bots";
 import { createLogger } from "../src/logger";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
@@ -43,6 +43,7 @@ interface Ctx {
   dir: string;
   db: DB;
   gw: MockGateway;
+  registry: BotRegistry;
   captured: RawEvent[];
   statuses: GatewayStatus[];
   supervisor: GatewaySupervisor;
@@ -58,15 +59,14 @@ async function setup(
   const gw = new MockGateway({ heartbeatIntervalMs: 40, ...opts });
   await gw.listen();
 
-  const config = loadConfig({
-    QQ_APPS: '[{"appid":"10001","secret":"secret-value","name":"t"}]',
-    MCP_TOKEN: "x".repeat(32),
-  });
+  // M9：无 config 回落——bot 经注册表入表后由 supervisor 连接
+  const registry = new BotRegistry({ db });
+  await registry.add({ appid: "10001", secret: "secret-value", name: "t" });
   const captured: RawEvent[] = [];
   const statuses: GatewayStatus[] = [];
   let clearCount = 0;
   const supervisor = new GatewaySupervisor({
-    config,
+    bots: registry,
     db,
     log: createLogger("error"),
     handlers: {
@@ -91,6 +91,7 @@ async function setup(
     dir,
     db,
     gw,
+    registry,
     captured,
     statuses,
     supervisor,
@@ -277,10 +278,7 @@ test("M1-7 进程重启（新连接实例 + 同一 kv）→ 直接 RESUME 恢复
     // 模拟重启：同一 mock（持有 sess-1）+ 同一 kv，新 supervisor 实例
     const statuses2: GatewayStatus[] = [];
     const supervisor2 = new GatewaySupervisor({
-      config: loadConfig({
-        QQ_APPS: '[{"appid":"10001","secret":"secret-value","name":"t"}]',
-        MCP_TOKEN: "x".repeat(32),
-      }),
+      bots: ctx.registry,
       db: ctx.db,
       log,
       handlers: {

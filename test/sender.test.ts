@@ -6,7 +6,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, type Config } from "../src/config";
 import { createLogger } from "../src/logger";
 import { Sender } from "../src/sender";
 import { handleGatewayEvent } from "../src/normalize/handler";
@@ -73,7 +72,6 @@ interface Fixture {
   db: DB;
   repo: Repo;
   registry: BotRegistry;
-  config: Config;
   close: () => void;
 }
 
@@ -82,23 +80,19 @@ function setupDb(): Fixture {
   const db = openDatabase(dir);
   runMigrations(db, migrations);
   const repo = new Repo(db);
-  const config = loadConfig({
-    QQ_APPS: `[{"appid":"${BOT}","secret":"s","name":"t"}]`,
-    MCP_TOKEN: "m4-test-token-0123456789abcdef",
-    DATA_DIR: dir,
-    SEND_ENABLE: "true",
-    ALLOW_GROUPS: GROUP,
-  });
-  const registry = new BotRegistry({
-    db,
-    seed: { apps: config.apps, allowGroups: config.allowGroups },
-  });
-  repo.seedRuntime(config.sendEnabled, config.mcpToken);
+  // M9：无 env 播种——基座 bot 直接入 bots 表（白名单含 GROUP，等价旧 ALLOW_GROUPS）；
+  // 发送开关走库并置 true（等价旧 SEND_ENABLE=true）。
+  db.prepare(
+    `INSERT INTO bots(appid, name, secret, agent_token, allow_groups, auth_level, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(BOT, "t", "s", "a".repeat(48), JSON.stringify([GROUP]), "uncertified", Date.now());
+  repo.ensureRuntime();
+  repo.setSendEnable(true);
+  const registry = new BotRegistry({ db });
   return {
     registry,
     db,
     repo,
-    config,
     close: () => {
       db.close();
       try {
@@ -138,7 +132,6 @@ test("M4-1 幂等重放：同 msg_id+同文本 两次调用只发一条，第二
     seedInbound(fx.repo, "M1");
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -164,7 +157,6 @@ test("M4-2 不同文本 → 第二次以 msg_seq=2 真实发出（账本落库�
     seedInbound(fx.repo, "M1");
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -188,7 +180,6 @@ test("M4-2b 引用开关：默认纯被动回复不带 message_reference；quote
     seedInbound(fx.repo, "M1");
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -215,7 +206,6 @@ test("M4-3 窗口过期（>5分钟）→ 明确报错且不发", async () => {
     seedInbound(fx.repo, "OLD", 6 * 60_000);
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -251,7 +241,6 @@ test("M4-4 次数耗尽（5次后）→ 明确报错；failed 行不占次数", 
     }
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -302,7 +291,6 @@ test("M4-5 双重门禁：开关关/白名单外 → 硬拒绝，API 零调用",
   try {
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -344,7 +332,6 @@ test('M4-6 日额度不足 → 明确报"配额不足"且不重试', async () =>
   try {
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -372,7 +359,6 @@ test("M4-7 令牌桶：bot 级 qpm 耗尽 → 报频控（含等待秒数）", a
   try {
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -399,7 +385,6 @@ test("M4-8 304036 → Markdown 自动降级纯文本（新 seq，降级结果可
       return { id: "PLAIN_OK" };
     });
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -430,7 +415,6 @@ test("M4-9 304023 → pending_audit；MESSAGE_AUDIT_PASS 事件回填 audit_pass
       throw new FakeApiError(304023, 200, "受理待审核");
     });
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -467,7 +451,6 @@ test('M4-10 官方错误码翻译：40054002 → "禁言"可操作文案', async
       throw new FakeApiError(40054002);
     });
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -486,7 +469,6 @@ test("M4-11 撤回：走官方 DELETE，账本记一行", async () => {
   try {
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -522,7 +504,7 @@ test("M6-13 qq_forget：需显式 confirm；执行后消息/名册/注册表/游
       payload_hash: "x",
       status: "sent",
     });
-    const ctx = { repo: fx.repo, config: fx.config, botId: BOT, sender: undefined };
+    const ctx = { repo: fx.repo, botId: BOT, sender: undefined };
 
     // 读权限即可调用（合规退出通道，不走 SEND_ENABLE 门禁），但必须显式 confirm
     const noConfirm = await runTool("qq_forget", { group: GROUP }, ctx);
@@ -584,7 +566,7 @@ test("runTool 未知工具名 → isError 快速失败（并发闸集成测试�
     const bad = await runTool(
       "no_such_tool",
       {},
-      { repo: fx.repo, config: fx.config },
+      { repo: fx.repo },
     );
     assert.equal(bad.isError, true);
   } finally {
@@ -597,7 +579,6 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
   try {
     const mock = makeApiMock();
     const sender = new Sender({
-      config: fx.config,
       log: createLogger("error"),
       db: fx.db,
       repo: fx.repo,
@@ -606,7 +587,7 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
       limits: { perGroupDaily: 1 },
       apiFor: () => mock,
     });
-    const ctx = { repo: fx.repo, config: fx.config, botId: BOT, sender };
+    const ctx = { repo: fx.repo, botId: BOT, sender };
     const ok = await runTool(
       "qq_send_proactive",
       { group: GROUP, text: "首条" },

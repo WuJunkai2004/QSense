@@ -12,7 +12,7 @@ import {
   MessageApi,
   type TokenManager,
 } from "@tencent-connect/qqbot-nodejs/protocol";
-import type { BotApp, Config } from "../config";
+import type { BotApp } from "../config";
 import type { BotRegistry } from "../bots";
 import { t } from "../i18n";
 import type { Logger } from "../logger";
@@ -73,13 +73,12 @@ export interface SendApi {
 }
 
 export interface SenderDeps {
-  config: Config;
   log: Logger;
   db: DB;
   repo: Repo;
   /** SDK TokenManager（与网关共用同一实例，token 缓存复用） */
   tokenManager: TokenManager;
-  /** 机器人注册表（含运行时动态 bot）；缺省回落 config.apps（仅测试） */
+  /** 机器人注册表（bots 表域层）：bot 查找、白名单、认证等级频控档位 */
   bots?: BotRegistry;
   /** 测试注入：覆盖限额默认值 */
   limits?: Partial<SendLimits>;
@@ -141,10 +140,19 @@ export class Sender {
     this.log = deps.log.child("sender");
     this.limits = {
       qpm:
-        deps.limits?.qpm ?? (deps.config.authLevel === "certified" ? 60 : 30),
+        deps.limits?.qpm ?? 0, // 0=按 bot 的 auth_level 现算（60/30），见 qpmOf
       perRelationQpm: deps.limits?.perRelationQpm ?? PER_RELATION_QPM,
       perGroupDaily: deps.limits?.perGroupDaily ?? PER_GROUP_DAILY,
     };
+  }
+
+  /**
+   * M9：主动消息 qpm 预算按 bot 的 auth_level 现算（certified=60 / uncertified=30）；
+   * limits.qpm 显式注入时覆盖所有 bot（测试用）。
+   */
+  private qpmOf(botId: string): number {
+    if (this.limits.qpm > 0) return this.limits.qpm;
+    return this.deps.bots?.authLevelOf(botId) === "certified" ? 60 : 30;
   }
 
   /** 指定 bot 的发送 API（生产懒建 SDK MessageApi；测试用注入） */
@@ -172,11 +180,11 @@ export class Sender {
   }
 
   private appOf(botId: string): BotApp {
-    const bots = this.deps.bots?.list() ?? this.deps.config.apps;
+    const bots = this.deps.bots?.list() ?? [];
     const app = bots.find((a) => a.appid === botId);
     if (app === undefined)
       throw new Error(
-        `bot 不存在：${botId}。可用：${bots.map((a) => a.appid).join(", ")}`,
+        `bot 不存在：${botId}。可用：${bots.map((a) => a.appid).join(", ") || "（无）"}`,
       );
     return app;
   }
@@ -393,8 +401,8 @@ export class Sender {
     if (!botTake.ok) {
       throw new Error(
         t("send_rate_limited_bot", {
-          qpm: this.limits.qpm,
-          level: this.deps.config.authLevel,
+          qpm: this.qpmOf(botId),
+          level: this.deps.bots?.authLevelOf(botId) ?? "uncertified",
           wait: waitOf(botTake),
         }),
       );
@@ -514,7 +522,8 @@ export class Sender {
   private botBucket(appid: string): TokenBucket {
     let b = this.botBuckets.get(appid);
     if (b === undefined) {
-      b = new TokenBucket(this.limits.qpm, this.limits.qpm);
+      const qpm = this.qpmOf(appid);
+      b = new TokenBucket(qpm, qpm);
       this.botBuckets.set(appid, b);
     }
     return b;

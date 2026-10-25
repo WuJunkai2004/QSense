@@ -10,7 +10,6 @@ import { readFile, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { BotRegistryError, type BotRegistry } from "../bots";
-import type { Config } from "../config";
 import type { GatewayStatus, GatewaySupervisor } from "../gateway";
 import { kvSessionPort } from "../gateway/session-store";
 import type { TokenService } from "../gateway/token";
@@ -21,7 +20,6 @@ import type { MsgRow, Repo } from "../store/repo";
 import { bearerOk } from "../tools/mcp";
 
 export interface UiDeps {
-  config: Config;
   log: Logger;
   db: DB;
   repo: Repo;
@@ -59,7 +57,7 @@ function mapError(log: Logger, e: unknown): { status: number; message: string } 
 }
 
 export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
-  const { config, log, repo, registry, supervisor, tokens, version } = deps;
+  const { log, repo, registry, supervisor, tokens, version } = deps;
   const uiLog = log.child("ui");
 
   // —— 静态托管（无鉴权：纯前端壳，不含数据） ——
@@ -187,13 +185,13 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           version,
           uptime_s: Math.round(process.uptime()),
           send_enabled: deps.repo.getSendEnable(),
-          auth_level: config.authLevel,
           bots: registry.list().map((a) => {
             const st = statuses.get(a.appid);
             return {
               appid: a.appid,
               name: a.name,
               allow_groups: registry.allowGroupsOf(a.appid),
+              auth_level: registry.authLevelOf(a.appid),
               gateway: st?.state ?? "unknown",
               detail: st?.detail,
             };
@@ -207,7 +205,26 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const appid = typeof body.appid === "string" ? body.appid : "";
           const secret = typeof body.secret === "string" ? body.secret : "";
           const name = typeof body.name === "string" ? body.name : undefined;
-          const registered = await registry.add({ appid, secret, name });
+          if (
+            body.auth_level !== undefined &&
+            body.auth_level !== "certified" &&
+            body.auth_level !== "uncertified"
+          ) {
+            throw new BotRegistryError(
+              'auth_level 无效：只接受 certified（60条/分）或 uncertified（30条/分）。',
+            );
+          }
+          const authLevel =
+            body.auth_level === "certified" ||
+            body.auth_level === "uncertified"
+              ? body.auth_level
+              : undefined;
+          const registered = await registry.add({
+            appid,
+            secret,
+            name,
+            authLevel,
+          });
           supervisor.addBot(registered.app);
           uiLog.info("bot added via ui", { appid: registered.app.appid });
           // M8：agent_token 仅此一次返回——WebUI 弹窗提示"立即保存"，服务端不留展示通道
@@ -231,6 +248,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           appid: a.appid,
           name: a.name,
           allow_groups: registry.allowGroupsOf(a.appid),
+          auth_level: registry.authLevelOf(a.appid),
           gateway:
             deps.botStatuses().find((st) => st.botId === a.appid)?.state ??
             "unknown",
@@ -262,6 +280,26 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               }
               registry.setAllowGroups(appid, groups);
               uiLog.info("allow groups via ui", { appid, count: groups.length });
+            }
+          }
+          if (Array.isArray(body.auth_levels)) {
+            for (const item of body.auth_levels) {
+              const rec = (item ?? {}) as Record<string, unknown>;
+              const appid = typeof rec.appid === "string" ? rec.appid : "";
+              if (
+                registry.get(appid) === undefined ||
+                (rec.auth_level !== "certified" &&
+                  rec.auth_level !== "uncertified")
+              ) {
+                throw new BotRegistryError(
+                  "auth_levels 项无效：需要 { appid, auth_level: \"certified\" | \"uncertified\" }，且 appid 已注册。",
+                );
+              }
+              registry.setAuthLevel(appid, rec.auth_level);
+              uiLog.info("auth level via ui", {
+                appid,
+                level: rec.auth_level,
+              });
             }
           }
           return settingsPayload();
@@ -473,8 +511,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const date = new Date().toISOString().slice(0, 10);
           return {
             bot: botId,
-            send_enabled: config.sendEnabled,
-            auth_level: config.authLevel,
+            send_enabled: repo.getSendEnable(),
+            auth_level: registry.authLevelOf(botId),
             proactive_sent_today: repo.proactiveSentToday(botId, date),
             ...(deps.sender !== undefined
               ? { buckets: deps.sender.snapshot(botId) }

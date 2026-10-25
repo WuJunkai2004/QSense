@@ -4,7 +4,6 @@
 
 import Fastify from "fastify";
 import type { BotRegistry } from "../bots";
-import type { Config } from "../config";
 import type { GatewayStatus, GatewaySupervisor } from "../gateway";
 import type { TokenService } from "../gateway/token";
 import type { Logger } from "../logger";
@@ -15,7 +14,6 @@ import { bearerOk, createMcpHandler } from "../tools/mcp";
 import { registerUiRoutes } from "./ui";
 
 export interface ServerDeps {
-  config: Config;
   log: Logger;
   db: DB;
   repo: Repo;
@@ -39,7 +37,7 @@ function bearerOf(header: unknown): string | null {
 }
 
 export function buildServer(deps: ServerDeps) {
-  const { config, log, db, repo, version } = deps;
+  const { log, db, repo, version } = deps;
   // 关闭 fastify 内置日志，统一用自研 logger；请求日志只记方法+路径（去掉 query，防泄漏）
   const app = Fastify({ logger: false });
   const httpLog = log.child("http");
@@ -59,16 +57,15 @@ export function buildServer(deps: ServerDeps) {
       ok: dbOk,
       version,
       uptime_s: Math.round(process.uptime()),
-      bots: config.apps.length,
-      send: config.sendEnabled ? "enabled" : "disabled",
+      bots: deps.registry?.list().length ?? 0,
+      send: deps.repo.getSendEnable() ? "enabled" : "disabled",
       db: dbOk ? "ok" : "error",
     };
   });
 
-  // MCP Streamable HTTP（M3→M8）：Bearer 鉴权改为「token→bot」绑定制——
-  // admin token 不再通行 /mcp；一个 agent_token 只对应 bots 表中的一行。
+  // MCP Streamable HTTP（M3→M9）：Bearer 鉴权为「token→bot」绑定制——
+  // admin token 只通 /ui/api；一个 agent_token 只对应 bots 表中的一行。
   const handleMcp = createMcpHandler({
-    config,
     log,
     repo,
     sender: deps.sender,
@@ -106,7 +103,6 @@ export function buildServer(deps: ServerDeps) {
   // WebUI（M7）：registry+supervisor+tokens 齐备才挂载（缺省=测试旧行为，不挂 /ui）
   if (deps.registry !== undefined && deps.supervisor !== undefined && deps.tokens !== undefined && deps.botStatuses !== undefined) {
     registerUiRoutes(app, {
-      config,
       log,
       db,
       repo,

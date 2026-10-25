@@ -8,7 +8,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { loadConfig } from "../src/config";
 import { buildServer } from "../src/server/http";
 import { createLogger } from "../src/logger";
 import { Sender } from "../src/sender";
@@ -108,16 +107,16 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
   repo.setGroupSwitch("10001", GROUP, true);
   repo.addGroup("10001", "GROUP_OPENID_G2");
 
-  const config = loadConfig({
-    QQ_APPS: '[{"appid":"10001","secret":"s","name":"t"}]',
-    MCP_TOKEN: TOKEN,
-    DATA_DIR: dir,
-  });
-  // M8：admin token 供 /ui/api；/mcp 只认 bot agent token（播种后轮换取出）
-  repo.seedRuntime(opts.sendEnabled ?? false, TOKEN);
-  const registry = new BotRegistry({
-    db,
-    seed: { apps: config.apps, allowGroups: [GROUP] },
+  // M9：env 不再读取——admin token 现场生成即可（本文件只测 401，不需要有效值），
+  // bot 注册入表，发送开关走库
+  repo.ensureRuntime();
+  if (opts.sendEnabled === true) repo.setSendEnable(true);
+  const registry = new BotRegistry({ db });
+  await registry.add({
+    appid: "10001",
+    secret: "s",
+    name: "t",
+    allowGroups: [GROUP],
   });
   const agentToken = registry.rotateToken("10001");
 
@@ -129,7 +128,6 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
       releaseHang = resolve;
     });
     sender = new Sender({
-      config,
       log: createLogger("error"),
       db,
       repo,
@@ -147,7 +145,6 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
   }
 
   const app = buildServer({
-    config,
     log: createLogger("debug"),
     db,
     repo,
@@ -274,8 +271,8 @@ test("M3-2 listTools 含 15 个工具；未开启发送时写工具硬拒绝", a
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(denied.isError, true);
     assert.ok(
-      denied.content[0]!.text.includes("SEND_ENABLE"),
-      "拒绝文案应指出开启方式",
+      denied.content[0]!.text.includes("发送功能未启用"),
+      "拒绝文案应指出写工具面未开启",
     );
   } finally {
     // 关闭顺序（踩坑#3）：断言失败也不能跳过 client.close，否则 app.close() 等 SSE 挂死

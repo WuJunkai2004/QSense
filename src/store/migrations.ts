@@ -167,4 +167,11 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    version: 6,
+    name: "bots-auth-level",
+    // M9：认证等级 per-bot 落库（env QQ_AUTH_LEVEL 全局档位退役）。
+    // 主动消息 bot 级频控预算：certified=60qpm / uncertified=30qpm，缺省未认证（保守）。
+    up: `ALTER TABLE bots ADD COLUMN auth_level TEXT NOT NULL DEFAULT 'uncertified';`,
+  },
 ];

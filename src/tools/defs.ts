@@ -6,7 +6,7 @@
 // 多机器人（M8）：token 绑定制——一个 agent_token 只属于一个 bot，工具作用域即该 bot
 // （resolveBotId 强校验）；qq_register_bot / qq_token_refresh 为自服务管理操作。
 
-import type { BotApp, Config } from '../config';
+import type { AuthLevel, BotApp } from '../config';
 import type { BotRegistry } from '../bots';
 import type { GatewayStatus } from '../gateway';
 import { t } from '../i18n';
@@ -29,7 +29,6 @@ interface ToolDef {
 
 export interface ToolContext {
   repo: Repo;
-  config: Config;
   /** M4 发送器：写工具必需；缺省=发送功能未装配，硬拒绝 */
   sender?: Sender;
   /** 机器人注册表（bots 表域层：注册/轮换/白名单） */
@@ -87,7 +86,7 @@ function resolveBotId(args: Record<string, unknown>, ctx: ToolContext): string {
 /** 写工具取发送器；未装配=双重门禁未开，硬拒绝（不发任何请求） */
 function requireSender(ctx: ToolContext): Sender {
   if (ctx.sender === undefined) {
-    throw new Error(t('send_disabled', { enabled: 'false', allow: ctx.config.allowGroups.length }));
+    throw new Error('发送功能未启用：服务端未装配发送器（写工具面关闭）。');
   }
   return ctx.sender;
 }
@@ -141,6 +140,11 @@ export const TOOLS: ToolDef[] = [
         appid: { type: 'string', description: '开放平台 AppID（q.qq.com → 开发设置）' },
         secret: { type: 'string', description: '对应的 AppSecret' },
         name: { type: 'string', description: '备注名（缺省用 appid）' },
+        auth_level: {
+          type: 'string',
+          enum: ['certified', 'uncertified'],
+          description: '认证等级：主动消息频控预算 certified=60条/分、uncertified=30条/分（缺省未认证）',
+        },
       },
     },
     handler: async (args, ctx) => {
@@ -150,7 +154,17 @@ export const TOOLS: ToolDef[] = [
       const appid = str(args, 'appid', '开放平台 AppID');
       const secret = str(args, 'secret', 'AppSecret');
       const name = optStr(args, 'name');
-      const registered = await ctx.bots.add({ appid, secret, name });
+      const authLevelRaw = optStr(args, 'auth_level');
+      let authLevel: AuthLevel | undefined;
+      if (authLevelRaw !== undefined) {
+        if (authLevelRaw !== 'certified' && authLevelRaw !== 'uncertified') {
+          throw new ToolError(
+            'auth_level 无效：只接受 certified（60条/分）或 uncertified（30条/分）。',
+          );
+        }
+        authLevel = authLevelRaw;
+      }
+      const registered = await ctx.bots.add({ appid, secret, name, authLevel });
       ctx.supervisor?.addBot(registered.app);
       return {
         bot: { appid: registered.app.appid, name: registered.app.name },
@@ -365,8 +379,8 @@ export const TOOLS: ToolDef[] = [
       const date = new Date().toISOString().slice(0, 10);
       return {
         bot: botId,
-        send_enabled: ctx.config.sendEnabled,
-        auth_level: ctx.config.authLevel,
+        send_enabled: ctx.repo.getSendEnable(),
+        auth_level: ctx.bots?.authLevelOf(botId) ?? 'uncertified',
         proactive_sent_today: ctx.repo.proactiveSentToday(botId, date),
         ...(ctx.sender !== undefined ? { buckets: ctx.sender.snapshot(botId) } : {}),
         limits: {

@@ -10,7 +10,7 @@ import {
   GatewayErrorCode,
   type ReconnectPolicy,
 } from "@tencent-connect/qqbot-nodejs/protocol";
-import type { BotApp, Config } from "../config";
+import type { BotApp } from "../config";
 import type { BotRegistry } from "../bots";
 import { t } from "../i18n";
 import type { Logger } from "../logger";
@@ -50,14 +50,13 @@ export interface GatewayOverrides {
 }
 
 export interface SupervisorDeps {
-  config: Config;
   log: Logger;
   db: DB;
   handlers: GatewayHandlers;
   overrides?: GatewayOverrides;
   /** 外部注入的 TokenService（M4：发送器与网关共享同一 token 缓存）；缺省自建 */
   tokens?: TokenService;
-  /** 机器人注册表（含运行时动态 bot）；缺省回落 config.apps（仅测试） */
+  /** 机器人注册表（bots 表域层）：启动时连接表中全部 bot */
   bots?: BotRegistry;
 }
 
@@ -84,7 +83,7 @@ export class GatewaySupervisor {
   start(): Promise<void> {
     if (this.startPromise === null) {
       this.startPromise = Promise.all(
-        (this.deps.bots?.list() ?? this.deps.config.apps).map((app) =>
+        (this.deps.bots?.list() ?? []).map((app) =>
           this.launch(app),
         ),
       ).then(() => undefined);

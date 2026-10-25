@@ -28,48 +28,46 @@ QQ 开放平台（官方）
 # 1. 依赖：Node.js ≥ 20
 npm ci
 
-# 2. WebUI 子模块（相对路径；本地路径 clone/update 需放行 file 协议一次）
-git submodule update --init ui
-git -c protocol.file.allow=always submodule update --init ui   # 若上一条报 transport 'file' not allowed
-cd ui && npm install && npm run build && cd ..                  # 产物在 ui/dist/
+# 2. WebUI（qqbot-webui 仓库，本仓库以 junction 挂在 ./ui；clone 后需就位）
+#    git clone <qqbot-webui> ../qqbot-webui   # 与本仓库同级
+#    cmd //c "mklink /J ui ..\qqbot-webui"    # Windows junction（.gitmodules 已保留）
+cd ui && npm install && npm run build:only && cd ..             # 产物在 ui/dist/
 
-# 3. 配置
+# 3. 配置（M9：env 只管部署拓扑；bot/admin token/开关/白名单全在 SQLite）
 cp .env.example .env
-#   编辑 .env：QQ_APPS（q.qq.com 获取 appid/secret）、MCP_TOKEN（openssl rand -hex 32）
-#   发送功能默认关闭；要开：SEND_ENABLE=true 且 ALLOW_GROUPS=<group_openid,...>
+#   无需填任何 bot 或 token：首次启动自动生成 admin token 并打印一次（记下它）
 
-# 4. 起服务（自动连官方 WS 网关）
+# 4. 起服务（自动连官方 WS 网关；无 bot 时空转等待注册）
 npm run build && npm start
 curl http://127.0.0.1:8787/healthz
 
-# 5. WebUI：浏览器打开 http://127.0.0.1:8787/ui ，粘贴 MCP_TOKEN 登录
-#    OpenCode 侧注册（workspace opencode.jsonc）
+# 5. WebUI：浏览器打开 http://127.0.0.1:8787/ui ，粘贴首启打印的 admin token 登录
+#    → 「+」添加机器人（appid/secret 过官方校验，返回 agent_token 仅此一次）
+#    → 设置页开发送开关、配群白名单、改认证等级
+#    OpenCode 侧注册（workspace opencode.jsonc，用 bot 的 agent_token）
 #   mcp.servers.qq-gateway: { type:"remote", url:"http://127.0.0.1:8787/mcp",
-#     oauth:false, headers:{Authorization:"Bearer <MCP_TOKEN>"}, disabled:false }
+#     oauth:false, headers:{Authorization:"Bearer <agent_token>"}, disabled:false }
 ```
 
 ## 配置（.env）
 
+M9 起 env 只承担部署拓扑与运维参数；**bot 注册（appid/secret/认证等级）、admin token、发送开关、群白名单全部以 SQLite 为唯一权威**（WebUI 设置页 / `qq_register_bot` 管理）。旧的 `QQ_APPS`/`MCP_TOKEN`/`SEND_ENABLE`/`ALLOW_GROUPS`/`QQ_AUTH_LEVEL` 不再被读取。
+
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `QQ_APPS` | ✅ | `[{"appid":"...","secret":"...","name":"主bot"}]`，支持多 bot |
-| `MCP_TOKEN` | ✅ | MCP Bearer token，≥16 位，建议 `openssl rand -hex 32` |
 | `PORT` / `HOST` | | 默认 `8787` / `127.0.0.1` |
-| `DATA_DIR` | | SQLite 目录，默认 `./data` |
-| `SEND_ENABLE` | | 写操作总开关，**默认 false** |
-| `ALLOW_GROUPS` | | 群白名单（逗号分隔 group_openid）；`SEND_ENABLE=true` 时必填（双重门禁） |
-| `QQ_AUTH_LEVEL` | | `uncertified`（默认，主动消息 30条/分钟）/ `certified`（60条/分钟） |
+| `DATA_DIR` | | SQLite 目录，默认 `./data`（bots 表 / kv / 消息缓存都在这） |
 | `RETENTION_DAYS` | | 缓存保留天数，默认 90，到期自动清理 |
 | `LOG_CONTENT` | | 日志记消息正文，**默认 false（生产禁止开启）** |
 | `LOG_LEVEL` | | debug/info/warn/error/fatal |
 
-## MCP 工具面（14 个）
+## MCP 工具面（15 个）
 
-**多机器人**：`qq_list_bots`（列出全部 bot：appid/名称/来源/网关状态；多 bot 时其他工具必须带 `bot` 参数指定 appid）
+**管理（自服务）**：`qq_register_bot`（注册新 bot：官方凭据校验 → 落库 → 返回 agent_token 仅此一次）· `qq_token_refresh`（轮换当前绑定 bot 的 agent_token，旧值立即失效）
 
 **只读（默认启用）**：`qq_list_groups` · `qq_list_members` · `qq_get_new`（增量+游标）· `qq_browse`（时间轴翻页）· `qq_search`（FTS 中文检索）· `qq_context`（前后文）· `qq_quota`（额度水位）· `qq_cursor_get/set`（digest 游标）
 
-**写（双重门禁）**：`qq_reply`（被动回复：官方窗口 5分钟/5次 + msg_seq 幂等账本）· `qq_send_proactive`（主动消息：令牌桶 + 每群每日 1000 条记账）· `qq_recall`（撤回）
+**写（双重门禁：kv 总开关 + 该 bot 白名单，均 WebUI 设置页管理）**：`qq_reply`（被动回复：官方窗口 5分钟/5次 + msg_seq 幂等账本）· `qq_send_proactive`（主动消息：令牌桶 + 每群每日 1000 条记账）· `qq_recall`（撤回）
 
 **合规**：`qq_forget`（整群缓存删除，需 `confirm=true`，读权限即可调用）
 
@@ -77,21 +75,22 @@ curl http://127.0.0.1:8787/healthz
 
 ## WebUI（/ui）
 
-QQ 桌面版风格、**智能体视角**的客户端：`http://<host>:<port>/ui`，粘贴 `MCP_TOKEN` 登录（与 /mcp 同一 token，Bearer 直连，无 cookie）。
+QQ 桌面版风格、**智能体视角**的客户端：`http://<host>:<port>/ui`，粘贴 **admin token** 登录（仅管理端通 `/ui/api`；`/mcp` 只认各 bot 的 agent_token）。
 
-- **多机器人**：左栏头像切换；「+」运行时添加（服务端先拉官方 access_token 校验凭据，失败即拒；免重启接入网关）、右键移除（仅运行时 bot）
+- **多机器人**：左栏头像切换；「+」运行时添加（appid/secret/认证等级，服务端先过官方凭据校验，失败即拒；agent_token 仅展示一次）、右键移除（bots 表唯一权威，任何 bot 均可移除）
+- **设置页**（顶栏齿轮）：发送总开关、每 bot 群白名单、认证等级（30/60 qpm）、agent token 轮换（一次性弹窗）
 - **会话/消息**：群会话列表（最后消息摘要）、QQ 风格气泡（群主/管理员角标）、上翻加载更早、4s 增量轮询；点气泡查看原始载荷（elements/raw——MCP 所见即所得）
 - **发送**（与 MCP 同一套硬门禁/账本/额度，无旁路）：被动回复（选消息，5 分钟窗口）与主动消息；乐观上屏，失败即撤
 - **右栏**：成员名册（自建）、发送账本（含审核回填状态）、额度水位
 
-实现独立建仓 `../qqbot-webui`（React 18 + antd 5 + Vite），以 submodule 挂 `ui/`；服务端从 `./ui/dist` 出静态文件（`UI_DIST_DIR` 可改），未构建时 `/ui` 返回可操作提示。数据源头仍只有官方 API/WS，UI 无任何额外通道。
+实现独立建仓 `../qqbot-webui`（React 18 + antd 5 + Vite），以 NTFS junction 挂 `ui/`（gitlink 记录保留，commit 时 `git add ui` 即推进指针）；服务端从 `./ui/dist` 出静态文件（`UI_DIST_DIR` 可改），未构建时 `/ui` 返回可操作提示。数据源头仍只有官方 API/WS，UI 无任何额外通道。
 
 ## 安全与合规
 
 - **身份**：全程 openid（bot 维度隔离、不可逆），无真实 QQ 号
 - **注入防御**：工具输出带不可信内容标记；写工具参数与消息数据无通道——不要把群消息原文拼进发送指令
 - **日志**：默认不含消息正文与任何密钥（logger 兜底剥离敏感键）
-- **AppSecret 存放**：`QQ_APPS` 的 secret 只在 `.env`；**运行时经 UI 添加的 bot 其 secret 落 SQLite `kv` 表**（`bots:dynamic:v1`，知情决策 2026-10-24，换取免重启添加）——请确保数据目录的访问权限与 .env 同等对待（VPS 上仅服务账号可读）
+- **密钥存放**：AppSecret / agent_token / admin token 全部只存服务器 SQLite（bots 表与 kv），不进 git；admin token 仅在首次生成时打印一次；请确保 `DATA_DIR` 访问权限（VPS 上仅服务账号可读）
 - **保留期**：`RETENTION_DAYS` 到期自动清理；`qq_forget` 随时整群删除
 - **告知义务**：建议在群公告说明（模板）：
 
