@@ -13,7 +13,7 @@ import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { BotRegistry } from "../src/bots";
 import { Repo } from "../src/store/repo";
-import { runTool, UNTRUSTED_NOTICE } from "../src/tools/defs";
+import { runTool } from "../src/tools/defs";
 
 const GROUP = "G1";
 const BOT = "10001";
@@ -596,7 +596,6 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
       ctx,
     );
     assert.ok(!ok.isError);
-    assert.ok(ok.text.startsWith(UNTRUSTED_NOTICE));
 
     const exceeded = await runTool(
       "send_proactive",

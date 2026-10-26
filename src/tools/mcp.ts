@@ -1,7 +1,7 @@
 // MCP Streamable HTTP 端点：Fastify 原生 req/res 直连官方 SDK transport（零适配层）。
 // - Bearer 鉴权：sha256 摘要后 timingSafeEqual（常数时间，防时序侧信道）
 // - 会话管理：POST 无 session 且为 initialize → 新建 Server+transport 对；DELETE 关闭并清理
-// - 工具执行统一走 defs.runTool（错误翻译 + 不可信内容提示首行）
+// - 工具执行统一走 defs.runTool（错误翻译为可操作的 isError 文本）
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -17,7 +17,7 @@ import type { BotRegistry } from "../bots";
 import type { Logger } from "../logger";
 import type { Sender } from "../sender";
 import type { Repo } from "../store/repo";
-import { TOOLS, UNTRUSTED_NOTICE, runTool } from "./defs";
+import { TOOLS, runTool } from "./defs";
 
 export interface McpDeps {
   log: Logger;
@@ -117,7 +117,7 @@ export function createMcpHandler(
           content: [
             {
               type: "text",
-              text: `${UNTRUSTED_NOTICE}\n服务繁忙（并发 ${active}/${maxConcurrent}），请稍后重试。`,
+              text: `服务繁忙（并发 ${active}/${maxConcurrent}），请稍后重试。`,
             },
           ],
           isError: true,

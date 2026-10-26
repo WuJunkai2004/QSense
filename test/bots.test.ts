@@ -15,7 +15,6 @@ import { Repo } from "../src/store/repo";
 import {
   runTool,
   ToolError,
-  UNTRUSTED_NOTICE,
   type ToolContext,
 } from "../src/tools/defs";
 
@@ -203,11 +202,7 @@ test("M8-B7 register_bot：返回一次 token + 表内可反查；重复注册�
       ctx,
     );
     assert.equal(raw.isError, undefined);
-    assert.ok(raw.text.startsWith(UNTRUSTED_NOTICE));
-    const out = JSON.parse(raw.text.split("\n").slice(1).join("\n")) as Record<
-      string,
-      unknown
-    >;
+    const out = JSON.parse(raw.text) as Record<string, unknown>;
     assert.match(String(out.agent_token), /^[0-9a-f]{48}$/);
     assert.equal(reg.appIdByToken(String(out.agent_token)), "40004");
     const dup = await runTool(
@@ -256,10 +251,7 @@ test("M8-B8 token_refresh：换发新 token，旧 token 立即失效", async () 
       botId: "20002",
     };
     const raw = await runTool("token_refresh", {}, ctx);
-    const out = JSON.parse(raw.text.split("\n").slice(1).join("\n")) as Record<
-      string,
-      unknown
-    >;
+    const out = JSON.parse(raw.text) as Record<string, unknown>;
     const fresh = String(out.agent_token);
     assert.notEqual(fresh, added.agentToken);
     assert.equal(reg.appIdByToken(added.agentToken), null);

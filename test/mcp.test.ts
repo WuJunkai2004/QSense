@@ -1,6 +1,6 @@
 // M3 验收：MCP 客户端 SDK 直连 /mcp——
 // 鉴权（401）、listTools、会话列表→取新消息（拉取即已读，水位自动推进）→搜历史闭环、
-// context/browse、不可信内容提示首行。
+// context/browse。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -16,7 +16,6 @@ import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { BotRegistry } from "../src/bots";
 import { Repo } from "../src/store/repo";
-import { UNTRUSTED_NOTICE } from "../src/tools/defs";
 
 const TOKEN = "m3-test-token-0123456789abcdef";
 const GROUP = "GROUP_OPENID_G1";
@@ -200,15 +199,7 @@ function payloadOf(result: {
 }): Record<string, unknown> {
   assert.equal(result.content.length, 1);
   assert.equal(result.content[0]!.type, "text");
-  const text = result.content[0]!.text ?? "";
-  assert.ok(
-    text.startsWith(UNTRUSTED_NOTICE),
-    "返回体首行必须是不可信内容提示",
-  );
-  return JSON.parse(text.slice(UNTRUSTED_NOTICE.length)) as Record<
-    string,
-    unknown
-  >;
+  return JSON.parse(result.content[0]!.text ?? "") as Record<string, unknown>;
 }
 
 test("M3-1 未带 token / 错 token → 401", async () => {
