@@ -4,6 +4,7 @@ import {
   App as AntApp,
   Button,
   Card,
+  Input,
   Modal,
   Select,
   Space,
@@ -12,7 +13,8 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { get, post, put } from "../api";
+import { EditOutlined } from "@ant-design/icons";
+import { get, patch, post, put } from "../api";
 import type { AgentTokenResult, AuthLevel, SettingsInfo } from "../types";
 
 interface Props {
@@ -131,6 +133,31 @@ export default function SettingsView({ open, onChanged }: Props) {
     });
   };
 
+  // 改备注名：仅本地展示与自发消息补记的作者名，不触官方
+  const [renameTarget, setRenameTarget] = useState<{
+    appid: string;
+    name: string;
+  } | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+
+  const openRename = (b: { appid: string; name: string }): void => {
+    setRenameTarget(b);
+    setRenameValue(b.name);
+  };
+
+  const submitRename = async (): Promise<void> => {
+    if (renameTarget === null) return;
+    try {
+      await patch(`/bots/${renameTarget.appid}`, { name: renameValue });
+      void message.success("备注名已更新");
+      setRenameTarget(null);
+      load();
+      onChanged();
+    } catch (e) {
+      void message.error(errMsg(e));
+    }
+  };
+
   return (
     <div style={{ minWidth: 460 }}>
       {info === null ? (
@@ -163,6 +190,13 @@ export default function SettingsView({ open, onChanged }: Props) {
                 title={
                   <Space size={8} wrap>
                     <span>{b.name}</span>
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<EditOutlined />}
+                      onClick={() => openRename(b)}
+                      title="改备注名"
+                    />
                     <Typography.Text code type="secondary">
                       {b.appid}
                     </Typography.Text>
@@ -239,6 +273,29 @@ export default function SettingsView({ open, onChanged }: Props) {
           })}
         </Space>
       )}
+
+      <Modal
+        title={`改备注名（${renameTarget?.appid ?? ""}）`}
+        open={renameTarget !== null}
+        onCancel={() => setRenameTarget(null)}
+        onOk={() => void submitRename()}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Input
+          value={renameValue}
+          maxLength={32}
+          placeholder="留空 = 显示 appid"
+          onChange={(e) => setRenameValue(e.target.value)}
+          onPressEnter={() => void submitRename()}
+        />
+        <Typography.Text
+          type="secondary"
+          style={{ marginTop: 8, display: "block" }}
+        >
+          仅本地展示与自发消息补记的作者名，不会改官方任何资料
+        </Typography.Text>
+      </Modal>
 
       <Modal
         title={`已换发新 agent token（${fresh?.bot ?? ""}）`}
