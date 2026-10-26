@@ -24,6 +24,8 @@ interface Props {
   sends: SendItem[];
   quota: QuotaInfo | null;
   onRefresh: () => void;
+  /** 整群缓存删除（破坏性操作，服务端 /ui/api DELETE /groups/:openid；确认弹窗在此组件内） */
+  onPurge: () => Promise<void>;
 }
 
 const SEND_STATUS: Record<string, { color: string; text: string }> = {
@@ -45,8 +47,9 @@ export default function RightPanel({
   sends,
   quota,
   onRefresh,
+  onPurge,
 }: Props) {
-  const { message: msg } = AntApp.useApp();
+  const { message: msg, modal } = AntApp.useApp();
   return (
     <div className="right-panel">
       <Tabs
@@ -107,6 +110,32 @@ export default function RightPanel({
                       },
                     ]}
                   />
+                  {/* 危险区：整群缓存删除（原 MCP forget 迁入，仅人类操作） */}
+                  <div
+                    style={{
+                      marginTop: 10,
+                      paddingTop: 8,
+                      borderTop: "1px dashed #e5e7eb",
+                    }}
+                  >
+                    <Button
+                      size="small"
+                      danger
+                      onClick={() => {
+                        modal.confirm({
+                          title: "删除本群全部缓存？",
+                          content:
+                            "将删除该群的消息（含检索索引）、成员名册、群注册表与已读水位，不可恢复；发送审计账本保留。机器人仍在群时消息会重新累积。",
+                          okText: "删除",
+                          okButtonProps: { danger: true },
+                          cancelText: "取消",
+                          onOk: () => onPurge(),
+                        });
+                      }}
+                    >
+                      删除本群缓存…
+                    </Button>
+                  </div>
                   <div
                     style={{
                       display: "flex",

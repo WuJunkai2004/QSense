@@ -10,6 +10,7 @@ import {
 import { SettingOutlined } from "@ant-design/icons";
 import {
   clearToken,
+  del,
   getLastBot,
   getToken,
   setLastBot,
@@ -237,6 +238,17 @@ export default function App() {
     return () => clearInterval(t);
   }, [loadQuota]);
 
+  // 整群缓存删除（原 MCP forget 迁入）：确认弹窗在 RightPanel，成功后清当前选中并刷新列表
+  const handlePurgeGroup = async (): Promise<void> => {
+    if (boot === null || currentBot === null || currentGroup === null) return;
+    await del(
+      `/groups/${en(currentGroup)}?bot=${en(currentBot)}`,
+    );
+    setCurrentGroup(null);
+    loadGroups();
+    void message.success("该群缓存已删除");
+  };
+
   // 发送：乐观追加（成功保留标记本机、失败移除），账本/额度即时刷新
   const handleSend = async (
     text: string,
@@ -392,6 +404,7 @@ export default function App() {
           sends={sends}
           quota={quota}
           onRefresh={loadSide}
+          onPurge={handlePurgeGroup}
         />
       </div>
       <MessageDetailDrawer
