@@ -307,6 +307,53 @@ export class Repo {
       .all(botId) as Array<Record<string, unknown>>;
   }
 
+  /**
+   * 群会话列表（agent 视角）：openid + 最后消息时间 + 未读数。
+   * 未读 = 已读水位（kv cursor:*）之后的行数；无水位 = 全部算未读。
+   */
+  listGroupConversations(
+    botId: string,
+  ): Array<{ group_openid: string; unread: number; last_ts: number | null }> {
+    const unreadStmt = this.db.prepare(
+      "SELECT COALESCE(SUM(rowid > ?), 0) AS unread, MAX(ts) AS last_ts FROM messages WHERE bot_id = ? AND group_openid = ?",
+    );
+    return this.listGroups(botId).map((g) => {
+      const gid = g.group_openid as string;
+      const mark = this.getCursor(botId, gid);
+      const row = unreadStmt.get(
+        mark === null ? 0 : Number(mark),
+        botId,
+        gid,
+      ) as { unread: number; last_ts: number | null };
+      return { group_openid: gid, unread: row.unread, last_ts: row.last_ts };
+    });
+  }
+
+  /** 私聊会话列表（自建于 c2c_messages 聚合；当前 bot 无单聊事件，恒为空） */
+  listChatConversations(
+    botId: string,
+  ): Array<{ user_openid: string; unread: number; last_ts: number | null }> {
+    const rows = this.db
+      .prepare(
+        "SELECT user_openid, MAX(ts) AS last_ts FROM c2c_messages WHERE bot_id = ? GROUP BY user_openid",
+      )
+      .all(botId) as Array<{ user_openid: string; last_ts: number | null }>;
+    const unreadStmt = this.db.prepare(
+      "SELECT COALESCE(SUM(rowid > ?), 0) AS unread FROM c2c_messages WHERE bot_id = ? AND user_openid = ?",
+    );
+    return rows.map((r) => {
+      const mark = this.getCursor(botId, `c2c:${r.user_openid}`);
+      const unread = (
+        unreadStmt.get(
+          mark === null ? 0 : Number(mark),
+          botId,
+          r.user_openid,
+        ) as { unread: number }
+      ).unread;
+      return { user_openid: r.user_openid, unread, last_ts: r.last_ts };
+    });
+  }
+
   listMembers(
     botId: string,
     groupOpenid: string,
@@ -488,12 +535,18 @@ export class Repo {
     );
   }
 
+  /**
+   * 已读水位（kv cursor:*）：某会话已被拉取到的 rowid 位置。
+   * 语义 = "拉取即已读"：get_new 成功后由服务端自动推进，不暴露给 MCP 工具面。
+   * null = 从未拉取（全部消息算未读）。群 scope 为 groupOpenid，私聊为 `c2c:{userOpenid}`。
+   */
   getCursor(botId: string, groupOpenid: string): string | null {
     const row = this.kvGetStmt.get(`cursor:${botId}:${groupOpenid}`) as
       { v: string } | undefined;
     return row ? row.v : null;
   }
 
+  /** 推进已读水位（服务端内部状态，get_new 专用；agent 不可见不可改） */
   setCursor(botId: string, groupOpenid: string, cursor: string): void {
     this.kvSetStmt.run(`cursor:${botId}:${groupOpenid}`, cursor);
   }
@@ -628,11 +681,12 @@ export class Repo {
     return true;
   }
 
-  // —— M6 合规退出：qq_forget ——
+  // —— M6 合规退出：forget ——
 
   /**
-   * 删除某群全部缓存：消息（FTS 触发器随行清理）、名册、注册表、digest 游标。
+   * 删除某群全部缓存：消息（FTS 触发器随行清理）、名册、注册表、已读水位。
    * sends 发送账本保留（运维审计；不含消息内容）。返回各类删除行数。
+   * 原为 MCP 工具 forget，现仅经 WebUI（/ui/api DELETE /groups/:id，admin token + 人工确认）触发。
    */
   purgeGroupAll(
     botId: string,

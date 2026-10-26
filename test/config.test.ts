@@ -1,6 +1,6 @@
 // M0/M9 验收：配置校验——env 只承担部署拓扑与运维参数；
 // bot 注册（appid/secret/认证等级）、admin token、发送开关、白名单一律以 SQLite 为权威，
-// 相关 env 键即使存在也被忽略（不再读取，报错通道走 WebUI / qq_register_bot）。
+// 相关 env 键即使存在也被忽略（不再读取，报错通道走 WebUI / register_bot）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -1,7 +1,7 @@
 // 机器人注册表：SQLite bots 表是唯一权威存储（2026-10-25 用户定案）。
 //
 // 演进：M7 = QQ_APPS env 基座 + kv 动态列表；M8 = env/旧 kv 降级为「首次播种源」；
-// M9 起（用户定案）播种彻底退役——bot 只能经 qq_register_bot（MCP）或 WebUI 添加/移除，
+// M9 起（用户定案）播种彻底退役——bot 只能经 register_bot（MCP）或 WebUI 添加/移除，
 // 重启后以 bots 表为准连接全部 bot，env 里不再有任何 bot 相关字段。
 //
 // - 每个 bot 一个 agent_token（明文落库，用户拍板不做加密）：/mcp Bearer 按表反查绑定 bot；
@@ -124,7 +124,7 @@ export class BotRegistry {
       : "uncertified";
     if (this.get(appid) !== undefined) {
       throw new BotRegistryError(
-        `注册失败：appid=${appid} 已存在。重复注册请改用 qq_token_refresh 轮换 token，或在 WebUI 设置页操作。`,
+        `注册失败：appid=${appid} 已存在。重复注册请改用 token_refresh 轮换 token，或在 WebUI 设置页操作。`,
       );
     }
     const app: BotApp = { appid, secret, name };
@@ -215,7 +215,7 @@ export class BotRegistry {
   rotateToken(appid: string): string {
     if (this.get(appid) === undefined) {
       throw new BotRegistryError(
-        `轮换失败：appid=${appid} 不在注册表中。可用 qq_register_bot 注册新 bot。`,
+        `轮换失败：appid=${appid} 不在注册表中。可用 register_bot 注册新 bot。`,
       );
     }
     const token = newAgentToken();

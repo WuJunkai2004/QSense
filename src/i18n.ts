@@ -31,11 +31,11 @@ const zh = {
   send_not_allowlisted:
     "目标群 {group} 不在 ALLOW_GROUPS 白名单中，已硬拒绝。如确需对该群发送，请在 .env 的 ALLOW_GROUPS 追加该 group_openid 并重启服务。",
   send_window_expired:
-    "被动回复窗口已过期：群聊消息仅可在官方消息时间后 5 分钟内回复（官方限制）。可改用 qq_send_proactive 发主动消息（消耗群日额度），或放弃本次回复。",
+    "被动回复窗口已过期：群聊消息仅可在官方消息时间后 5 分钟内回复（官方限制）。可改用 send_proactive 发主动消息（消耗群日额度），或放弃本次回复。",
   send_window_exhausted:
-    "该消息的被动回复次数已用完（{used}/{max}，官方限制每条群消息最多回复 5 次）。可改用 qq_send_proactive。",
+    "该消息的被动回复次数已用完（{used}/{max}，官方限制每条群消息最多回复 5 次）。可改用 send_proactive。",
   send_window_no_msg:
-    "回复目标消息不在缓存中：msg_id={msg_id}。请先用 qq_search / qq_browse 确认消息存在（撤回/回复只能针对官方消息ID）。",
+    "回复目标消息不在缓存中：msg_id={msg_id}。请先用 search / browse 确认消息存在（撤回/回复只能针对官方消息ID）。",
   send_quota_daily:
     "主动消息日额度不足：群 {group} 今日已发 {used}/{limit} 条（官方上限 1000 条/天/群，北京时间 0 点重置）。digest 类任务请降级为落盘不发，勿重试。",
   send_rate_limited_bot:
@@ -51,9 +51,9 @@ const zh = {
   err_40034004:
     "富媒体转存失败（官方码 40034004）。v1 仅支持文本/Markdown，不应出现此码；可重试一次。",
   err_40034005:
-    "回复目标 msg_id 已过期（官方码 40034005）：超出被动窗口。可改用 qq_send_proactive 或放弃。",
+    "回复目标 msg_id 已过期（官方码 40034005）：超出被动窗口。可改用 send_proactive 或放弃。",
   err_304027:
-    "回复目标 msg_id 已过期（官方码 304027）：超出被动窗口。可改用 qq_send_proactive 或放弃。",
+    "回复目标 msg_id 已过期（官方码 304027）：超出被动窗口。可改用 send_proactive 或放弃。",
   err_40034100:
     "主动消息超过官方频控（官方码 40034100）。请等待额度恢复后再试（bot 级 {qpm} 条/分钟，单群 1000 条/天）。",
   err_40034010:
@@ -101,11 +101,11 @@ const en: Translation = {
   send_not_allowlisted:
     "Target group {group} is not in ALLOW_GROUPS, rejected. To enable, append the group_openid to ALLOW_GROUPS in .env and restart.",
   send_window_expired:
-    "Passive reply window expired: group messages can only be replied within 5 minutes of the official timestamp (official limit). Use qq_send_proactive instead (consumes daily quota), or skip.",
+    "Passive reply window expired: group messages can only be replied within 5 minutes of the official timestamp (official limit). Use send_proactive instead (consumes daily quota), or skip.",
   send_window_exhausted:
-    "Reply count exhausted for this message ({used}/{max}, official limit: max 5 replies per group message). Use qq_send_proactive instead.",
+    "Reply count exhausted for this message ({used}/{max}, official limit: max 5 replies per group message). Use send_proactive instead.",
   send_window_no_msg:
-    "Reply target not in cache: msg_id={msg_id}. Use qq_search / qq_browse to locate a cached message first (reply/recall require official message IDs).",
+    "Reply target not in cache: msg_id={msg_id}. Use search / browse to locate a cached message first (reply/recall require official message IDs).",
   send_quota_daily:
     "Daily proactive quota exhausted for group {group}: {used}/{limit} today (official limit 1000/day/group, resets at midnight Beijing). Digest jobs should fall back to disk, do not retry.",
   send_rate_limited_bot:
@@ -121,9 +121,9 @@ const en: Translation = {
   err_40034004:
     "Rich media transfer failed (official code 40034004). v1 only supports text/markdown; retry once if unexpected.",
   err_40034005:
-    "Reply target msg_id expired (official code 40034005): passive window exceeded. Use qq_send_proactive or skip.",
+    "Reply target msg_id expired (official code 40034005): passive window exceeded. Use send_proactive or skip.",
   err_304027:
-    "Reply target msg_id expired (official code 304027): passive window exceeded. Use qq_send_proactive or skip.",
+    "Reply target msg_id expired (official code 304027): passive window exceeded. Use send_proactive or skip.",
   err_40034100:
     "Proactive message rate-limited by official API (code 40034100). Wait for quota ({qpm}/min bot level, 1000/day per group).",
   err_40034010:

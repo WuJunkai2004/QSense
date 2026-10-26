@@ -1,6 +1,6 @@
 // M8/M9 验收（注册表）：bots 表唯一存储、agent_token 生命周期（生成/轮换/反查）、
 // 每 bot 白名单、每 bot 认证等级（M9 落库）、注册制（M9 起无任何 env/kv 播种——
-// bot 只能经 add/WebUI 注册进表），qq_register_bot / qq_token_refresh 工具面与
+// bot 只能经 add/WebUI 注册进表），register_bot / token_refresh 工具面与
 // token 绑定 bot 强校验。
 
 import { test } from "node:test";
@@ -192,13 +192,13 @@ test("M8-B5 白名单：setAllowGroups 即时生效，remove 后反查全空", a
   }
 });
 
-test("M8-B7 qq_register_bot：返回一次 token + 表内可反查；重复注册拒绝", async () => {
+test("M8-B7 register_bot：返回一次 token + 表内可反查；重复注册拒绝", async () => {
   const fx = setupDb();
   try {
     const reg = newRegistry(fx.db);
     const ctx = await ctxOf(fx.db, reg);
     const raw = await runTool(
-      "qq_register_bot",
+      "register_bot",
       { appid: "40004", secret: "s4", name: "四号" },
       ctx,
     );
@@ -211,7 +211,7 @@ test("M8-B7 qq_register_bot：返回一次 token + 表内可反查；重复注�
     assert.match(String(out.agent_token), /^[0-9a-f]{48}$/);
     assert.equal(reg.appIdByToken(String(out.agent_token)), "40004");
     const dup = await runTool(
-      "qq_register_bot",
+      "register_bot",
       { appid: "40004", secret: "s4" },
       ctx,
     );
@@ -221,20 +221,20 @@ test("M8-B7 qq_register_bot：返回一次 token + 表内可反查；重复注�
   }
 });
 
-test("M9-B7b qq_register_bot：auth_level 参数落库（certified 生效）", async () => {
+test("M9-B7b register_bot：auth_level 参数落库（certified 生效）", async () => {
   const fx = setupDb();
   try {
     const reg = newRegistry(fx.db);
     const ctx = await ctxOf(fx.db, reg);
     const raw = await runTool(
-      "qq_register_bot",
+      "register_bot",
       { appid: "40004", secret: "s4", auth_level: "certified" },
       ctx,
     );
     assert.equal(raw.isError, undefined);
     assert.equal(reg.authLevelOf("40004"), "certified");
     const bad = await runTool(
-      "qq_register_bot",
+      "register_bot",
       { appid: "50005", secret: "s5", auth_level: "gold" },
       ctx,
     );
@@ -245,7 +245,7 @@ test("M9-B7b qq_register_bot：auth_level 参数落库（certified 生效）", a
   }
 });
 
-test("M8-B8 qq_token_refresh：换发新 token，旧 token 立即失效", async () => {
+test("M8-B8 token_refresh：换发新 token，旧 token 立即失效", async () => {
   const fx = setupDb();
   try {
     const reg = newRegistry(fx.db);
@@ -255,7 +255,7 @@ test("M8-B8 qq_token_refresh：换发新 token，旧 token 立即失效", async 
       bots: reg,
       botId: "20002",
     };
-    const raw = await runTool("qq_token_refresh", {}, ctx);
+    const raw = await runTool("token_refresh", {}, ctx);
     const out = JSON.parse(raw.text.split("\n").slice(1).join("\n")) as Record<
       string,
       unknown
@@ -269,20 +269,19 @@ test("M8-B8 qq_token_refresh：换发新 token，旧 token 立即失效", async 
   }
 });
 
-test("M8-B9 token 绑定：bot 参数跨 bot → ToolError；qq_list_bots 已移除", async () => {
+test("M8-B9 token 绑定：bot 参数已退役（传了也被忽略）；未绑定 ctx 硬拒绝；list_bots 已移除", async () => {
   const fx = setupDb();
   try {
     const reg = newRegistry(fx.db);
     const ctx = await ctxOf(fx.db, reg);
-    // runTool 把 ToolError 转成 isError 返回（不向外抛），断言返回体
-    const cross = await runTool("qq_list_groups", { bot: "20002" }, ctx);
-    assert.equal(cross.isError, true);
-    assert.match(cross.text, /绑定/);
-    assert.equal(
-      (await runTool("qq_list_groups", { bot: "10001" }, ctx)).isError,
-      undefined,
-    );
-    const gone = await runTool("qq_list_bots", {}, ctx);
+    // bot 绑定在 HTTP 层 Bearer→bot 完成，工具层不再校验 bot 参数（多余参数忽略）
+    const ignored = await runTool("list_all", { bot: "20002" }, ctx);
+    assert.equal(ignored.isError, undefined);
+    // 无 botId 的 ctx（鉴权缺失）仍硬拒绝
+    const unbound = await runTool("list_all", {}, { repo: new Repo(fx.db) });
+    assert.equal(unbound.isError, true);
+    assert.match(unbound.text, /未绑定/);
+    const gone = await runTool("list_bots", {}, ctx);
     assert.equal(gone.isError, true);
     assert.match(gone.text, /未知工具/);
   } finally {

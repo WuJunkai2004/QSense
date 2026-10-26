@@ -36,7 +36,7 @@ export interface NormalizedMessage {
   /** 规范化纯文本：官方 content + msg_elements 递归展开的可读树（含 @<openid> 标记） */
   content: string;
   mentions: NormalizedMention[];
-  /** 官方 msg_elements 原始数组（结构化保留，M3 qq_context 展示用） */
+  /** 官方 msg_elements 原始数组（结构化保留，M3 context 展示用） */
   elements: unknown;
   attachments: NormalizedAttachment[];
   /** ark 结构化卡片原始对象 */

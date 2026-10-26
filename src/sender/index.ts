@@ -499,7 +499,7 @@ export class Sender {
     }
   }
 
-  // —— 额度水位（qq_quota 工具用） ——
+  // —— 额度水位（quota 工具用） ——
 
   snapshot(botId: string): {
     limits: SendLimits;

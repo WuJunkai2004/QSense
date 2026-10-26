@@ -1,5 +1,6 @@
 // M3 验收：MCP 客户端 SDK 直连 /mcp——
-// 鉴权（401）、listTools、列群→取新消息→搜历史闭环、游标读写、context/browse、不可信内容提示首行。
+// 鉴权（401）、listTools、会话列表→取新消息（拉取即已读，水位自动推进）→搜历史闭环、
+// context/browse、不可信内容提示首行。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -251,25 +252,25 @@ test("M3-2 listTools 含 15 个工具；未开启发送时写工具硬拒绝", a
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
-      "qq_browse",
-      "qq_context",
-      "qq_cursor_get",
-      "qq_cursor_set",
-      "qq_forget",
-      "qq_get_new",
-      "qq_list_groups",
-      "qq_list_members",
-      "qq_quota",
-      "qq_recall",
-      "qq_register_bot",
-      "qq_reply",
-      "qq_search",
-      "qq_send_proactive",
-      "qq_token_refresh",
+      "browse",
+      "context",
+      "get_new",
+      "list_all",
+      "list_chat",
+      "list_group",
+      "list_members",
+      "list_new",
+      "quota",
+      "recall",
+      "register_bot",
+      "reply",
+      "search",
+      "send_proactive",
+      "token_refresh",
     ]);
     // 双重门禁未开（SEND_ENABLE 缺省 false）→ 写工具硬拒绝且不炸
     const denied = (await client.callTool({
-      name: "qq_send_proactive",
+      name: "send_proactive",
       arguments: { group: GROUP, text: "test" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(denied.isError, true);
@@ -288,61 +289,83 @@ test("M3-2 listTools 含 15 个工具；未开启发送时写工具硬拒绝", a
   }
 });
 
-test("M3-3 闭环：列群 → 取新消息 → 关键词搜索；游标断点续拉", async () => {
+test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关键词搜索", async () => {
   const fx = await setupServer();
   try {
     const client = await connectClient(fx.baseUrl, fx.agentToken);
 
-    // 列群
-    const groups = payloadOf(
-      (await client.callTool({
-        name: "qq_list_groups",
-        arguments: {},
-      })) as never,
+    // 会话列表：2 群；无水位 → 未读=全部消息
+    const listed = payloadOf(
+      (await client.callTool({ name: "list_all", arguments: {} })) as never,
     );
-    assert.ok(!("count" in groups), "qq_list_groups 返回体不应有 count 字段");
-    const groupList = groups.groups as Array<Record<string, unknown>>;
-    assert.equal(groupList.length, 2);
-    const g1 = groupList.find((g) => g.group_openid === GROUP)!;
-    assert.equal(g1.full_msg_enabled, true);
-    assert.equal(g1.member_count, 3);
+    assert.equal(listed.count, 2);
+    const convs = listed.conversations as Array<Record<string, unknown>>;
+    const g1 = convs.find((c) => c.id === GROUP)!;
+    assert.equal(g1.type, "group");
+    assert.equal(g1.unread, 5);
+    assert.ok(typeof g1.last_msg_ts === "string");
+    assert.ok(!("full_msg_enabled" in g1), "agent 视角不含管理面字段");
 
-    // 取新消息（从头）
+    // list_new：有未读 → 命中
+    const news = payloadOf(
+      (await client.callTool({ name: "list_new", arguments: {} })) as never,
+    );
+    assert.equal(news.count, 1);
+
+    // 取新消息（拉取即已读，水位自动推进）
     const first = payloadOf(
       (await client.callTool({
-        name: "qq_get_new",
+        name: "get_new",
         arguments: { group: GROUP },
       })) as never,
     );
     assert.equal(first.count, 5);
-    const nextCursor = first.next_cursor as string;
-    assert.ok(/^\d+$/.test(nextCursor));
+    assert.ok(!("next_cursor" in first), "已读水位是服务端内部状态，不外露");
 
-    // 增量：提交游标后无新消息
-    await client.callTool({
-      name: "qq_cursor_set",
-      arguments: { group: GROUP, cursor: nextCursor },
-    });
-    const cursorState = payloadOf(
+    // 重复拉取：零重复（水位已推进）
+    const second = payloadOf(
       (await client.callTool({
-        name: "qq_cursor_get",
+        name: "get_new",
         arguments: { group: GROUP },
       })) as never,
     );
-    assert.equal(cursorState.cursor, nextCursor);
-    const second = payloadOf(
+    assert.equal(second.count, 0);
+
+    // 已读后 list_new 不再命中该群
+    const news2 = payloadOf(
+      (await client.callTool({ name: "list_new", arguments: {} })) as never,
+    );
+    assert.equal(news2.count, 0);
+
+    // 新消息到达 → 再次未读；增量拉取只给新消息
+    new Repo(fx.db).saveOutgoingGroupMessage({
+      botId: "10001",
+      groupOpenid: GROUP,
+      msgId: "M6",
+      content: "新到的消息",
+      ts: Date.now(),
+      authorName: null,
+    });
+    const news3 = payloadOf(
+      (await client.callTool({ name: "list_new", arguments: {} })) as never,
+    );
+    assert.equal(news3.count, 1);
+    const inc = payloadOf(
       (await client.callTool({
-        name: "qq_get_new",
-        arguments: { group: GROUP, cursor: nextCursor },
+        name: "get_new",
+        arguments: { group: GROUP },
       })) as never,
     );
-    assert.equal(second.count, 0);
+    assert.deepEqual(
+      (inc.messages as Array<Record<string, unknown>>).map((m) => m.msg_id),
+      ["M6"],
+    );
 
     // 搜索（≥3 字走 FTS trigram 路径，见 repo.searchMessages：[...q].length >= 3）
     // "排期表" 命中 M4/M5；M1 仅含「排期」二字，短语不应命中——同时验证 FTS JOIN 真实执行
     const search = payloadOf(
       (await client.callTool({
-        name: "qq_search",
+        name: "search",
         arguments: { group: GROUP, query: "排期表" },
       })) as never,
     );
@@ -358,7 +381,7 @@ test("M3-3 闭环：列群 → 取新消息 → 关键词搜索；游标断点�
     // 2 字降级 LIKE 子串路径（"开会" 仅 M1）
     const search2 = payloadOf(
       (await client.callTool({
-        name: "qq_search",
+        name: "search",
         arguments: { group: GROUP, query: "开会" },
       })) as never,
     );
@@ -380,7 +403,7 @@ test("M6-14 MCP 并发闸（真实路径）：占满上限后第二请求立即�
     client = await connectClient(fx.baseUrl, fx.agentToken);
     // 请求 A：进闸（active=1）并卡在挂起的 sendRaw——账本出现 reserved 行即视为已进闸
     const slowP = client.callTool({
-      name: "qq_send_proactive",
+      name: "send_proactive",
       arguments: { group: GROUP, text: "慢请求" },
     }) as Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
     let reserved = 0;
@@ -398,7 +421,7 @@ test("M6-14 MCP 并发闸（真实路径）：占满上限后第二请求立即�
 
     // 请求 B：闸满 → 立即得到「服务繁忙」（此刻 A 仍挂起，B 未排队等待）
     const busy = (await client.callTool({
-      name: "qq_list_groups",
+      name: "list_all",
       arguments: {},
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(busy.isError, true);
@@ -415,7 +438,7 @@ test("M6-14 MCP 并发闸（真实路径）：占满上限后第二请求立即�
       `挂起请求释放后应成功：${slow.content[0]?.text}`,
     );
     const after = (await client.callTool({
-      name: "qq_list_groups",
+      name: "list_all",
       arguments: {},
     })) as { isError?: boolean };
     assert.ok(after.isError !== true, "释放后并发槽应已归还");
@@ -438,7 +461,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
 
     const ctx = payloadOf(
       (await client.callTool({
-        name: "qq_context",
+        name: "context",
         arguments: { group: GROUP, msg_id: "M3", radius: 2 },
       })) as never,
     );
@@ -449,7 +472,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
 
     const before = payloadOf(
       (await client.callTool({
-        name: "qq_browse",
+        name: "browse",
         arguments: { group: GROUP, msg_id: "M3", mode: "before", limit: 10 },
       })) as never,
     );
@@ -461,7 +484,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
 
     const latest = payloadOf(
       (await client.callTool({
-        name: "qq_browse",
+        name: "browse",
         arguments: { group: GROUP, limit: 2 },
       })) as never,
     );
@@ -472,7 +495,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
 
     const members = payloadOf(
       (await client.callTool({
-        name: "qq_list_members",
+        name: "list_members",
         arguments: { group: GROUP },
       })) as never,
     );
@@ -481,25 +504,22 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
     assert.equal(memberList[0]!.msg_count, 3); // 小明 3 条最活跃
 
     const quota = payloadOf(
-      (await client.callTool({ name: "qq_quota", arguments: {} })) as never,
+      (await client.callTool({ name: "quota", arguments: {} })) as never,
     );
     assert.equal(quota.send_enabled, false);
     assert.equal(quota.proactive_sent_today, 0);
 
     // 不存在的锚点 → 可操作错误（isError=true 且不炸）
     const miss = (await client.callTool({
-      name: "qq_context",
+      name: "context",
       arguments: { group: GROUP, msg_id: "NOPE" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(miss.isError, true);
-    assert.ok(
-      miss.content[0]!.text.includes("qq_search"),
-      "错误提示应引导先搜索",
-    );
+    assert.ok(miss.content[0]!.text.includes("search"), "错误提示应引导先搜索");
 
     // 缺参数 → 可操作错误
     const missing = (await client.callTool({
-      name: "qq_get_new",
+      name: "get_new",
       arguments: {},
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(missing.isError, true);

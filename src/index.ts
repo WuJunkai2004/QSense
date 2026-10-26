@@ -65,7 +65,7 @@ async function main(): Promise<void> {
     bots: registry,
   });
 
-  // 各 bot 网关状态快照（/healthz 无关；qq_list_bots 与 /ui/api/bootstrap 展示用）
+  // 各 bot 网关状态快照（/healthz 无关；list_bots 与 /ui/api/bootstrap 展示用）
   const statuses = new Map<string, GatewayStatus>();
 
   let eventCount = 0;

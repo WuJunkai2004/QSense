@@ -67,7 +67,7 @@ export function loadConfig(
   env: Record<string, string | undefined> = process.env,
 ): Config {
   // M9 起 env 只承担部署拓扑与运维参数：bot 注册（appid/secret/认证等级）、
-  // admin token、发送开关、白名单一律以 SQLite 为唯一权威（WebUI / qq_register_bot 管理）。
+  // admin token、发送开关、白名单一律以 SQLite 为唯一权威（WebUI / register_bot 管理）。
 
   const portRaw = env.PORT;
   let port = 8787;

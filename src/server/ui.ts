@@ -240,7 +240,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             ok: true,
             bot: { appid: registered.app.appid, name: registered.app.name },
             agent_token: registered.agentToken,
-            note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换或 qq_token_refresh。",
+            note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换或 token_refresh。",
           };
         } catch (e) {
           const m = mapError(uiLog, e);
@@ -377,6 +377,21 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
                 : null,
           }));
           return { bot: botId, groups };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      /** 整群缓存删除（合规退出）：原 MCP 工具 forget 迁入——破坏性操作收归人类（admin token + WebUI 确认弹窗），
+       *  避免群成员经消息注入诱导 agent 删数据。DELETE 无 body（踩坑#16：勿带 json Content-Type）。 */
+      plugin.delete("/groups/:groupOpenid", async (req, reply) => {
+        try {
+          const botId = resolveBot((req.query as Record<string, unknown>).bot);
+          const group = (req.params as { groupOpenid: string }).groupOpenid;
+          const purged = repo.purgeGroupAll(botId, group);
+          uiLog.info("group purged via ui", { bot: botId, group, ...purged });
+          return { ok: true, bot: botId, group, purged };
         } catch (e) {
           const m = mapError(uiLog, e);
           reply.code(m.status).send({ error: m.message });

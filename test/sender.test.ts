@@ -500,13 +500,13 @@ test("M4-11 撤回：走官方 DELETE，账本记一行", async () => {
   }
 });
 
-test("M6-13 qq_forget：需显式 confirm；执行后消息/名册/注册表/游标全清且 FTS 同步", async () => {
+test("M6-13 purgeGroupAll（原 forget 迁 WebUI /ui/api）：清消息/名册/注册表/水位且 FTS 同步，sends 保留", async () => {
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "M1");
     fx.repo.setGroupSwitch(BOT, GROUP, true);
     fx.repo.setCursor(BOT, GROUP, "5");
-    // 账本行先于 purge 落库：forget 后仍在，才是「sends 保留」的真实检验
+    // 账本行先于 purge 落库：purge 后仍在，才是「sends 保留」的真实检验
     fx.repo.insertSend({
       bot_id: BOT,
       target_openid: GROUP,
@@ -516,15 +516,9 @@ test("M6-13 qq_forget：需显式 confirm；执行后消息/名册/注册表/游
       payload_hash: "x",
       status: "sent",
     });
-    const ctx = { repo: fx.repo, botId: BOT, sender: undefined };
 
-    // 读权限即可调用（合规退出通道，不走 SEND_ENABLE 门禁），但必须显式 confirm
-    const noConfirm = await runTool("qq_forget", { group: GROUP }, ctx);
-    assert.equal(noConfirm.isError, true);
-    assert.ok(noConfirm.text.includes("confirm=true"));
-
-    const ok = await runTool("qq_forget", { group: GROUP, confirm: true }, ctx);
-    assert.ok(!ok.isError, ok.text);
+    const purged = fx.repo.purgeGroupAll(BOT, GROUP);
+    assert.ok(purged.messages >= 1, "应删到消息");
     assert.equal(
       (
         fx.db.prepare("SELECT COUNT(*) AS n FROM messages").get() as {
@@ -582,7 +576,7 @@ test("runTool 未知工具名 → isError 快速失败（并发闸集成测试�
   }
 });
 
-test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、快照进 qq_quota", async () => {
+test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、快照进 quota", async () => {
   const fx = setupDb();
   try {
     const mock = makeApiMock();
@@ -597,7 +591,7 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
     });
     const ctx = { repo: fx.repo, botId: BOT, sender };
     const ok = await runTool(
-      "qq_send_proactive",
+      "send_proactive",
       { group: GROUP, text: "首条" },
       ctx,
     );
@@ -605,14 +599,14 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
     assert.ok(ok.text.startsWith(UNTRUSTED_NOTICE));
 
     const exceeded = await runTool(
-      "qq_send_proactive",
+      "send_proactive",
       { group: GROUP, text: "第二条" },
       ctx,
     );
     assert.equal(exceeded.isError, true);
     assert.ok(exceeded.text.includes("日额度不足"));
 
-    const quota = await runTool("qq_quota", {}, ctx);
+    const quota = await runTool("quota", {}, ctx);
     assert.ok(quota.text.includes('"today_by_group"'));
     assert.ok(quota.text.includes('"used": 1'));
   } finally {

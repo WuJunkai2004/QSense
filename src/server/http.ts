@@ -89,7 +89,7 @@ export function buildServer(deps: ServerDeps) {
           error: {
             code: -32001,
             message:
-              "Unauthorized：token 无效或未绑定 bot。请用 qq_register_bot 返回的 agent_token，或在 WebUI 设置页重新生成。",
+              "Unauthorized：token 无效或未绑定 bot。请用 register_bot 返回的 agent_token，或在 WebUI 设置页重新生成。",
           },
           id: null,
         });

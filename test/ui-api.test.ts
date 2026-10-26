@@ -437,6 +437,40 @@ test("M7-U8 移除 bot：不存在 → 400（不在注册表）；存在 → 200
   }
 });
 
+test("M7-U11 整群删除（原 MCP forget 迁入）：admin 鉴权门 + 清缓存 + sends 保留", async () => {
+  const fx = await setupServer();
+  try {
+    // 破坏性操作必须过 admin 鉴权
+    const noAuth = await fetch(`${fx.baseUrl}/ui/api/groups/${GROUP}`, {
+      method: "DELETE",
+    });
+    assert.equal(noAuth.status, 401);
+
+    const del = await fetch(`${fx.baseUrl}/ui/api/groups/${GROUP}`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
+    assert.equal(del.status, 200);
+    const body = (await del.json()) as {
+      ok: boolean;
+      purged: { messages: number };
+    };
+    assert.equal(body.ok, true);
+    assert.ok(body.purged.messages >= 5, "应删到种子消息");
+
+    // 删除后：群注册表不再含该群
+    const groups = (await (
+      await get(fx.baseUrl, "/ui/api/groups", authHeaders())
+    ).json()) as { groups: Array<{ group_openid: string }> };
+    assert.equal(
+      groups.groups.some((g) => g.group_openid === GROUP),
+      false,
+    );
+  } finally {
+    await fx.close();
+  }
+});
+
 test("M7-U9 send：被动回复走账本（msg_seq=1、status sent）；非白名单群硬拒绝", async () => {
   const fx = await setupServer();
   try {

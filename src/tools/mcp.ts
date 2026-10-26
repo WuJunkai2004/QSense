@@ -26,7 +26,7 @@ export interface McpDeps {
   sender?: Sender;
   /** 机器人注册表（bots 表域层）：注册/轮换/白名单解析 */
   bots?: BotRegistry;
-  /** 网关接入器：qq_register_bot 后立即接入新 bot；缺省=测试环境不接入 */
+  /** 网关接入器：register_bot 后立即接入新 bot；缺省=测试环境不接入 */
   supervisor?: { addBot: (app: BotApp) => void };
   /** MCP 工具执行全局并发上限（M6 限流）：SQLite 同步查询毫秒级、写工具 API 调用秒级，8 足够且防打爆 */
   maxConcurrent?: number;
