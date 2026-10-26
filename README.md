@@ -67,7 +67,7 @@ M9 起 env 只承担部署拓扑与运维参数；**bot 注册（appid/secret/�
 
 **只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数）· `list_group` / `list_chat` / `list_new`（分类型/未读视图）· `list_members`（名册）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索）· `context`（前后文）· `get_media`（点开看图：按 ![附件n] 编号拉取图像内容，多模态模型直接读图）· `quota`（额度水位）
 
-**写（双重门禁：kv 总开关 + 该 bot 白名单，均 WebUI 设置页管理）**：`reply`（被动回复：官方窗口 5分钟/5次 + msg_seq 幂等账本）· `send_proactive`（主动消息：令牌桶 + 每群每日 1000 条记账）· `recall`（撤回）
+**写（双重门禁：kv 总开关 + 该 bot 白名单，均 WebUI 设置页管理）**：`send`（统一发送：被动优先自动路由——窗内可绑走被动回复免额度免审，否则主动消息过令牌桶+每群每日 1000 条记账；`quote_msg_id` 可选引用块，与窗口解耦；返回 `channel` 标明实际通道）· `recall`（撤回）
 
 **合规**：整群缓存删除已**迁出 MCP 工具面**（避免 agent 被消息注入诱导删数据），收归 WebUI：`DELETE /ui/api/groups/:openid`（admin token + 前端确认弹窗），发送审计账本保留。
 

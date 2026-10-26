@@ -255,14 +255,13 @@ test("M3-2 listTools 含 15 个工具；未开启发送时写工具硬拒绝", a
       "quota",
       "recall",
       "register_bot",
-      "reply",
       "search",
-      "send_proactive",
+      "send",
       "token_refresh",
     ]);
-    // 双重门禁未开（SEND_ENABLE 缺省 false）→ 写工具硬拒绝且不炸
+    // 双重门禁未开（发送开关缺省关）→ 写工具硬拒绝且不炸
     const denied = (await client.callTool({
-      name: "send_proactive",
+      name: "send",
       arguments: { group: GROUP, text: "test" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(denied.isError, true);
@@ -395,7 +394,7 @@ test("M6-14 MCP 并发闸（真实路径）：占满上限后第二请求立即�
     client = await connectClient(fx.baseUrl, fx.agentToken);
     // 请求 A：进闸（active=1）并卡在挂起的 sendRaw——账本出现 reserved 行即视为已进闸
     const slowP = client.callTool({
-      name: "send_proactive",
+      name: "send",
       arguments: { group: GROUP, text: "慢请求" },
     }) as Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
     let reserved = 0;

@@ -340,20 +340,23 @@ test("M4-5 双重门禁：开关关/白名单外 → 硬拒绝，API 零调用",
     fx.repo.setSendEnable(false);
     await assert.rejects(
       () => sender.proactive(BOT, GROUP, "hi"),
-      /SEND_ENABLE/,
+      /发送功能未开启/,
     );
     await assert.rejects(
       () => sender.reply(BOT, GROUP, "M1", "hi"),
-      /SEND_ENABLE/,
+      /发送功能未开启/,
     );
-    await assert.rejects(() => sender.recall(BOT, GROUP, "X"), /SEND_ENABLE/);
+    await assert.rejects(
+      () => sender.recall(BOT, GROUP, "X"),
+      /发送功能未开启/,
+    );
 
     // 开关开且白名单含 G1：白名单外群拒绝——区分「空表全拒」与「精确判断某群不在名单」
     fx.repo.setSendEnable(true);
     fx.registry.setAllowGroups(BOT, [GROUP]);
     await assert.rejects(
       () => sender.proactive(BOT, "OTHER_GROUP", "hi"),
-      /ALLOW_GROUPS/,
+      /白名单/,
     );
     assert.equal(mock.calls.length, 0, "任何拒绝都不得触发 API 调用");
     // 正向对照：白名单内群放行
@@ -616,24 +619,105 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
       apiFor: () => mock,
     });
     const ctx = { repo: fx.repo, botId: BOT, sender };
-    const ok = await runTool(
-      "send_proactive",
-      { group: GROUP, text: "首条" },
-      ctx,
-    );
+    const ok = await runTool("send", { group: GROUP, text: "首条" }, ctx);
     assert.ok(!ok.isError);
 
-    const exceeded = await runTool(
-      "send_proactive",
-      { group: GROUP, text: "第二条" },
-      ctx,
-    );
+    const exceeded = await runTool("send", { group: GROUP, text: "第二条" }, ctx);
     assert.equal(exceeded.isError, true);
     assert.ok(exceeded.text.includes("日额度不足"));
 
     const quota = await runTool("quota", {}, ctx);
     assert.ok(quota.text.includes('"today_by_group"'));
     assert.ok(quota.text.includes('"used": 1'));
+  } finally {
+    fx.close();
+  }
+});
+
+// —— sendAuto 路由矩阵（M4-14）：被动/主动换道 + 引用块，全部落在已真机验证形态 ——
+
+function makeSender(fx: ReturnType<typeof setupDb>, mock: ReturnType<typeof makeApiMock>): Sender {
+  return new Sender({
+    log: createLogger("error"),
+    db: fx.db,
+    repo: fx.repo,
+    tokenManager: {} as never,
+    bots: fx.registry,
+    apiFor: () => mock,
+  });
+}
+
+test("M4-14 sendAuto 路由：quote 窗内 → 被动绑=引；quote 超窗 → 主动+引用；无 quote 绑最新；无窗内消息走主动", async () => {
+  const fx = setupDb();
+  try {
+    // 场景1：quote 目标在窗内 → 走被动，绑定与引用同一条（WebUI quote=true 已验证形态）
+    seedInbound(fx.repo, "M_Q", 60_000); // 1 分钟前
+    const m1 = makeApiMock();
+    const r1 = await makeSender(fx, m1).sendAuto(BOT, GROUP, "场景一", "M_Q");
+    assert.equal(r1.channel, "passive");
+    assert.equal(m1.calls[0]!.body.msg_id, "M_Q");
+    assert.deepEqual(m1.calls[0]!.body.message_reference, {
+      message_id: "M_Q",
+      ignore_get_message_error: true,
+    });
+
+    // 场景2：quote 目标超窗 → 主动通道 + 引用块（2026-10-26 真机验证受理）
+    seedInbound(fx.repo, "M_OLD", 6 * 60_000); // 6 分钟前，已超窗
+    const m2 = makeApiMock();
+    const r2 = await makeSender(fx, m2).sendAuto(BOT, GROUP, "场景二", "M_OLD");
+    assert.equal(r2.channel, "proactive");
+    assert.equal(m2.calls[0]!.body.msg_id, undefined);
+    assert.equal(
+      (m2.calls[0]!.body.message_reference as { message_id: string }).message_id,
+      "M_OLD",
+    );
+
+    // 场景3：无 quote、群里有窗内消息 → 被动绑定最新，不带引用块
+    seedInbound(fx.repo, "M_NEW", 30_000);
+    const m3 = makeApiMock();
+    const r3 = await makeSender(fx, m3).sendAuto(BOT, GROUP, "场景三");
+    assert.equal(r3.channel, "passive");
+    assert.equal(m3.calls[0]!.body.msg_id, "M_NEW");
+    assert.equal(m3.calls[0]!.body.message_reference, undefined);
+
+    // 场景4：无 quote、无窗内消息（M_Q/M_NEW 均已被场景1/3消费为绑定目标，仍窗内——
+    // 但次数未超，latestBindable 命中最新的 M_NEW）→ 清空重来验证纯主动：
+    // 全新 fixture，不 seed 任何消息。
+    const fx4 = setupDb();
+    try {
+      const m4 = makeApiMock();
+      const r4 = await makeSender(fx4, m4).sendAuto(BOT, GROUP, "场景四");
+      assert.equal(r4.channel, "proactive");
+      assert.equal(m4.calls[0]!.body.msg_id, undefined);
+      assert.equal(m4.calls[0]!.body.message_reference, undefined);
+    } finally {
+      fx4.close();
+    }
+  } finally {
+    fx.close();
+  }
+});
+
+test("M4-15 sendAuto：quote 不在缓存 → 报错不发送；被动次数用尽 → 主动兜底", async () => {
+  const fx = setupDb();
+  try {
+    const m1 = makeApiMock();
+    await assert.rejects(
+      () => makeSender(fx, m1).sendAuto(BOT, GROUP, "x", "M_MISSING"),
+      /不在缓存中/,
+    );
+    assert.equal(m1.calls.length, 0, "报错路径不应发出任何请求");
+
+    // 窗内消息已被回复 5 次 → latestBindable 跳过 → 主动兜底
+    seedInbound(fx.repo, "M_FULL", 30_000);
+    const m2 = makeApiMock();
+    const sender = makeSender(fx, m2);
+    for (let i = 0; i < 5; i++) {
+      await sender.reply(BOT, GROUP, "M_FULL", `第${i}次回复`);
+    }
+    const r = await sender.sendAuto(BOT, GROUP, "第六次");
+    assert.equal(r.channel, "proactive", "次数用尽后应换主动通道");
+    assert.equal(m2.calls[m2.calls.length - 1]!.body.msg_id, undefined);
   } finally {
     fx.close();
   }

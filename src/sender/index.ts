@@ -48,6 +48,8 @@ export type SendStatus = "sent" | "replayed" | "downgraded" | "pending_audit";
 
 export interface SendResult {
   status: SendStatus;
+  /** 实际通道：passive=被动回复（不计额度）| proactive=主动消息（计额度） */
+  channel?: "passive" | "proactive";
   /** 本次发送使用的 msg_seq（被动回复） */
   msg_seq?: number;
   /** 官方返回的消息 ID */
@@ -243,6 +245,7 @@ export class Sender {
       });
       return {
         status: "replayed",
+        channel: "passive",
         msg_seq: replayed.msg_seq ?? undefined,
         provider_msg_id: replayed.provider_msg_id ?? undefined,
         detail: "同内容回复此前已成功提交（幂等账本命中），未重复发送。",
@@ -320,7 +323,7 @@ export class Sender {
           seq,
           provider: resp.id,
         });
-        return { status: "sent", msg_seq: seq, provider_msg_id: resp.id };
+        return { status: "sent", channel: "passive", msg_seq: seq, provider_msg_id: resp.id };
       } catch (e) {
         const biz = extractBizCode(e);
         if (isAuditPendingCode(biz)) {
@@ -332,6 +335,7 @@ export class Sender {
           );
           return {
             status: "pending_audit",
+            channel: "passive",
             msg_seq: seq,
             detail: t("send_audit_pending", { code: biz ?? 0 }),
           };
@@ -379,6 +383,11 @@ export class Sender {
     botId: string,
     groupOpenid: string,
     text: string,
+    /**
+     * 可选引用块目标（message_reference）。引用样式与被动窗口解耦（官方已真机验证：
+     * 主动消息携带 message_reference 照常受理，目标超窗亦可），仅影响客户端展示。
+     */
+    quoteMsgId?: string,
   ): Promise<SendResult> {
     const app = this.gate(botId, groupOpenid);
     const content = this.checkContent(text);
@@ -432,7 +441,18 @@ export class Sender {
         "group",
         groupOpenid,
         credsOf(app),
-        { msg_type: 0, content },
+        {
+          msg_type: 0,
+          content,
+          ...(quoteMsgId !== undefined
+            ? {
+                message_reference: {
+                  message_id: quoteMsgId,
+                  ignore_get_message_error: true,
+                },
+              }
+            : {}),
+        },
       );
       repo.updateSendStatus(reservation, "sent", resp.id);
       repo.incrQuotaDaily(botId, groupOpenid, date);
@@ -441,7 +461,7 @@ export class Sender {
         group: groupOpenid,
         provider: resp.id,
       });
-      return { status: "sent", provider_msg_id: resp.id };
+      return { status: "sent", channel: "proactive", provider_msg_id: resp.id };
     } catch (e) {
       const biz = extractBizCode(e);
       if (isAuditPendingCode(biz)) {
@@ -455,12 +475,79 @@ export class Sender {
         repo.incrQuotaDaily(botId, groupOpenid, date);
         return {
           status: "pending_audit",
+          channel: "proactive",
           detail: t("send_audit_pending", { code: biz ?? 0 }),
         };
       }
       repo.updateSendStatus(reservation, "failed", undefined, biz ?? undefined);
       throw new Error(describeSendError(e));
     }
+  }
+
+  // —— 统一发送入口（send 工具）：被动优先自动路由 ——
+  // 依据：被动/主动在用户端观感一致（被动默认不带引用块），差异只是官方计费口径
+  // （被动免额度但限 5 分钟 5 次；主动计额度可能进审核）。通道选择是系统优化问题，
+  // 不应暴露给智能体。路由全部落在已真机验证的形态上：
+  //   A. 被动 + 绑定（引用可有可无，引用目标=绑定目标）——WebUI quote=true 同款
+  //   B. 主动 + 引用块（目标任意时效）——2026-10-26 真机验证受理
+  async sendAuto(
+    botId: string,
+    groupOpenid: string,
+    text: string,
+    /** 可选：引用群内某条消息（客户端显示引用样式）。须为缓存中存在的官方消息ID */
+    quoteMsgId?: string,
+  ): Promise<SendResult> {
+    if (quoteMsgId !== undefined) {
+      const q = this.deps.repo.getMessageByMsgId(botId, groupOpenid, quoteMsgId);
+      if (q === null || q.ts === null) {
+        throw new Error(t("send_quote_not_found", { msg_id: quoteMsgId }));
+      }
+    }
+    // 绑定目标：引用目标在窗内 → 绑=引（形态A）；无引用时绑最新可绑消息（白嫖被动）
+    let bindMsgId: string | undefined;
+    if (quoteMsgId !== undefined && this.bindable(botId, groupOpenid, quoteMsgId)) {
+      bindMsgId = quoteMsgId;
+    } else if (quoteMsgId === undefined) {
+      bindMsgId = this.latestBindable(botId, groupOpenid);
+    }
+    if (bindMsgId !== undefined) {
+      return this.reply(
+        botId,
+        groupOpenid,
+        bindMsgId,
+        text,
+        false,
+        bindMsgId === quoteMsgId, // 仅绑=引时带引用块
+      );
+    }
+    return this.proactive(botId, groupOpenid, text, quoteMsgId);
+  }
+
+  /** 消息可否作被动绑定目标：在缓存、窗内（5 分钟）、未用尽次数（5 次） */
+  private bindable(botId: string, groupOpenid: string, msgId: string): boolean {
+    const row = this.deps.repo.getMessageByMsgId(botId, groupOpenid, msgId);
+    if (row === null || row.ts === null) return false;
+    if (Date.now() - row.ts > PASSIVE_WINDOW.group.ms) return false;
+    return (
+      this.deps.repo.countPassiveSends(botId, msgId) < PASSIVE_WINDOW.group.max
+    );
+  }
+
+  /** 最新可绑消息：新→旧扫 10 条，跳过自发补记行（direction=1，被动窗口语义是回复他人），
+   * 第一条窗内且未超次的（窗内分钟级，10 条充裕） */
+  private latestBindable(botId: string, groupOpenid: string): string | undefined {
+    for (const row of this.deps.repo.browseLatest(botId, groupOpenid, 10)) {
+      if (row.direction === 1) continue;
+      if (
+        row.ts !== null &&
+        Date.now() - row.ts <= PASSIVE_WINDOW.group.ms &&
+        this.deps.repo.countPassiveSends(botId, row.msg_id) <
+          PASSIVE_WINDOW.group.max
+      ) {
+        return row.msg_id;
+      }
+    }
+    return undefined;
   }
 
   /**
