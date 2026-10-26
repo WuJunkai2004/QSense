@@ -49,7 +49,10 @@ const MIME: Record<string, string> = {
 const distDir = (): string => process.env.UI_DIST_DIR?.trim() || "./ui/dist";
 
 /** 统一错误映射：BotRegistryError（含参数类错误）→ 400，其余 → 500（记日志） */
-function mapError(log: Logger, e: unknown): { status: number; message: string } {
+function mapError(
+  log: Logger,
+  e: unknown,
+): { status: number; message: string } {
   if (e instanceof BotRegistryError) return { status: 400, message: e.message };
   const message = e instanceof Error ? e.message : String(e);
   log.error("ui api error", { reason: message.slice(0, 300) });
@@ -62,7 +65,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
 
   // —— 静态托管（无鉴权：纯前端壳，不含数据） ——
 
-  async function serveFile(reply: FastifyReply, filePath: string): Promise<void> {
+  async function serveFile(
+    reply: FastifyReply,
+    filePath: string,
+  ): Promise<void> {
     try {
       const buf = await readFile(filePath);
       const dot = filePath.lastIndexOf(".");
@@ -133,7 +139,9 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         // M8：WebUI 用 admin token（SQLite admin:token:v1 播种自 env MCP_TOKEN）
         const admin = deps.repo.getAdminToken();
         if (admin === null || !bearerOk(req.headers.authorization, admin)) {
-          reply.code(401).send({ error: "Unauthorized：缺少或错误的 admin token。" });
+          reply
+            .code(401)
+            .send({ error: "Unauthorized：缺少或错误的 admin token。" });
         }
       });
 
@@ -174,7 +182,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
 
       const groupOf = (raw: unknown): string => {
         const g = typeof raw === "string" ? raw.trim() : "";
-        if (g === "") throw new BotRegistryError("缺少 group 参数（群 openid）。");
+        if (g === "")
+          throw new BotRegistryError("缺少 group 参数（群 openid）。");
         return g;
       };
 
@@ -211,12 +220,11 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             body.auth_level !== "uncertified"
           ) {
             throw new BotRegistryError(
-              'auth_level 无效：只接受 certified（60条/分）或 uncertified（30条/分）。',
+              "auth_level 无效：只接受 certified（60条/分）或 uncertified（30条/分）。",
             );
           }
           const authLevel =
-            body.auth_level === "certified" ||
-            body.auth_level === "uncertified"
+            body.auth_level === "certified" || body.auth_level === "uncertified"
               ? body.auth_level
               : undefined;
           const registered = await registry.add({
@@ -279,7 +287,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
                 );
               }
               registry.setAllowGroups(appid, groups);
-              uiLog.info("allow groups via ui", { appid, count: groups.length });
+              uiLog.info("allow groups via ui", {
+                appid,
+                count: groups.length,
+              });
             }
           }
           if (Array.isArray(body.auth_levels)) {
@@ -292,7 +303,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
                   rec.auth_level !== "uncertified")
               ) {
                 throw new BotRegistryError(
-                  "auth_levels 项无效：需要 { appid, auth_level: \"certified\" | \"uncertified\" }，且 appid 已注册。",
+                  'auth_levels 项无效：需要 { appid, auth_level: "certified" | "uncertified" }，且 appid 已注册。',
                 );
               }
               registry.setAuthLevel(appid, rec.auth_level);
@@ -358,7 +369,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
                 ? {
                     ts: new Date(Number(g.last_ts)).toISOString(),
                     author: (g.last_author as string | null) ?? null,
-                    snippet: ((g.last_content as string | null) ?? "").slice(0, 80),
+                    snippet: ((g.last_content as string | null) ?? "").slice(
+                      0,
+                      80,
+                    ),
                   }
                 : null,
           }));
@@ -428,7 +442,9 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           }
           const row = repo.getMessageByMsgId(botId, group, msgId);
           if (row === null) {
-            reply.code(404).send({ error: "消息不存在（或已过保留期被清理）。" });
+            reply
+              .code(404)
+              .send({ error: "消息不存在（或已过保留期被清理）。" });
             return;
           }
           return {
@@ -554,14 +570,19 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             repo.saveOutgoingGroupMessage({
               botId,
               groupOpenid: group,
-              msgId: result.provider_msg_id ?? `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              msgId:
+                result.provider_msg_id ??
+                `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               content: text,
               ts: Date.now(),
-              authorName: registry.list().find((b) => b.appid === botId)?.name ?? null,
+              authorName:
+                registry.list().find((b) => b.appid === botId)?.name ?? null,
             });
           } catch (pe) {
             const pm = pe instanceof Error ? pe.message : String(pe);
-            uiLog.error("outgoing message persist failed", { reason: pm.slice(0, 200) });
+            uiLog.error("outgoing message persist failed", {
+              reason: pm.slice(0, 200),
+            });
           }
           uiLog.info("send via ui", {
             bot: botId,

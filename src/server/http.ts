@@ -101,7 +101,12 @@ export function buildServer(deps: ServerDeps) {
   });
 
   // WebUI（M7）：registry+supervisor+tokens 齐备才挂载（缺省=测试旧行为，不挂 /ui）
-  if (deps.registry !== undefined && deps.supervisor !== undefined && deps.tokens !== undefined && deps.botStatuses !== undefined) {
+  if (
+    deps.registry !== undefined &&
+    deps.supervisor !== undefined &&
+    deps.tokens !== undefined &&
+    deps.botStatuses !== undefined
+  ) {
     registerUiRoutes(app, {
       log,
       db,

@@ -22,7 +22,11 @@ const BOT = "10001";
 const GROUP = "G1";
 
 interface MockApi {
-  calls: Array<{ scope: string; targetId: string; body: Record<string, unknown> }>;
+  calls: Array<{
+    scope: string;
+    targetId: string;
+    body: Record<string, unknown>;
+  }>;
 }
 
 function makeApiMock(): MockApi & SendApi {
@@ -125,7 +129,10 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
   // 假 UI 产物：index.html + assets/app.js
   const uiDir = join(dir, "fake-ui");
   mkdirSync(join(uiDir, "assets"), { recursive: true });
-  writeFileSync(join(uiDir, "index.html"), "<!doctype html><title>m7-fake-ui</title>");
+  writeFileSync(
+    join(uiDir, "index.html"),
+    "<!doctype html><title>m7-fake-ui</title>",
+  );
   writeFileSync(join(uiDir, "assets", "app.js"), "console.log('m7');\n");
   process.env.UI_DIST_DIR = uiDir;
 
@@ -155,7 +162,12 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
       await app.close();
       db.close();
       try {
-        rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        rmSync(dir, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
       } catch {
         /* best-effort */
       }
@@ -163,11 +175,17 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
   };
 }
 
-function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+function authHeaders(
+  extra: Record<string, string> = {},
+): Record<string, string> {
   return { Authorization: `Bearer ${TOKEN}`, ...extra };
 }
 
-async function get(url: string, path: string, headers: Record<string, string> = {}): Promise<Response> {
+async function get(
+  url: string,
+  path: string,
+  headers: Record<string, string> = {},
+): Promise<Response> {
   return fetch(`${url}${path}`, { headers });
 }
 
@@ -183,10 +201,9 @@ test("M7-U1 /ui 静态：html 与 asset 正常出、防目录穿越、缺文件 
     assert.equal(js.status, 200);
     assert.match(js.headers.get("content-type") ?? "", /javascript/);
 
-    const trav = await fetch(
-      `${fx.baseUrl}/ui/..%2f..%2fqqbot.db`,
-      { redirect: "manual" },
-    );
+    const trav = await fetch(`${fx.baseUrl}/ui/..%2f..%2fqqbot.db`, {
+      redirect: "manual",
+    });
     assert.equal(trav.status, 400);
 
     const missing = await fetch(`${fx.baseUrl}/ui/nope.js`);
@@ -248,10 +265,18 @@ test("M7-U3 bootstrap：bots 含来源/网关状态，发送与白名单口径�
 test("M7-U4 groups：成员数 + 最后消息摘要", async () => {
   const fx = await setupServer();
   try {
-    const res = await get(fx.baseUrl, `/ui/api/groups?bot=${BOT}`, authHeaders());
+    const res = await get(
+      fx.baseUrl,
+      `/ui/api/groups?bot=${BOT}`,
+      authHeaders(),
+    );
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
-      groups: Array<{ group_openid: string; member_count: number; last: { snippet: string } | null }>;
+      groups: Array<{
+        group_openid: string;
+        member_count: number;
+        last: { snippet: string } | null;
+      }>;
     };
     assert.equal(body.groups.length, 1);
     assert.equal(body.groups[0].group_openid, GROUP);
@@ -267,13 +292,20 @@ test("M7-U5 messages：默认最新页（升序）、before 翻更早、after �
   try {
     const h = authHeaders();
     const page1 = (await (
-      await get(fx.baseUrl, `/ui/api/messages?bot=${BOT}&group=${GROUP}&limit=2`, h)
+      await get(
+        fx.baseUrl,
+        `/ui/api/messages?bot=${BOT}&group=${GROUP}&limit=2`,
+        h,
+      )
     ).json()) as {
       messages: Array<{ rid: number; msg_id: string; content: string }>;
       has_more: boolean;
       next_before: number;
     };
-    assert.deepEqual(page1.messages.map((m) => m.msg_id), ["M4", "M5"]);
+    assert.deepEqual(
+      page1.messages.map((m) => m.msg_id),
+      ["M4", "M5"],
+    );
     assert.equal(page1.has_more, true);
 
     const page2 = (await (
@@ -283,7 +315,10 @@ test("M7-U5 messages：默认最新页（升序）、before 翻更早、after �
         h,
       )
     ).json()) as typeof page1 & { has_more: boolean };
-    assert.deepEqual(page2.messages.map((m) => m.msg_id), ["M2", "M3"]);
+    assert.deepEqual(
+      page2.messages.map((m) => m.msg_id),
+      ["M2", "M3"],
+    );
 
     const after = (await (
       await get(
@@ -293,7 +328,10 @@ test("M7-U5 messages：默认最新页（升序）、before 翻更早、after �
       )
     ).json()) as { mode: string; messages: Array<{ msg_id: string }> };
     assert.equal(after.mode, "after");
-    assert.deepEqual(after.messages.map((m) => m.msg_id), []);
+    assert.deepEqual(
+      after.messages.map((m) => m.msg_id),
+      [],
+    );
   } finally {
     await fx.close();
   }
@@ -308,11 +346,20 @@ test("M7-U6 message 详情：raw/elements 全量透出（智能体视角）", as
       authHeaders(),
     );
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { raw: { echoes: boolean }; content: string };
+    const body = (await res.json()) as {
+      raw: { echoes: boolean };
+      content: string;
+    };
     assert.equal(body.raw.echoes, true);
     assert.match(body.content, /消息正文1/);
     assert.equal(
-      (await get(fx.baseUrl, `/ui/api/message?bot=${BOT}&group=${GROUP}&msg_id=NOPE`, authHeaders())).status,
+      (
+        await get(
+          fx.baseUrl,
+          `/ui/api/message?bot=${BOT}&group=${GROUP}&msg_id=NOPE`,
+          authHeaders(),
+        )
+      ).status,
       404,
     );
   } finally {
@@ -373,9 +420,15 @@ test("M7-U8 移除 bot：不存在 → 400（不在注册表）；存在 → 200
       headers: authHeaders(), // DELETE 无 body：不能带 json Content-Type（Fastify 会因空体报 400）
     });
     assert.equal(missing.status, 400);
-    assert.match(((await missing.json()) as { error: string }).error, /不在注册表中/);
+    assert.match(
+      ((await missing.json()) as { error: string }).error,
+      /不在注册表中/,
+    );
 
-    const del = await fetch(`${fx.baseUrl}/ui/api/bots/20002`, { method: "DELETE", headers: authHeaders() });
+    const del = await fetch(`${fx.baseUrl}/ui/api/bots/20002`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
     assert.equal(del.status, 200);
     assert.deepEqual(fx.removed, ["20002"]);
     assert.deepEqual(fx.cleared, ["20002"]);
@@ -391,10 +444,17 @@ test("M7-U9 send：被动回复走账本（msg_seq=1、status sent）；非白�
     const ok = await fetch(`${fx.baseUrl}/ui/api/send`, {
       method: "POST",
       headers: h,
-      body: JSON.stringify({ bot: BOT, group: GROUP, text: "UI 回复", reply_msg_id: "M1" }),
+      body: JSON.stringify({
+        bot: BOT,
+        group: GROUP,
+        text: "UI 回复",
+        reply_msg_id: "M1",
+      }),
     });
     assert.equal(ok.status, 200);
-    const body = (await ok.json()) as { result: { status: string; msg_seq?: number } };
+    const body = (await ok.json()) as {
+      result: { status: string; msg_seq?: number };
+    };
     assert.equal(body.result.status, "sent");
     assert.equal(body.result.msg_seq, 1);
     assert.equal(fx.api.calls.length, 1);
@@ -423,7 +483,11 @@ test("M7-U9 send：被动回复走账本（msg_seq=1、status sent）；非白�
     assert.equal(sent.author.role, null);
 
     const sends = (await (
-      await get(fx.baseUrl, `/ui/api/sends?bot=${BOT}&group=${GROUP}`, authHeaders())
+      await get(
+        fx.baseUrl,
+        `/ui/api/sends?bot=${BOT}&group=${GROUP}`,
+        authHeaders(),
+      )
     ).json()) as { sends: Array<{ status: string; kind: string }> };
     assert.equal(sends.sends.length, 1);
     assert.equal(sends.sends[0].status, "sent");
@@ -443,7 +507,11 @@ test("M7-U9 send：被动回复走账本（msg_seq=1、status sent）；非白�
 test("M7-U10 quota：水位与令牌桶快照", async () => {
   const fx = await setupServer(false);
   try {
-    const res = await get(fx.baseUrl, `/ui/api/quota?bot=${BOT}`, authHeaders());
+    const res = await get(
+      fx.baseUrl,
+      `/ui/api/quota?bot=${BOT}`,
+      authHeaders(),
+    );
     assert.equal(res.status, 200);
     const body = (await res.json()) as {
       send_enabled: boolean;

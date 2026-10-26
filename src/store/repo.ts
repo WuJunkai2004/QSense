@@ -509,11 +509,7 @@ export class Repo {
   }
 
   /** WebUI 发送记录：某 bot 对某群的最近账本行（含审核回填状态，无消息内容） */
-  recentSends(
-    botId: string,
-    targetOpenid: string,
-    limit: number,
-  ): SendRow[] {
+  recentSends(botId: string, targetOpenid: string, limit: number): SendRow[] {
     return this.db
       .prepare(
         `
@@ -671,7 +667,9 @@ export class Repo {
     const row = this.kvGetStmt.get(SETTINGS_KEY) as { v: string } | undefined;
     if (row === undefined) return false;
     try {
-      return (JSON.parse(row.v) as { sendEnable?: boolean }).sendEnable === true;
+      return (
+        (JSON.parse(row.v) as { sendEnable?: boolean }).sendEnable === true
+      );
     } catch {
       return false; // 坏数据按关闭处理（安全默认）
     }
@@ -693,8 +691,7 @@ export class Repo {
     );
     insert.run(SETTINGS_KEY, JSON.stringify({ sendEnable: false }));
     const existing = this.kvGetStmt.get(ADMIN_TOKEN_KEY) as
-      | { v: string }
-      | undefined;
+      { v: string } | undefined;
     if (existing !== undefined) {
       return { adminToken: existing.v, adminCreated: false };
     }
@@ -705,7 +702,8 @@ export class Repo {
 
   /** admin token（kv admin:token:v1）：WebUI/设置页管理凭证。null=尚未播种 */
   getAdminToken(): string | null {
-    const row = this.kvGetStmt.get(ADMIN_TOKEN_KEY) as { v: string } | undefined;
+    const row = this.kvGetStmt.get(ADMIN_TOKEN_KEY) as
+      { v: string } | undefined;
     return row?.v ?? null;
   }
 

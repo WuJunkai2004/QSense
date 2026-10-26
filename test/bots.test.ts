@@ -12,7 +12,12 @@ import { BotRegistry, BotRegistryError } from "../src/bots";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
-import { runTool, ToolError, UNTRUSTED_NOTICE, type ToolContext } from "../src/tools/defs";
+import {
+  runTool,
+  ToolError,
+  UNTRUSTED_NOTICE,
+  type ToolContext,
+} from "../src/tools/defs";
 
 const SEED = { appid: "10001", secret: "s1", name: "主bot" };
 const GROUP_A = "GROUP_A";
@@ -26,7 +31,12 @@ function setupDb(): { db: DB; close: () => void } {
     close: () => {
       db.close();
       try {
-        rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        rmSync(dir, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
       } catch {
         /* best-effort */
       }
@@ -34,7 +44,10 @@ function setupDb(): { db: DB; close: () => void } {
   };
 }
 
-function newRegistry(db: DB, verify?: (app: { appid: string }) => Promise<void>): BotRegistry {
+function newRegistry(
+  db: DB,
+  verify?: (app: { appid: string }) => Promise<void>,
+): BotRegistry {
   return new BotRegistry({
     db,
     ...(verify ? { verify } : {}),
@@ -59,7 +72,9 @@ test("M9-B1 注册制：空表构造不播种，list 为空；重启后仍是表
     const reg2 = newRegistry(fx.db);
     await reg2.add(SEED);
     assert.deepEqual(
-      newRegistry(fx.db).list().map((a) => a.appid),
+      newRegistry(fx.db)
+        .list()
+        .map((a) => a.appid),
       ["10001"], // 重启不丢、也不重复
     );
   } finally {
@@ -105,7 +120,10 @@ test("M8-B3 add：重复 appid / 空参数 / verify 失败 → 明确报错且�
         throw new Error("接口访问源IP不在白名单(code 11298)");
       },
     });
-    await assert.rejects(() => bad.add({ appid: "30003", secret: "s3" }), /11298/);
+    await assert.rejects(
+      () => bad.add({ appid: "30003", secret: "s3" }),
+      /11298/,
+    );
     assert.equal(reg.get("30003"), undefined); // 校验失败不入库
   } finally {
     fx.close();
@@ -232,7 +250,11 @@ test("M8-B8 qq_token_refresh：换发新 token，旧 token 立即失效", async 
   try {
     const reg = newRegistry(fx.db);
     const added = await reg.add({ appid: "20002", secret: "s2" });
-    const ctx: ToolContext = { repo: new Repo(fx.db), bots: reg, botId: "20002" };
+    const ctx: ToolContext = {
+      repo: new Repo(fx.db),
+      bots: reg,
+      botId: "20002",
+    };
     const raw = await runTool("qq_token_refresh", {}, ctx);
     const out = JSON.parse(raw.text.split("\n").slice(1).join("\n")) as Record<
       string,

@@ -85,7 +85,15 @@ function setupDb(): Fixture {
   db.prepare(
     `INSERT INTO bots(appid, name, secret, agent_token, allow_groups, auth_level, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(BOT, "t", "s", "a".repeat(48), JSON.stringify([GROUP]), "uncertified", Date.now());
+  ).run(
+    BOT,
+    "t",
+    "s",
+    "a".repeat(48),
+    JSON.stringify([GROUP]),
+    "uncertified",
+    Date.now(),
+  );
   repo.ensureRuntime();
   repo.setSendEnable(true);
   const registry = new BotRegistry({ db });
@@ -190,7 +198,11 @@ test("M4-2b 引用开关：默认纯被动回复不带 message_reference；quote
     await sender.reply(BOT, GROUP, "M1", "纯回复（不带引用块）");
     await sender.reply(BOT, GROUP, "M1", "引用回复（带引用块）", false, true);
     assert.equal(mock.calls.length, 2);
-    assert.equal(mock.calls[0]!.body.message_reference, undefined, "默认不携带引用块");
+    assert.equal(
+      mock.calls[0]!.body.message_reference,
+      undefined,
+      "默认不携带引用块",
+    );
     assert.deepEqual(mock.calls[1]!.body.message_reference, {
       message_id: "M1",
       ignore_get_message_error: true,
@@ -563,11 +575,7 @@ test("runTool 未知工具名 → isError 快速失败（并发闸集成测试�
     // runTool 是工具分发层：未知工具名不走任何实现，直接 isError。
     // mcp.ts CallToolRequestSchema 包装层的并发闸（active >= maxConcurrent → 服务繁忙）
     // 由 mcp.test.ts M6-14 以 maxConcurrent=1 + 挂起发送器做真实覆盖。
-    const bad = await runTool(
-      "no_such_tool",
-      {},
-      { repo: fx.repo },
-    );
+    const bad = await runTool("no_such_tool", {}, { repo: fx.repo });
     assert.equal(bad.isError, true);
   } finally {
     fx.close();

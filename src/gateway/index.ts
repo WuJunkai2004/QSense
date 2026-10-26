@@ -83,9 +83,7 @@ export class GatewaySupervisor {
   start(): Promise<void> {
     if (this.startPromise === null) {
       this.startPromise = Promise.all(
-        (this.deps.bots?.list() ?? []).map((app) =>
-          this.launch(app),
-        ),
+        (this.deps.bots?.list() ?? []).map((app) => this.launch(app)),
       ).then(() => undefined);
     }
     return this.startPromise;

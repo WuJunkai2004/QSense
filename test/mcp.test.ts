@@ -179,7 +179,10 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
   };
 }
 
-async function connectClient(baseUrl: string, agentToken = TOKEN): Promise<Client> {
+async function connectClient(
+  baseUrl: string,
+  agentToken = TOKEN,
+): Promise<Client> {
   const transport = new StreamableHTTPClientTransport(
     new URL(`${baseUrl}/mcp`),
     {

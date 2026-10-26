@@ -79,7 +79,9 @@ export class BotRegistry {
   /** 全量列表（注册序：created_at 升序，展示顺序稳定） */
   list(): BotApp[] {
     const rows = this.deps.db
-      .prepare("SELECT appid, name, secret FROM bots ORDER BY created_at, appid")
+      .prepare(
+        "SELECT appid, name, secret FROM bots ORDER BY created_at, appid",
+      )
       .all() as Array<Pick<BotRow, "appid" | "name" | "secret">>;
     return rows.map(rowToApp);
   }
@@ -163,7 +165,11 @@ export class BotRegistry {
       .get(appid) as Pick<BotRow, "appid" | "name" | "secret"> | undefined;
     if (row === undefined) {
       throw new BotRegistryError(
-        `移除失败：appid=${appid} 不在注册表中。已注册：${this.list().map((b) => b.appid).join(", ") || "（无）"}。`,
+        `移除失败：appid=${appid} 不在注册表中。已注册：${
+          this.list()
+            .map((b) => b.appid)
+            .join(", ") || "（无）"
+        }。`,
       );
     }
     return rowToApp(row);

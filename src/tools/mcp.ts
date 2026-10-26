@@ -3,21 +3,21 @@
 // - 会话管理：POST 无 session 且为 initialize → 新建 Server+transport 对；DELETE 关闭并清理
 // - 工具执行统一走 defs.runTool（错误翻译 + 不可信内容提示首行）
 
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   isInitializeRequest,
-} from '@modelcontextprotocol/sdk/types.js';
-import type { BotApp } from '../config';
-import type { BotRegistry } from '../bots';
-import type { Logger } from '../logger';
-import type { Sender } from '../sender';
-import type { Repo } from '../store/repo';
-import { TOOLS, UNTRUSTED_NOTICE, runTool } from './defs';
+} from "@modelcontextprotocol/sdk/types.js";
+import type { BotApp } from "../config";
+import type { BotRegistry } from "../bots";
+import type { Logger } from "../logger";
+import type { Sender } from "../sender";
+import type { Repo } from "../store/repo";
+import { TOOLS, UNTRUSTED_NOTICE, runTool } from "./defs";
 
 export interface McpDeps {
   log: Logger;
@@ -33,22 +33,30 @@ export interface McpDeps {
   version: string;
 }
 /** sha256 摘要比较：长度差异不影响常数时间性 */
-export function bearerOk(header: string | undefined, expected: string): boolean {
-  if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
+export function bearerOk(
+  header: string | undefined,
+  expected: string,
+): boolean {
+  if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
   const got = header.slice(7);
-  const a = createHash('sha256').update(got).digest();
-  const b = createHash('sha256').update(expected).digest();
+  const a = createHash("sha256").update(got).digest();
+  const b = createHash("sha256").update(expected).digest();
   return timingSafeEqual(a, b);
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
 }
 
-function rpcError(res: ServerResponse, status: number, code: number, message: string): void {
+function rpcError(
+  res: ServerResponse,
+  status: number,
+  code: number,
+  message: string,
+): void {
   json(res, status, {
-    jsonrpc: '2.0',
+    jsonrpc: "2.0",
     error: { code, message },
     id: null,
   });
@@ -57,9 +65,14 @@ function rpcError(res: ServerResponse, status: number, code: number, message: st
 /** 组装 /mcp 路由处理器：签名 (rawReq, rawRes, parsedBody, botId)。botId 由 HTTP 层按 Bearer→bots 表反查得出。 */
 export function createMcpHandler(
   deps: McpDeps,
-): (req: IncomingMessage, res: ServerResponse, body?: unknown, botId?: string) => Promise<void> {
+): (
+  req: IncomingMessage,
+  res: ServerResponse,
+  body?: unknown,
+  botId?: string,
+) => Promise<void> {
   const { log, repo, version } = deps;
-  const mcpLog = log.child('mcp');
+  const mcpLog = log.child("mcp");
   const maxConcurrent = deps.maxConcurrent ?? 8;
   let active = 0;
   interface Session {
@@ -84,7 +97,7 @@ export function createMcpHandler(
       enableJsonResponse: true, // 纯请求/响应工具面，JSON 体便于 curl/调试；SSE 流式响应暂无需求
     });
     const server = new Server(
-      { name: 'qq-gateway', version },
+      { name: "qq-gateway", version },
       { capabilities: { tools: {} } },
     );
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -99,18 +112,26 @@ export function createMcpHandler(
       const args = (req.params.arguments ?? {}) as Record<string, unknown>;
       // M6 限流：全局并发上限（单用户场景够用），超限快速失败不排队
       if (active >= maxConcurrent) {
-        mcpLog.warn('tool call rejected (busy)', { tool: name, active });
+        mcpLog.warn("tool call rejected (busy)", { tool: name, active });
         return {
-          content: [{ type: 'text', text: `${UNTRUSTED_NOTICE}\n服务繁忙（并发 ${active}/${maxConcurrent}），请稍后重试。` }],
+          content: [
+            {
+              type: "text",
+              text: `${UNTRUSTED_NOTICE}\n服务繁忙（并发 ${active}/${maxConcurrent}），请稍后重试。`,
+            },
+          ],
           isError: true,
         };
       }
       active += 1;
       try {
         const result = await runTool(name, args, createContext({ botId }));
-        mcpLog.debug('tool call', { tool: name, error: result.isError === true });
+        mcpLog.debug("tool call", {
+          tool: name,
+          error: result.isError === true,
+        });
         return {
-          content: [{ type: 'text', text: result.text }],
+          content: [{ type: "text", text: result.text }],
           ...(result.isError === true ? { isError: true } : {}),
         };
       } finally {
@@ -126,53 +147,77 @@ export function createMcpHandler(
   };
 
   // 每个请求都已在 HTTP 层完成 Bearer→bot 解析；这里只做会话归属一致性校验
-  return async function handleMcp(req, res, body?: unknown, botId?: string): Promise<void> {
+  return async function handleMcp(
+    req,
+    res,
+    body?: unknown,
+    botId?: string,
+  ): Promise<void> {
     if (botId === undefined) {
       // HTTP 层未解析出 bot（理论上不会走到：/mcp 路由 401 在先）
-      rpcError(res, 401, -32001, 'Unauthorized：token 未绑定 bot。');
+      rpcError(res, 401, -32001, "Unauthorized：token 未绑定 bot。");
       return;
     }
-    const method = req.method ?? 'POST';
-    const sidHeader = req.headers['mcp-session-id'];
+    const method = req.method ?? "POST";
+    const sidHeader = req.headers["mcp-session-id"];
     const sid = Array.isArray(sidHeader) ? sidHeader[0] : sidHeader;
-    if (method === 'POST') {
-      if (sid !== undefined && sid !== '') {
+    if (method === "POST") {
+      if (sid !== undefined && sid !== "") {
         const existing = sessions.get(sid);
         if (existing === undefined) {
-          rpcError(res, 404, -32001, '会话不存在或已过期，请重新 initialize。');
+          rpcError(res, 404, -32001, "会话不存在或已过期，请重新 initialize。");
           return;
         }
         if (existing.botId !== botId) {
-          rpcError(res, 403, -32001, `会话属于 bot ${existing.botId}，当前 token 绑定 bot ${botId}，请勿跨用。`);
+          rpcError(
+            res,
+            403,
+            -32001,
+            `会话属于 bot ${existing.botId}，当前 token 绑定 bot ${botId}，请勿跨用。`,
+          );
           return;
         }
         await existing.transport.handleRequest(req, res, body);
         return;
       }
-      if (body !== null && typeof body === 'object' && isInitializeRequest(body)) {
+      if (
+        body !== null &&
+        typeof body === "object" &&
+        isInitializeRequest(body)
+      ) {
         const session = createSession(botId);
         await session.transport.handleRequest(req, res, body);
         const sid2 = session.transport.sessionId;
         if (sid2 !== undefined) sessions.set(sid2, session);
-        mcpLog.info('session created', { botId, sessions: sessions.size });
+        mcpLog.info("session created", { botId, sessions: sessions.size });
         return;
       }
-      rpcError(res, 400, -32600, '缺少 Mcp-Session-Id 且非 initialize 请求。请先 initialize 获取会话。');
+      rpcError(
+        res,
+        400,
+        -32600,
+        "缺少 Mcp-Session-Id 且非 initialize 请求。请先 initialize 获取会话。",
+      );
       return;
     }
 
     // GET(SSE)/DELETE 均需已有会话
-    if (sid === undefined || sid === '') {
-      rpcError(res, 400, -32600, '缺少 Mcp-Session-Id。');
+    if (sid === undefined || sid === "") {
+      rpcError(res, 400, -32600, "缺少 Mcp-Session-Id。");
       return;
     }
     const session = sessions.get(sid);
     if (session === undefined) {
-      rpcError(res, 404, -32001, '会话不存在或已过期。');
+      rpcError(res, 404, -32001, "会话不存在或已过期。");
       return;
     }
     if (session.botId !== botId) {
-      rpcError(res, 403, -32001, `会话属于 bot ${session.botId}，当前 token 绑定 bot ${botId}。`);
+      rpcError(
+        res,
+        403,
+        -32001,
+        `会话属于 bot ${session.botId}，当前 token 绑定 bot ${botId}。`,
+      );
       return;
     }
     await session.transport.handleRequest(req, res);

@@ -139,8 +139,7 @@ export class Sender {
   constructor(private readonly deps: SenderDeps) {
     this.log = deps.log.child("sender");
     this.limits = {
-      qpm:
-        deps.limits?.qpm ?? 0, // 0=按 bot 的 auth_level 现算（60/30），见 qpmOf
+      qpm: deps.limits?.qpm ?? 0, // 0=按 bot 的 auth_level 现算（60/30），见 qpmOf
       perRelationQpm: deps.limits?.perRelationQpm ?? PER_RELATION_QPM,
       perGroupDaily: deps.limits?.perGroupDaily ?? PER_GROUP_DAILY,
     };
@@ -294,14 +293,18 @@ export class Sender {
             markdown: { content },
             msg_id: replyMsgId,
             msg_seq: seq,
-            ...(messageReference !== undefined ? { message_reference: messageReference } : {}),
+            ...(messageReference !== undefined
+              ? { message_reference: messageReference }
+              : {}),
           }
         : {
             msg_type: 0,
             content,
             msg_id: replyMsgId,
             msg_seq: seq,
-            ...(messageReference !== undefined ? { message_reference: messageReference } : {}),
+            ...(messageReference !== undefined
+              ? { message_reference: messageReference }
+              : {}),
           };
       try {
         const resp = await this.api(app).sendRaw(
