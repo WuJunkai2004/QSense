@@ -314,6 +314,7 @@ export class Sender {
           body,
         );
         this.deps.repo.updateSendStatus(reservation, "sent", resp.id);
+        this.recordOutgoing(botId, groupOpenid, resp.id, content);
         this.log.info("passive sent", {
           group: groupOpenid,
           seq,
@@ -435,6 +436,7 @@ export class Sender {
       );
       repo.updateSendStatus(reservation, "sent", resp.id);
       repo.incrQuotaDaily(botId, groupOpenid, date);
+      this.recordOutgoing(botId, groupOpenid, resp.id, content);
       this.log.info("proactive sent", {
         group: groupOpenid,
         provider: resp.id,
@@ -458,6 +460,34 @@ export class Sender {
       }
       repo.updateSendStatus(reservation, "failed", undefined, biz ?? undefined);
       throw new Error(describeSendError(e));
+    }
+  }
+
+  /**
+   * 发送成功后本地补记（官方不回推 bot 自发消息）：进缓存供读取层连续性与
+   * yourself 标注。author_name 取 bots 表备注名（与 WebUI 补记同源）。
+   * 落库失败不影响发送结果（消息已出账，只记日志）。
+   */
+  private recordOutgoing(
+    botId: string,
+    groupOpenid: string,
+    providerMsgId: string,
+    content: string,
+  ): void {
+    try {
+      this.deps.repo.saveOutgoingGroupMessage({
+        botId,
+        groupOpenid,
+        msgId: providerMsgId,
+        content,
+        ts: Date.now(),
+        authorName:
+          this.deps.bots?.list().find((b) => b.appid === botId)?.name ?? null,
+      });
+    } catch (e) {
+      this.log.warn("outgoing message persist failed", {
+        reason: e instanceof Error ? e.message : String(e),
+      });
     }
   }
 

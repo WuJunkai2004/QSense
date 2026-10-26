@@ -716,3 +716,57 @@ test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消�
     await fx.close();
   }
 });
+
+test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防模型接自己的话", async () => {
+  const fx = await setupServer();
+  let client: Client | null = null;
+  try {
+    const repo = new Repo(fx.db);
+    // bot 自发消息补记形态（官方不回推，发送成功后本地写入）：author 只有备注名
+    repo.saveOutgoingGroupMessage({
+      botId: "10001",
+      groupOpenid: GROUP,
+      msgId: "M_SELF",
+      content: "我刚才说的话",
+      ts: Date.now(),
+      authorName: "主bot",
+    });
+    repo.saveGroupMessage({
+      botId: "10001",
+      scope: "group",
+      scopeId: GROUP,
+      msgId: "M_HUMAN",
+      authorOpenid: "U_A",
+      authorName: "小明",
+      authorRole: "member",
+      ts: Date.now() + 1,
+      content: "群友说的话",
+      mentions: [],
+      elements: undefined,
+      attachments: [],
+      raw: {},
+    });
+    client = await connectClient(fx.baseUrl, fx.agentToken);
+    const res = payloadOf(
+      (await client.callTool({
+        name: "context",
+        arguments: { group: GROUP, msg_id: "M_SELF", radius: 1 },
+      })) as never,
+    );
+    const msgs = res.messages as Array<{
+      msg_id: string;
+      author: { role: string | null };
+    }>;
+    const self = msgs.find((m) => m.msg_id === "M_SELF")!;
+    const human = msgs.find((m) => m.msg_id === "M_HUMAN")!;
+    assert.equal(self.author.role, "yourself", "自己的消息标 yourself");
+    assert.equal(human.author.role, "member", "群友消息不受影响");
+  } finally {
+    try {
+      await client?.close();
+    } catch {
+      /* 已关闭则忽略 */
+    }
+    await fx.close();
+  }
+});

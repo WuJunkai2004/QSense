@@ -120,7 +120,8 @@ function requireSender(ctx: ToolContext): Sender {
 }
 
 // —— 行 → 输出形状：无任何会话回显（group 是 agent 刚传的参数，不再 echo）；
-// content 引用行读取时内联被引原文；不含 raw_json/elements_json（content 已含展开文本） ——
+// content 引用行读取时内联被引原文；不含 raw_json/elements_json（content 已含展开文本）；
+// bot 自发消息落库 direction=1（官方不回推，发送侧本地补记），读取层据此标 author.role="yourself" ——
 
 function msgOut(
   repo: Repo,
@@ -134,7 +135,7 @@ function msgOut(
     author: {
       openid: row.author_openid,
       name: row.author_name,
-      role: row.author_role,
+      role: Number(row.direction) === 1 ? "yourself" : row.author_role,
     },
     content: repo.resolveQuotes(botId, group, row.content),
   };

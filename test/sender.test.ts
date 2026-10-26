@@ -159,6 +159,32 @@ test("M4-1 幂等重放：同 msg_id+同文本 两次调用只发一条，第二
   }
 });
 
+test("M4-13 发送成功后本地补记：messages 表出现 direction=1 的自发消息（官方不回推）", async () => {
+  const fx = setupDb();
+  try {
+    seedInbound(fx.repo, "M1");
+    const mock = makeApiMock();
+    const sender = new Sender({
+      log: createLogger("error"),
+      db: fx.db,
+      repo: fx.repo,
+      tokenManager: {} as never,
+      bots: fx.registry,
+      apiFor: () => mock,
+    });
+    const r = await sender.reply(BOT, GROUP, "M1", "你好呀");
+    assert.equal(r.status, "sent");
+    assert.ok(r.provider_msg_id !== undefined);
+    const row = fx.repo.getMessageByMsgId(BOT, GROUP, r.provider_msg_id!);
+    assert.ok(row !== null, "自发消息应补记进缓存");
+    assert.equal(Number(row.direction), 1, "direction=1 供读取层标 yourself");
+    assert.equal(row.content, "你好呀");
+    assert.equal(row.author_name, "t", "author_name 取 bots 表备注名");
+  } finally {
+    fx.close();
+  }
+});
+
 test("M4-2 不同文本 → 第二次以 msg_seq=2 真实发出（账本落库断言见 M4-8）", async () => {
   const fx = setupDb();
   try {
