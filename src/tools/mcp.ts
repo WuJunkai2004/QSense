@@ -131,7 +131,9 @@ export function createMcpHandler(
           error: result.isError === true,
         });
         return {
-          content: [{ type: "text", text: result.text }],
+          content: result.content ?? [
+            { type: "text", text: result.text },
+          ],
           ...(result.isError === true ? { isError: true } : {}),
         };
       } finally {

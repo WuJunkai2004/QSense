@@ -13,6 +13,27 @@ import type { GatewayStatus } from "../gateway";
 import { t } from "../i18n";
 import type { Sender } from "../sender";
 import type { MsgRow, Repo } from "../store/repo";
+import { Buffer } from "node:buffer";
+
+/** 图像内容块（MCP content）：多模态客户端会作为真实图像喂给模型 */
+export interface ImageBlock {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
+export type ContentBlock = ImageBlock | { type: "text"; text: string };
+
+/**
+ * get_media 的返回：runTool 特判转为 [图像块, 文本块] 的 MCP content，
+ * 与普通 JSON 返回（整体序列化成单个 text 块）区分。
+ */
+export class MediaResult {
+  constructor(
+    readonly image: { data: string; mimeType: string },
+    readonly text: string,
+  ) {}
+}
 
 /** 工具参数错误：消息必须可操作（告诉调用方怎么改） */
 export class ToolError extends Error {}
@@ -507,6 +528,91 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "get_media",
+    description:
+      "点开看图：拉取某条消息第 n 个附件的图像内容（n 对应 content 里的 ![附件n] 占位符）。图片以 MCP 图像块返回，多模态模型可直接读图；文件/视频/语音硬拒绝（语音转写文本已在 content）。官方签名链接有时效，过期会明确报错，勿重试。",
+    inputSchema: {
+      type: "object",
+      required: ["group", "msg_id", "n"],
+      properties: {
+        group: { type: "string", description: "群 openid" },
+        msg_id: { type: "string", description: "消息 id" },
+        n: {
+          type: "number",
+          description: "附件编号（1 基，对应 ![附件n]）",
+        },
+      },
+    },
+    handler: async (args, ctx) => {
+      const botId = resolveBotId(ctx);
+      const group = str(args, "group", "群 openid");
+      const msgId = str(args, "msg_id", "消息 id");
+      const n = optInt(args, "n", 1, 50, 1);
+      const row = ctx.repo.getMessageByMsgId(botId, group, msgId);
+      if (row === null) {
+        throw new ToolError(
+          `消息不存在（或已过保留期被清理）：${msgId}。可先 search 定位。`,
+        );
+      }
+      const atts: Array<Record<string, unknown>> = row.attachments_json
+        ? JSON.parse(row.attachments_json)
+        : [];
+      const att = atts[n - 1];
+      if (att === undefined) {
+        throw new ToolError(
+          atts.length === 0
+            ? "该消息没有附件（![附件n] 只出现在带附件的消息上）。"
+            : `附件编号越界：该消息只有 ${atts.length} 个附件，n 应为 1-${atts.length}。`,
+        );
+      }
+      const mimeType =
+        typeof att.content_type === "string" ? att.content_type : "";
+      if (!mimeType.startsWith("image/")) {
+        throw new ToolError(
+          `附件 ${n} 不是图片（${mimeType === "" ? "未知类型" : mimeType}），本工具仅返回图像内容；文件/视频可向用户描述元数据，语音转写已在 content。`,
+        );
+      }
+      const url = typeof att.url === "string" ? att.url : "";
+      if (url === "") {
+        throw new ToolError("附件缺 url（异常数据）。");
+      }
+      // 服务端拉官方 CDN（url 来自缓存库，非用户输入，无 SSRF 面）；rkey 有时效，过期给可操作错误
+      let res: Response;
+      try {
+        res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      } catch (e) {
+        throw new ToolError(
+          `图片拉取失败（官方签名链接可能已过期）：${e instanceof Error ? e.message : String(e)}。`,
+        );
+      }
+      if (!res.ok) {
+        throw new ToolError(
+          `图片拉取失败（HTTP ${res.status}）：官方签名链接可能已过期。`,
+        );
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > 10 * 1024 * 1024) {
+        throw new ToolError(
+          `图片过大（${Math.round(buf.length / 1024 / 1024)}MB，上限 10MB），不返回图像内容。`,
+        );
+      }
+      const meta = [
+        typeof att.filename === "string" ? att.filename : null,
+        typeof att.width === "number" && typeof att.height === "number"
+          ? `${att.width}x${att.height}`
+          : null,
+        `${Math.round(buf.length / 1024)}KB`,
+        mimeType,
+      ]
+        .filter((s) => s !== null)
+        .join(" · ");
+      return new MediaResult(
+        { data: buf.toString("base64"), mimeType },
+        `附件${n}：${meta}`,
+      );
+    },
+  },
+  {
     name: "quota",
     description:
       "主动消息额度水位（只读）：发送开关、认证等级、令牌桶余量、当日已发、官方限额常量。",
@@ -617,7 +723,7 @@ export async function runTool(
   name: string,
   args: Record<string, unknown>,
   ctx: ToolContext,
-): Promise<{ isError?: boolean; text: string }> {
+): Promise<{ isError?: boolean; text: string; content?: ContentBlock[] }> {
   const def = TOOLS.find((t) => t.name === name);
   if (def === undefined) {
     return {
@@ -627,6 +733,19 @@ export async function runTool(
   }
   try {
     const payload = await def.handler(args, ctx);
+    if (payload instanceof MediaResult) {
+      return {
+        text: payload.text,
+        content: [
+          {
+            type: "image",
+            data: payload.image.data,
+            mimeType: payload.image.mimeType,
+          },
+          { type: "text", text: payload.text },
+        ],
+      };
+    }
     return { text: JSON.stringify(payload, null, 2) };
   } catch (e) {
     if (e instanceof ToolError) {

@@ -61,11 +61,11 @@ M9 起 env 只承担部署拓扑与运维参数；**bot 注册（appid/secret/�
 | `LOG_CONTENT` | | 日志记消息正文，**默认 false（生产禁止开启）** |
 | `LOG_LEVEL` | | debug/info/warn/error/fatal |
 
-## MCP 工具面（15 个）
+## MCP 工具面（16 个）
 
 **管理（自服务）**：`register_bot`（注册新 bot：官方凭据校验 → 落库 → 返回 agent_token 仅此一次）· `token_refresh`（轮换当前绑定 bot 的 agent_token，旧值立即失效）
 
-**只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数）· `list_group` / `list_chat` / `list_new`（分类型/未读视图）· `list_members`（名册）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索）· `context`（前后文）· `quota`（额度水位）
+**只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数）· `list_group` / `list_chat` / `list_new`（分类型/未读视图）· `list_members`（名册）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索）· `context`（前后文）· `get_media`（点开看图：按 ![附件n] 编号拉取图像内容，多模态模型直接读图）· `quota`（额度水位）
 
 **写（双重门禁：kv 总开关 + 该 bot 白名单，均 WebUI 设置页管理）**：`reply`（被动回复：官方窗口 5分钟/5次 + msg_seq 幂等账本）· `send_proactive`（主动消息：令牌桶 + 每群每日 1000 条记账）· `recall`（撤回）
 

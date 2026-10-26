@@ -245,6 +245,7 @@ test("M3-2 listTools 含 15 个工具；未开启发送时写工具硬拒绝", a
     assert.deepEqual(names, [
       "browse",
       "context",
+      "get_media",
       "get_new",
       "list_all",
       "list_chat",
@@ -611,6 +612,102 @@ test("M3-5 引用回溯 + 信封统一：get_new 内联被引原文；条目/信
       "ingest 展开行被吞掉，正文只出现一次",
     );
   } finally {
+    try {
+      await client?.close();
+    } catch {
+      /* 已关闭则忽略 */
+    }
+    await fx.close();
+  }
+});
+
+test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消息可操作报错", async () => {
+  const fx = await setupServer();
+  let client: Client | null = null;
+  const realFetch = globalThis.fetch;
+  try {
+    new Repo(fx.db).saveGroupMessage({
+      botId: "10001",
+      scope: "group",
+      scopeId: GROUP,
+      msgId: "MD1",
+      authorOpenid: "U_A",
+      authorName: "画师",
+      authorRole: "member",
+      ts: Date.now(),
+      content: "![附件1]\n看图",
+      mentions: [],
+      elements: undefined,
+      attachments: [
+        {
+          url: "https://cdn.example/a.png",
+          filename: "a.png",
+          content_type: "image/png",
+          width: 10,
+          height: 10,
+        },
+        { url: "https://cdn.example/b.bin", filename: "b.bin", content_type: "file" },
+      ],
+      raw: {},
+    });
+    // 拦截网络（测试零真实网络依赖）：仅劫持假 CDN 域名，其余（MCP 传输自身）走真实 fetch
+    type FetchInput = Parameters<typeof realFetch>[0];
+    globalThis.fetch = (async (
+      input: FetchInput,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (url.startsWith("https://cdn.example/")) {
+        return new Response(Uint8Array.from([0x89, 0x50, 0x4e, 0x47]), {
+          status: 200,
+        });
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    client = await connectClient(fx.baseUrl, fx.agentToken);
+    const ok = (await client.callTool({
+      name: "get_media",
+      arguments: { group: GROUP, msg_id: "MD1", n: 1 },
+    })) as { isError?: boolean; content: Array<Record<string, unknown>> };
+    assert.equal(ok.isError, undefined);
+    assert.equal(ok.content[0]!.type, "image", "首块为 MCP 图像块");
+    assert.equal(ok.content[0]!.mimeType, "image/png");
+    assert.ok(
+      typeof ok.content[0]!.data === "string" &&
+        (ok.content[0]!.data as string).length > 0,
+      "base64 数据非空",
+    );
+    assert.equal(ok.content[1]!.type, "text", "次块为元数据文本");
+    assert.ok(String(ok.content[1]!.text).includes("a.png"));
+
+    const notImg = (await client.callTool({
+      name: "get_media",
+      arguments: { group: GROUP, msg_id: "MD1", n: 2 },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(notImg.isError, true);
+    assert.ok(notImg.content[0]!.text.includes("不是图片"));
+
+    const oob = (await client.callTool({
+      name: "get_media",
+      arguments: { group: GROUP, msg_id: "MD1", n: 3 },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(oob.isError, true);
+    assert.ok(oob.content[0]!.text.includes("越界"));
+
+    const miss = (await client.callTool({
+      name: "get_media",
+      arguments: { group: GROUP, msg_id: "NOPE", n: 1 },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(miss.isError, true);
+    assert.ok(miss.content[0]!.text.includes("search"));
+  } finally {
+    globalThis.fetch = realFetch;
     try {
       await client?.close();
     } catch {
