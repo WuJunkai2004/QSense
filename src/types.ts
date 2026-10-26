@@ -68,6 +68,15 @@ export interface MsgAuthor {
   role: string | null;
 }
 
+export interface MsgAttachment {
+  url: string;
+  filename?: string;
+  width?: number;
+  height?: number;
+  size?: number;
+  content_type?: string;
+}
+
 export interface MsgItem {
   rid: number;
   msg_id: string;
@@ -75,6 +84,8 @@ export interface MsgItem {
   author: MsgAuthor;
   content: string | null;
   has_attachments: boolean;
+  /** 附件描述符（与 content 内 `![附件n]` 占位符编号对应：n = 下标 + 1）；旧消息可能为 null */
+  attachments: MsgAttachment[] | null;
   has_ark: boolean;
   has_elements: boolean;
   /** 本机乐观追加的发送消息（仅存在于前端会话内） */

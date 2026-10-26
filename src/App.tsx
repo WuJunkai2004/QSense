@@ -265,6 +265,7 @@ export default function App() {
       author: { openid: null, name: botName, role: null },
       content: text,
       has_attachments: false,
+      attachments: null,
       has_ark: false,
       has_elements: false,
       pending: true,
