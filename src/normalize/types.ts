@@ -41,6 +41,8 @@ export interface NormalizedMessage {
   attachments: NormalizedAttachment[];
   /** ark 结构化卡片原始对象 */
   ark?: unknown;
+  /** 官方 msg_idx 令牌（message_scene.ext 携带，引用元素以此为锚指向本消息；缺失时 undefined） */
+  msgIdx?: string;
   /** 官方事件原始载荷（受 LOG_CONTENT 约束，仅入库不进日志） */
   raw: unknown;
   /** 本机外发标记：1=发送成功后本地补记（省略=网关接收） */

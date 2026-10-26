@@ -419,3 +419,98 @@ test("M2-9 元素消息 content 合并官方 content 与展开树；畸形容器
     cleanup(dir, db);
   }
 });
+
+test("M2-10 媒体占位符：无元素树时媒体前置；引用元素内嵌媒体原位收集；msg_idx 提取", () => {
+  // 纯图消息（无 elements，真机形状）：content = 占位符（不再是空串）
+  const img = normalizeMessage(
+    ev("GROUP_MESSAGE_CREATE", {
+      ...groupMsgShape,
+      id: "MSGID_IMG",
+      content: "",
+      attachments: [
+        {
+          url: "https://cdn.example/x.png",
+          filename: "x.png",
+          content_type: "image/png",
+          width: 100,
+          height: 80,
+        },
+      ],
+    }),
+  );
+  assert.ok(img !== null);
+  assert.equal(img!.content, "![附件1]");
+  assert.equal(img!.attachments.length, 1);
+
+  // 图文消息（无 elements）：约定媒体前置，顺序可见
+  const mix = normalizeMessage(
+    ev("GROUP_MESSAGE_CREATE", {
+      ...groupMsgShape,
+      id: "MSGID_MIX",
+      content: "图片和文字",
+      attachments: [
+        { url: "https://cdn.example/y.png", content_type: "image/png" },
+      ],
+    }),
+  );
+  assert.ok(mix !== null);
+  assert.equal(mix!.content, "![附件1]\n图片和文字");
+
+  // 引用元素内嵌媒体（真机 103 形状）：原位占位 + 收集进 attachments
+  const quote = normalizeMessage(
+    ev("GROUP_MESSAGE_CREATE", {
+      ...groupMsgShape,
+      id: "MSGID_QUOTE",
+      content: "我引用了一条消息",
+      msg_elements: [
+        {
+          message_type: 103,
+          msg_idx: "REFIDX_A",
+          content: "被引的原文",
+          attachments: [
+            { url: "https://cdn.example/q.png", content_type: "image/png" },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.ok(quote !== null);
+  assert.ok(quote!.content.includes("我引用了一条消息"));
+  assert.ok(quote!.content.includes("[引用 msg_idx=REFIDX_A]"));
+  assert.ok(quote!.content.includes("![附件1]"), "被引图片原位占位");
+  assert.ok(quote!.content.includes("被引的原文"));
+  assert.equal(quote!.attachments.length, 1);
+  assert.equal(quote!.attachments[0]!.url, "https://cdn.example/q.png");
+
+  // msg_idx 从 message_scene.ext 提取
+  const idx = normalizeMessage(
+    ev("GROUP_MESSAGE_CREATE", {
+      ...groupMsgShape,
+      id: "MSGID_IDX",
+      message_scene: { ext: ["msg_idx=REFIDX_X9", "auth_token=t"] },
+    }),
+  );
+  assert.ok(idx !== null);
+  assert.equal(idx!.msgIdx, "REFIDX_X9");
+
+  // 顶层与树内同 URL 去重：只收一次、编号一致
+  const dupe = normalizeMessage(
+    ev("GROUP_MESSAGE_CREATE", {
+      ...groupMsgShape,
+      id: "MSGID_DUPE",
+      content: "看",
+      attachments: [{ url: "https://cdn.example/d.png" }],
+      msg_elements: [
+        {
+          message_type: 103,
+          msg_idx: "REFIDX_D",
+          content: "引",
+          attachments: [{ url: "https://cdn.example/d.png" }],
+        },
+      ],
+    }),
+  );
+  assert.ok(dupe !== null);
+  assert.equal(dupe!.attachments.length, 1, "同 URL 只收一次");
+  assert.ok(dupe!.content.includes("![附件1]"));
+});

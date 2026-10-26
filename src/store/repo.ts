@@ -48,6 +48,8 @@ export interface SendRow {
 export class Repo {
   private readonly insertGroupMsg: Stmt<[Record<string, unknown>]>;
   private readonly insertC2cMsg: Stmt<[Record<string, unknown>]>;
+  /** 引用回溯：msg_idx 令牌 → 被引消息行（resolveQuotes 专用） */
+  private readonly msgIdxStmt: Stmt<[string, string, string]>;
   private readonly upsertGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly ensureGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly setGroupSwitchStmt: Stmt<[Record<string, unknown>]>;
@@ -79,24 +81,27 @@ export class Repo {
       INSERT OR IGNORE INTO messages(
         bot_id, group_openid, msg_id, author_openid, author_name, author_role,
         ts, content, mentions_json, elements_json, attachments_json, ark_json, raw_json,
-        direction
+        direction, msg_idx
       ) VALUES (
         @bot_id, @group_openid, @msg_id, @author_openid, @author_name, @author_role,
         @ts, @content, @mentions_json, @elements_json, @attachments_json, @ark_json, @raw_json,
-        @direction
+        @direction, @msg_idx
       )
     `);
     this.insertC2cMsg = db.prepare(`
       INSERT OR IGNORE INTO c2c_messages(
         bot_id, user_openid, msg_id, author_openid, author_name, author_role,
         ts, content, mentions_json, elements_json, attachments_json, ark_json, raw_json,
-        direction
+        direction, msg_idx
       ) VALUES (
         @bot_id, @user_openid, @msg_id, @author_openid, @author_name, @author_role,
         @ts, @content, @mentions_json, @elements_json, @attachments_json, @ark_json, @raw_json,
-        @direction
+        @direction, @msg_idx
       )
     `);
+    this.msgIdxStmt = db.prepare(
+      "SELECT author_name, content AS body FROM messages WHERE bot_id = ? AND group_openid = ? AND msg_idx = ? ORDER BY rowid DESC LIMIT 1",
+    );
     this.upsertGroupStmt = db.prepare(`
       INSERT INTO groups(bot_id, group_openid, full_msg_enabled, added_at, updated_at)
       VALUES (@bot_id, @group_openid, @full_msg_enabled, @now, @now)
@@ -202,6 +207,7 @@ export class Repo {
       ark_json: null,
       raw_json: null,
       direction: 1,
+      msg_idx: null,
     });
     return info.changes > 0;
   }
@@ -398,6 +404,51 @@ export class Repo {
       )
       .get(botId, groupOpenid, msgId) as MsgRow | undefined;
     return row ?? null;
+  }
+
+  /**
+   * 引用解析（读取时）：content 里的 `[引用 msg_idx=X]` 令牌行按 X 查缓存——官方在每条消息的
+   * message_scene.ext 携带 msg_idx，引用元素（103）以此为锚指向被引消息。命中则内联被引作者与
+   * 正文（行加 "> " 前缀）；未命中（未缓存/已过保留期/历史行无令牌）原样保留。
+   * ingest 时 103 元素会把被引原文展开成紧跟结构行的文本行（FTS 检索面不丢内容）——命中时该行
+   * 与内联正文重复，逐行比对一致才吞掉（防误删用户恰好相同的正文）。MCP 与 WebUI 序列化共用。
+   */
+  resolveQuotes(
+    botId: string,
+    groupOpenid: string,
+    content: string | null,
+  ): string {
+    const text = content ?? "";
+    if (!text.includes("[引用 msg_idx=")) return text;
+    const lines = text.split("\n");
+    const out: string[] = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i]!;
+      const m = line.match(/^\s*\[引用 msg_idx=([^\]]+)\]\s*$/);
+      if (m === null) {
+        out.push(line);
+        continue;
+      }
+      const row = this.msgIdxStmt.get(botId, groupOpenid, m[1]!) as
+        | { author_name: string | null; body: string | null }
+        | undefined;
+      if (row === undefined) {
+        out.push(line);
+        continue;
+      }
+      const body = (row.body ?? "").trim();
+      const bodyLines = body === "" ? [] : body.split("\n");
+      // 吞掉紧跟的 ingest 展开行：与被引正文逐行一致才消费
+      let j = i + 1;
+      for (const bl of bodyLines) {
+        if (lines[j] !== undefined && lines[j]!.trim() === bl.trim()) j += 1;
+        else break;
+      }
+      out.push(`[引用 @${row.author_name ?? "未知成员"}]`);
+      for (const bl of bodyLines) out.push(`> ${bl}`);
+      i = j - 1;
+    }
+    return out.join("\n");
   }
 
   /** 时间轴翻页：锚点(含同秒)以 rowid 决胜负，保证严格有序不重不漏 */
@@ -795,5 +846,6 @@ function messageParams(
     ark_json: m.ark !== undefined ? JSON.stringify(m.ark) : null,
     raw_json: JSON.stringify(m.raw),
     direction: m.direction ?? 0,
+    msg_idx: m.msgIdx ?? null,
   };
 }

@@ -42,7 +42,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
     // WAL 生效
     assert.equal(db.pragma("journal_mode", { simple: true }), "wal");
 
-    // 版本已记录（v1 kv / v2 业务表 / v3 FTS / v4 外发标记 / v5 bots 注册表 / v6 bot 认证等级）
+    // 版本已记录（…/ v6 bot 认证等级 / v7 msg_idx 引用回溯列）
     const rows = db
       .prepare("SELECT version, name FROM schema_migrations")
       .all();
@@ -53,6 +53,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
       { version: 4, name: "message-direction" },
       { version: 5, name: "bots-registry" },
       { version: 6, name: "bots-auth-level" },
+      { version: 7, name: "msg-idx-column" },
     ]);
     // 幂等：重跑不报错、不重复记录
     runMigrations(db, migrations);
@@ -62,7 +63,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
           n: number;
         }
       ).n,
-      6,
+      7,
     );
 
     db.close();
@@ -96,6 +97,7 @@ test("追加迁移只执行增量", () => {
       { version: 4 },
       { version: 5 },
       { version: 6 },
+      { version: 7 },
       { version: 99 },
     ]);
     // 新表可用

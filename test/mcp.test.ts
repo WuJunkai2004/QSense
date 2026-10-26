@@ -525,3 +525,97 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
     await fx.close();
   }
 });
+
+test("M3-5 引用回溯 + 信封统一：get_new 内联被引原文；条目/信封均无会话回显", async () => {
+  const fx = await setupServer();
+  let client: Client | null = null;
+  try {
+    // 被引消息带 msg_idx（ingest 从 message_scene.ext 提取）；引用方 content 携带令牌行
+    const repo = new Repo(fx.db);
+    const base = {
+      botId: "10001",
+      scope: "group" as const,
+      scopeId: GROUP,
+      mentions: [],
+      elements: undefined,
+      attachments: [],
+      raw: {},
+    };
+    repo.saveGroupMessage({
+      ...base,
+      msgId: "Q1",
+      authorOpenid: "U_A",
+      authorName: "被引者",
+      authorRole: "member",
+      ts: Date.now() - 60_000,
+      content: "被引的原文内容",
+      msgIdx: "REFIDX_Q1",
+    });
+    repo.saveGroupMessage({
+      ...base,
+      msgId: "Q2",
+      authorOpenid: "U_B",
+      authorName: "引用者",
+      authorRole: "member",
+      ts: Date.now() - 30_000,
+      content: "[引用 msg_idx=REFIDX_Q1]\n看看这条",
+      msgIdx: "REFIDX_Q2",
+    });
+    repo.saveGroupMessage({
+      ...base,
+      msgId: "Q3",
+      authorOpenid: "U_B",
+      authorName: "引用者",
+      authorRole: "member",
+      ts: Date.now(),
+      content: "[引用 msg_idx=REFIDX_MISSING]\n引用了一条没缓存的消息",
+    });
+    // 真实 ingest 顺序：正文 → 引用结构行 → 103 元素展开的被引原文行（命中时应被吞掉，不重复）
+    repo.saveGroupMessage({
+      ...base,
+      msgId: "Q4",
+      authorOpenid: "U_B",
+      authorName: "引用者",
+      authorRole: "member",
+      ts: Date.now() + 30_000,
+      content: "看看这条\n[引用 msg_idx=REFIDX_Q1]\n被引的原文内容",
+    });
+
+    client = await connectClient(fx.baseUrl, fx.agentToken);
+    const res = payloadOf(
+      (await client.callTool({
+        name: "get_new",
+        arguments: { group: GROUP },
+      })) as never,
+    );
+    assert.ok(!("group" in res), "信封无会话回显字段");
+    assert.equal(typeof res.has_more, "boolean");
+    const msgs = res.messages as Array<Record<string, unknown>>;
+    const q2 = msgs.find((m) => m.msg_id === "Q2")!;
+    assert.ok(!("group_openid" in q2), "消息条目无会话回显字段");
+    const hit = String(q2.content);
+    assert.ok(hit.includes("[引用 @被引者]"), "命中缓存内联被引作者");
+    assert.ok(hit.includes("> 被引的原文内容"), "被引正文以 > 前缀内联");
+    assert.ok(!hit.includes("REFIDX_Q1"), "令牌不外露");
+    const q3 = msgs.find((m) => m.msg_id === "Q3")!;
+    assert.ok(
+      String(q3.content).includes("REFIDX_MISSING"),
+      "未命中缓存保留原令牌行",
+    );
+    const q4 = msgs.find((m) => m.msg_id === "Q4")!;
+    const q4content = String(q4.content);
+    assert.ok(q4content.includes("> 被引的原文内容"), "命中内联原文");
+    assert.equal(
+      q4content.split("被引的原文内容").length - 1,
+      1,
+      "ingest 展开行被吞掉，正文只出现一次",
+    );
+  } finally {
+    try {
+      await client?.close();
+    } catch {
+      /* 已关闭则忽略 */
+    }
+    await fx.close();
+  }
+});

@@ -98,23 +98,24 @@ function requireSender(ctx: ToolContext): Sender {
   return ctx.sender;
 }
 
-// —— 行 → 输出形状（不含 raw_json/elements_json：content 已含展开文本，日志纪律也约束原始体） ——
+// —— 行 → 输出形状：无任何会话回显（group 是 agent 刚传的参数，不再 echo）；
+// content 引用行读取时内联被引原文；不含 raw_json/elements_json（content 已含展开文本） ——
 
 function msgOut(
+  repo: Repo,
+  botId: string,
+  group: string,
   row: MsgRow,
-  scopeKey: "group_openid" | "user_openid",
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {
     msg_id: row.msg_id,
-    [scopeKey]:
-      scopeKey === "group_openid" ? row.group_openid : row.user_openid,
     ts: row.ts !== null ? new Date(row.ts).toISOString() : null,
     author: {
       openid: row.author_openid,
       name: row.author_name,
       role: row.author_role,
     },
-    content: row.content,
+    content: repo.resolveQuotes(botId, group, row.content),
   };
   if (row.mentions_json) out.mentions = JSON.parse(row.mentions_json);
   if (row.attachments_json) out.attachments = JSON.parse(row.attachments_json);
@@ -122,10 +123,13 @@ function msgOut(
   return out;
 }
 
-const GROUP_KEY: "group_openid" = "group_openid";
-
-function rowsOut(rows: MsgRow[]): Record<string, unknown>[] {
-  return rows.map((r) => msgOut(r, GROUP_KEY));
+function rowsOut(
+  repo: Repo,
+  botId: string,
+  group: string,
+  rows: MsgRow[],
+): Record<string, unknown>[] {
+  return rows.map((r) => msgOut(repo, botId, group, r));
 }
 
 function isoTs(ts: number | null | undefined): string | null {
@@ -360,17 +364,16 @@ export const TOOLS: ToolDef[] = [
         ctx.repo.setCursor(botId, group, String(rows[rows.length - 1]!.rid));
       }
       return {
-        group,
+        messages: rowsOut(ctx.repo, botId, group, rows),
         count: rows.length,
-        has_more: rows.length === limit,
-        messages: rowsOut(rows),
+        has_more: rows.length >= limit,
       };
     },
   },
   {
     name: "browse",
     description:
-      "按时间轴翻历史。给 msg_id + mode(before/after/around) 以某消息为锚点；不给 msg_id 返回最新 limit 条。",
+      "按时间轴翻历史。给 msg_id + mode(before/after/around) 以某消息为锚点；不给 msg_id 返回最新 limit 条。has_more=true 表示该方向还有更多。",
     inputSchema: {
       type: "object",
       required: ["group"],
@@ -394,10 +397,9 @@ export const TOOLS: ToolDef[] = [
       if (msgId === undefined) {
         const rows = repo.browseLatest(botId, group, limit).reverse();
         return {
-          group,
-          mode: "latest",
+          messages: rowsOut(ctx.repo, botId, group, rows),
           count: rows.length,
-          messages: rowsOut(rows),
+          has_more: rows.length >= limit,
         };
       }
       const anchor = repo.getMessageByMsgId(botId, group, msgId);
@@ -413,6 +415,7 @@ export const TOOLS: ToolDef[] = [
         );
       }
       let rows: MsgRow[];
+      let cap = limit;
       if (mode === "before")
         rows = repo.browseBefore(
           botId,
@@ -432,20 +435,20 @@ export const TOOLS: ToolDef[] = [
       else {
         const half = Math.floor(limit / 2);
         rows = repo.contextMessages(botId, group, anchor, half);
+        // around 两侧各 half：两侧都满页才提示还有更多
+        cap = 2 * half;
       }
       return {
-        group,
-        mode,
-        anchor_msg_id: msgId,
+        messages: rowsOut(ctx.repo, botId, group, rows),
         count: rows.length,
-        messages: rowsOut(rows),
+        has_more: rows.length >= cap,
       };
     },
   },
   {
     name: "search",
     description:
-      "按关键词检索某群历史消息（FTS，中文子串可命中；<3 字符自动降级子串扫描）。",
+      "按关键词检索某群历史消息（FTS，中文子串可命中；<3 字符自动降级子串扫描）。has_more=true 表示命中还有更多，可加大 limit。",
     inputSchema: {
       type: "object",
       required: ["group", "query"],
@@ -465,17 +468,16 @@ export const TOOLS: ToolDef[] = [
       const limit = optInt(args, "limit", 1, 50, 30);
       const rows = ctx.repo.searchMessages(botId, group, query, limit);
       return {
-        group,
-        query,
+        messages: rowsOut(ctx.repo, botId, group, rows),
         count: rows.length,
-        messages: rowsOut(rows),
+        has_more: rows.length >= limit,
       };
     },
   },
   {
     name: "context",
     description:
-      "取某消息的前后文（含合并转发/引用已展开的可读文本），radius 为前后各取条数。",
+      "取某消息的前后文（含合并转发/引用已展开的可读文本），radius 为前后各取条数。has_more=true 表示前后还有更多。",
     inputSchema: {
       type: "object",
       required: ["group", "msg_id"],
@@ -498,10 +500,9 @@ export const TOOLS: ToolDef[] = [
       }
       const rows = ctx.repo.contextMessages(botId, group, anchor, radius);
       return {
-        group,
-        anchor_msg_id: msgId,
+        messages: rowsOut(ctx.repo, botId, group, rows),
         count: rows.length,
-        messages: rowsOut(rows),
+        has_more: rows.length >= radius * 2,
       };
     },
   },

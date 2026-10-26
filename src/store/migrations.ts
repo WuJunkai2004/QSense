@@ -174,4 +174,17 @@ export const migrations: Migration[] = [
     // 主动消息 bot 级频控预算：certified=60qpm / uncertified=30qpm，缺省未认证（保守）。
     up: `ALTER TABLE bots ADD COLUMN auth_level TEXT NOT NULL DEFAULT 'uncertified';`,
   },
+  {
+    version: 7,
+    name: "msg-idx-column",
+    // 引用回溯：官方在每条消息的 message_scene.ext 携带 msg_idx 令牌（REFIDX_…），
+    // 引用元素（103）以该令牌为锚指向被引消息。入库存列后，读取时 [引用 msg_idx=X]
+    // 可 join 缓存内联被引原文（repo.resolveQuotes，MCP 与 WebUI 共用）。
+    up: `
+      ALTER TABLE messages ADD COLUMN msg_idx TEXT;
+      CREATE INDEX idx_msg_msg_idx ON messages(bot_id, group_openid, msg_idx);
+      ALTER TABLE c2c_messages ADD COLUMN msg_idx TEXT;
+      CREATE INDEX idx_c2c_msg_idx ON c2c_messages(bot_id, user_openid, msg_idx);
+    `,
+  },
 ];

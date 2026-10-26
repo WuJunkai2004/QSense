@@ -2,7 +2,12 @@
 // 身份全程 open_id（bot 维度隔离），禁止解析真实QQ号。
 
 import type { RawEvent } from "../gateway";
-import { expandElements, extractArk } from "./expand";
+import {
+  AttachmentCollector,
+  expandElements,
+  extractArk,
+  parseAttachmentLike,
+} from "./expand";
 import type {
   NormalizedAttachment,
   NormalizedMention,
@@ -47,24 +52,28 @@ function parseAttachments(
   if (!Array.isArray(list)) return [];
   const out: NormalizedAttachment[] = [];
   for (const item of list) {
-    if (item === null || typeof item !== "object") continue;
-    const a = item as Record<string, unknown>;
-    if (typeof a.url !== "string" || a.url === "") continue;
-    out.push({
-      url: a.url,
-      filename: typeof a.filename === "string" ? a.filename : undefined,
-      width: typeof a.width === "number" ? a.width : undefined,
-      height: typeof a.height === "number" ? a.height : undefined,
-      size: typeof a.size === "number" ? a.size : undefined,
-      content_type:
-        typeof a.content_type === "string" ? a.content_type : undefined,
-      voice_wav_url:
-        typeof a.voice_wav_url === "string" ? a.voice_wav_url : undefined,
-      asr_refer_text:
-        typeof a.asr_refer_text === "string" ? a.asr_refer_text : undefined,
-    });
+    const att = parseAttachmentLike(item);
+    if (att !== null) out.push(att);
   }
   return out;
+}
+
+/**
+ * 官方 msg_idx 令牌提取：raw.message_scene.ext 形如 ["msg_idx=REFIDX_…", "auth_token=…"]。
+ * 引用元素（103）以该令牌为锚指向被引消息——入库存列，读取时可 join 缓存内联被引原文。
+ */
+function extractMsgIdx(r: Record<string, unknown>): string | undefined {
+  const scene = r.message_scene;
+  if (scene === null || typeof scene !== "object") return undefined;
+  const ext = (scene as Record<string, unknown>).ext;
+  if (!Array.isArray(ext)) return undefined;
+  for (const item of ext) {
+    if (typeof item === "string" && item.startsWith("msg_idx=")) {
+      const v = item.slice("msg_idx=".length);
+      if (v !== "") return v;
+    }
+  }
+  return undefined;
 }
 
 function authorField(raw: Record<string, unknown>, keys: string[]): string {
@@ -105,11 +114,23 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
 
   const baseContent = typeof r.content === "string" ? r.content : "";
   const elements = r.msg_elements ?? undefined;
-  const expanded = elements !== undefined ? expandElements(elements) : [];
-  // content = 官方 content + 元素树展开（避免合并转发/引用内容在检索面丢失）
-  const content = [baseContent.trim(), ...expanded]
-    .filter((s) => s !== "")
-    .join("\n");
+  const collector = new AttachmentCollector();
+  const topAtts = parseAttachments(r);
+  // content = 官方 content + 元素树展开（markdown 化，媒体保序）：
+  // 媒体以 `![附件n]` 占位符内联在原位，描述符统一收集进 attachments（顶层与树内合并编号、URL 去重）。
+  let lines: string[];
+  if (elements !== undefined) {
+    const expanded = expandElements(elements, 0, collector);
+    // 顶层附件里未被元素树表达的（罕见：树内已带则 URL 去重跳过）→ 追加在尾部
+    const leftover = topAtts
+      .filter((a) => !collector.has(a.url))
+      .map((a) => collector.place(a));
+    lines = [baseContent.trim(), ...expanded, ...leftover];
+  } else {
+    // 无元素树（真机多数纯媒体消息形状）：载荷不含图文先后，约定媒体前置
+    lines = [...topAtts.map((a) => collector.place(a)), baseContent.trim()];
+  }
+  const content = lines.filter((s) => s !== "").join("\n");
 
   return {
     botId: event.botId,
@@ -123,8 +144,9 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
     content,
     mentions: parseMentions(r),
     elements,
-    attachments: parseAttachments(r),
+    attachments: collector.list,
     ark: extractArk(r),
+    msgIdx: extractMsgIdx(r),
     raw: r,
   };
 }

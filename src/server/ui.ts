@@ -414,8 +414,11 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
                 name: r.author_name,
                 role: r.author_role,
               },
-              content: r.content,
+              content: repo.resolveQuotes(botId, group, r.content),
               has_attachments: r.attachments_json !== null,
+              attachments: r.attachments_json
+                ? JSON.parse(r.attachments_json)
+                : null,
               has_ark: r.ark_json !== null,
               has_elements: r.elements_json !== null,
               /** 本机外发（发送成功后补记） */
@@ -471,7 +474,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               name: row.author_name,
               role: row.author_role,
             },
-            content: row.content,
+            content: repo.resolveQuotes(botId, group, row.content),
             out: row.direction === 1,
             mentions: row.mentions_json ? JSON.parse(row.mentions_json) : null,
             attachments: row.attachments_json
