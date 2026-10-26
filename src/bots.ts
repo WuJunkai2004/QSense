@@ -175,6 +175,25 @@ export class BotRegistry {
     return rowToApp(row);
   }
 
+  /** 改备注名（WebUI 设置页）：空名回落 appid；仅本地展示与自发消息补记作者名，不触官方 */
+  rename(appid: string, name: string): Pick<BotRow, "appid" | "name"> {
+    const trimmed = name.trim().slice(0, 32);
+    const final = trimmed === "" ? appid : trimmed;
+    const row = this.deps.db
+      .prepare("UPDATE bots SET name = ? WHERE appid = ? RETURNING appid, name")
+      .get(final, appid) as Pick<BotRow, "appid" | "name"> | undefined;
+    if (row === undefined) {
+      throw new BotRegistryError(
+        `改名失败：appid=${appid} 不在注册表中。已注册：${
+          this.list()
+            .map((b) => b.appid)
+            .join(", ") || "（无）"
+        }。`,
+      );
+    }
+    return row;
+  }
+
   /** 每 bot 发送白名单（gate 的权限域） */
   allowGroupsOf(appid: string): string[] {
     const row = this.deps.db

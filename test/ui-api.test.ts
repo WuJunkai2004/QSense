@@ -437,6 +437,62 @@ test("M7-U8 移除 bot：不存在 → 400（不在注册表）；存在 → 200
   }
 });
 
+test("M7-U12 改备注名：PATCH 即时落库；空名回落 appid；未知 appid → 400", async () => {
+  const fx = await setupServer(false);
+  try {
+    const h = authHeaders({ "Content-Type": "application/json" });
+    await fetch(`${fx.baseUrl}/ui/api/bots`, {
+      method: "POST",
+      headers: h,
+      body: JSON.stringify({ appid: "20002", secret: "s2" }),
+    });
+
+    const renamed = await fetch(`${fx.baseUrl}/ui/api/bots/20002`, {
+      method: "PATCH",
+      headers: h,
+      body: JSON.stringify({ name: "  雅南  " }),
+    });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(
+      (await renamed.json()) as { bot: { name: string } },
+      { ok: true, bot: { appid: "20002", name: "雅南" } },
+    );
+    const settings = (await (
+      await fetch(`${fx.baseUrl}/ui/api/settings`, { headers: authHeaders() })
+    ).json()) as { bots: Array<{ appid: string; name: string }> };
+    assert.equal(
+      settings.bots.find((b) => b.appid === "20002")?.name,
+      "雅南",
+      "settings 即时反映新备注",
+    );
+
+    // 空名回落 appid
+    const fallback = await fetch(`${fx.baseUrl}/ui/api/bots/20002`, {
+      method: "PATCH",
+      headers: h,
+      body: JSON.stringify({ name: "   " }),
+    });
+    assert.equal(fallback.status, 200);
+    assert.equal(
+      ((await fallback.json()) as { bot: { name: string } }).bot.name,
+      "20002",
+    );
+
+    const missing = await fetch(`${fx.baseUrl}/ui/api/bots/99999`, {
+      method: "PATCH",
+      headers: h,
+      body: JSON.stringify({ name: "x" }),
+    });
+    assert.equal(missing.status, 400);
+    assert.match(
+      ((await missing.json()) as { error: string }).error,
+      /不在注册表中/,
+    );
+  } finally {
+    await fx.close();
+  }
+});
+
 test("M7-U11 整群删除（原 MCP forget 迁入）：admin 鉴权门 + 清缓存 + sends 保留", async () => {
   const fx = await setupServer();
   try {

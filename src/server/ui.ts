@@ -248,6 +248,21 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         }
       });
 
+      // 改备注名（仅本地展示与自发消息补记的作者名，不触官方任何接口）
+      plugin.patch("/bots/:appid", async (req, reply) => {
+        try {
+          const appid = (req.params as { appid: string }).appid;
+          const body = (req.body ?? {}) as Record<string, unknown>;
+          const name = typeof body.name === "string" ? body.name : "";
+          const renamed = registry.rename(appid, name);
+          uiLog.info("bot renamed via ui", { appid, name: renamed.name });
+          return { ok: true, bot: { appid: renamed.appid, name: renamed.name } };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
       // —— M8 设置页：发送总开关 + 每 bot 白名单（全部落 SQLite）——
 
       const settingsPayload = () => ({
