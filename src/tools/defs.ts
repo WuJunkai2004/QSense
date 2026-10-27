@@ -670,6 +670,43 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "send_media",
+    description:
+      "【真实写操作·默认关闭】向群发送图片（表情包/梗图等，支持 GIF 动图；视频/语音/文件暂未开放）。通道自动选择：群内 5 分钟内有新消息且未用尽回复次数时走被动回复（不计额度、免审核），否则走主动消息（官方额度同 send；可能进入人工审核）。text 可选配文。quote_msg_id 可引用群内某条消息（客户端显示引用样式）。media 仅接受 http(s):// 图片 URL 或 data:image/...;base64 内联数据——不支持本地路径（MCP 服务可能与智能体不在同一台机器；本地文件请先读出并 base64 内联）。发送总开关开启且群在该 bot 白名单内才生效（WebUI 设置页管理）。请勿用相同内容重试——重复提交可能绕过幂等账本造成刷屏。",
+    inputSchema: {
+      type: "object",
+      required: ["group", "media"],
+      properties: {
+        group: { type: "string", description: "群 openid" },
+        media: {
+          type: "string",
+          description:
+            "图片来源：http(s):// 图片 URL（须公网可访问）或 data:image/png;base64,… 内联数据（本地文件先读出再内联）。不支持本地路径。",
+        },
+        text: {
+          type: "string",
+          description: "可选：配文（与图片一同发出，≤5000字符）",
+        },
+        quote_msg_id: {
+          type: "string",
+          description:
+            "可选：引用群内某条消息（官方消息ID，须在缓存中），客户端以引用样式展示",
+        },
+      },
+    },
+    handler: async (args, ctx) => {
+      const sender = requireSender(ctx);
+      const botId = resolveBotId(ctx);
+      return sender.sendMediaAuto(
+        botId,
+        str(args, "group", "群 openid"),
+        str(args, "media", "图片来源"),
+        optStr(args, "text"),
+        optStr(args, "quote_msg_id"),
+      );
+    },
+  },
+  {
     name: "recall",
     description:
       "【真实写操作·默认关闭】撤回群内消息（官方限制：机器人被设为群管理员时可撤回成员消息，否则仅能撤回自己的消息——本服务发送的消息均记录了 provider_msg_id，可撤）。发送总开关开启且群在该 bot 白名单内才生效（WebUI 设置页管理）。",

@@ -9,6 +9,8 @@
 import { createHash } from "node:crypto";
 import {
   ApiClient,
+  MediaApi,
+  MediaFileType,
   MessageApi,
   type TokenManager,
 } from "@tencent-connect/qqbot-nodejs/protocol";
@@ -58,7 +60,7 @@ export interface SendResult {
   detail?: string;
 }
 
-/** 发送 API 最小接口（生产=SDK MessageApi；测试=记录调用的 mock） */
+/** 发送 API 最小接口（生产=SDK MessageApi/MediaApi 适配；测试=记录调用的 mock） */
 export interface SendApi {
   sendRaw(
     scope: "group" | "c2c",
@@ -72,6 +74,27 @@ export interface SendApi {
     messageId: string,
     creds: { appId: string; clientSecret: string },
   ): Promise<void>;
+  /** 富媒体上传（首版仅图片 IMAGE），返回官方 file_info（TTL 24h，可复用） */
+  uploadMedia(
+    scope: "group" | "c2c",
+    targetId: string,
+    creds: { appId: string; clientSecret: string },
+    src: MediaSource,
+  ): Promise<string>;
+}
+
+/** 富媒体来源（传输自足：MCP 服务可能与智能体不同机，不收本地路径） */
+export type MediaSource =
+  | { kind: "url"; url: string }
+  | { kind: "b64"; data: string };
+
+/** 解析 send_media 的 media 参数：http(s):// URL 或 data:image/...;base64,… 内联 */
+export function parseMediaSource(media: string): MediaSource {
+  const trimmed = media.trim();
+  if (/^https?:\/\/\S+$/i.test(trimmed)) return { kind: "url", url: trimmed };
+  const m = /^data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(trimmed);
+  if (m) return { kind: "b64", data: m[2]!.replace(/\s+/g, "") };
+  throw new Error(t("media_source_invalid"));
 }
 
 export interface SenderDeps {
@@ -156,25 +179,40 @@ export class Sender {
     return this.deps.bots?.authLevelOf(botId) === "certified" ? 60 : 30;
   }
 
-  /** 指定 bot 的发送 API（生产懒建 SDK MessageApi；测试用注入） */
+  /** 指定 bot 的发送 API（生产懒建 SDK MessageApi/MediaApi 适配；测试用注入） */
   private api(app: BotApp): SendApi {
     const injected = this.deps.apiFor?.(app);
     if (injected !== undefined) return injected;
     let api = this.apis.get(app.appid);
     if (api === undefined) {
-      const messageApi = new MessageApi(
-        new ApiClient({
-          logger: {
-            info: (msg, meta) => this.log.debug(msg, meta),
-            error: (msg, meta) => this.log.error(msg, meta),
-            warn: (msg, meta) => this.log.warn(msg, meta),
-            debug: (msg, meta) => this.log.debug(msg, meta),
-          },
-        }),
-        this.deps.tokenManager,
-        { markdownSupport: true },
-      );
-      api = messageApi;
+      const client = new ApiClient({
+        logger: {
+          info: (msg, meta) => this.log.debug(msg, meta),
+          error: (msg, meta) => this.log.error(msg, meta),
+          warn: (msg, meta) => this.log.warn(msg, meta),
+          debug: (msg, meta) => this.log.debug(msg, meta),
+        },
+      });
+      const messageApi = new MessageApi(client, this.deps.tokenManager, {
+        markdownSupport: true,
+      });
+      const mediaApi = new MediaApi(client, this.deps.tokenManager);
+      api = {
+        sendRaw: (scope, targetId, creds, body) =>
+          messageApi.sendRaw(scope, targetId, creds, body),
+        recallMessage: (scope, targetId, messageId, creds) =>
+          messageApi.recallMessage(scope, targetId, messageId, creds),
+        uploadMedia: (scope, targetId, creds, src) =>
+          mediaApi
+            .uploadMedia(
+              scope,
+              targetId,
+              MediaFileType.IMAGE,
+              creds,
+              src.kind === "url" ? { url: src.url } : { fileData: src.data },
+            )
+            .then((up) => up.file_info),
+      };
       this.apis.set(app.appid, api);
     }
     return api;
@@ -222,14 +260,20 @@ export class Sender {
     botId: string,
     groupOpenid: string,
     replyMsgId: string,
-    text: string,
+    /** 文本/markdown 内容；媒体发送时为可选配文（可空） */
+    text: string | undefined,
     markdown = false,
     /** true=附带 message_reference 引用块（客户端展示引用样式）；false=纯被动回复（仅窗口绑定） */
     quote = false,
+    /** 富媒体（首版仅图片）：msg_type=7，text 降级为配文；file_info 由 uploadMedia 预先取得 */
+    media?: { fileInfo: string },
   ): Promise<SendResult> {
     const app = this.gate(botId, groupOpenid);
-    const content = this.checkContent(text);
-    const payloadHash = sha256(`${markdown ? "md" : "text"}\0${content}`);
+    const content = text === undefined ? "" : this.checkContent(text);
+    const payloadHash =
+      media !== undefined
+        ? sha256(`img\0${media.fileInfo}\0${content}`)
+        : sha256(`${markdown ? "md" : "text"}\0${content}`);
 
     // 幂等重放：同 回复目标+payload 已成功受理（sent/pending_audit）→ 直接返回首次结果
     const replayed = this.deps.repo.findSendReplay(
@@ -277,7 +321,7 @@ export class Sender {
         kind: "passive",
         reply_msg_id: replyMsgId,
         msg_seq: seq,
-        payload_hash: sha256(`${asMarkdown ? "md" : "text"}\0${content}`),
+        payload_hash: payloadHash,
         status: "reserved",
       });
       // 官方群聊引用块（2026-03 v2 autogen 文档收录 message_reference，真机实测返回 ext_info.ref_idx）：
@@ -290,7 +334,19 @@ export class Sender {
             ignore_get_message_error: true,
           }
         : undefined;
-      const body: Record<string, unknown> = asMarkdown
+      const body: Record<string, unknown> = media
+        ? {
+            // 富媒体（2026-10-27 真机验证：msg_type=7 可走被动窗口，可带 message_reference 引用块）
+            msg_type: 7,
+            content,
+            media: { file_info: media.fileInfo },
+            msg_id: replyMsgId,
+            msg_seq: seq,
+            ...(messageReference !== undefined
+              ? { message_reference: messageReference }
+              : {}),
+          }
+        : asMarkdown
         ? {
             msg_type: 2,
             markdown: { content },
@@ -317,7 +373,14 @@ export class Sender {
           body,
         );
         this.deps.repo.updateSendStatus(reservation, "sent", resp.id);
-        this.recordOutgoing(botId, groupOpenid, resp.id, content);
+        this.recordOutgoing(
+          botId,
+          groupOpenid,
+          resp.id,
+          media !== undefined
+            ? `![图片]${content === "" ? "" : ` ${content}`}`
+            : content,
+        );
         this.log.info("passive sent", {
           group: groupOpenid,
           seq,
@@ -382,15 +445,22 @@ export class Sender {
   async proactive(
     botId: string,
     groupOpenid: string,
-    text: string,
+    /** 文本/markdown 内容；媒体发送时为可选配文（可空） */
+    text: string | undefined,
     /**
      * 可选引用块目标（message_reference）。引用样式与被动窗口解耦（官方已真机验证：
      * 主动消息携带 message_reference 照常受理，目标超窗亦可），仅影响客户端展示。
      */
     quoteMsgId?: string,
+    /** 富媒体（首版仅图片）：msg_type=7，text 降级为配文；file_info 由 uploadMedia 预先取得 */
+    media?: { fileInfo: string },
   ): Promise<SendResult> {
     const app = this.gate(botId, groupOpenid);
-    const content = this.checkContent(text);
+    const content = text === undefined ? "" : this.checkContent(text);
+    const payloadHash =
+      media !== undefined
+        ? sha256(`img\0${media.fileInfo}\0${content}`)
+        : sha256(`text\0${content}`);
     const repo = this.deps.repo;
     const date = beijingDate();
 
@@ -433,7 +503,7 @@ export class Sender {
       kind: "proactive",
       reply_msg_id: null,
       msg_seq: null,
-      payload_hash: sha256(`text\0${content}`),
+      payload_hash: payloadHash,
       status: "reserved",
     });
     try {
@@ -442,7 +512,13 @@ export class Sender {
         groupOpenid,
         credsOf(app),
         {
-          msg_type: 0,
+          ...(media !== undefined
+            ? {
+                // 富媒体（2026-10-27 真机验证：主动 msg_type=7 受理，可带引用块）
+                msg_type: 7,
+                media: { file_info: media.fileInfo },
+              }
+            : { msg_type: 0 }),
           content,
           ...(quoteMsgId !== undefined
             ? {
@@ -456,7 +532,14 @@ export class Sender {
       );
       repo.updateSendStatus(reservation, "sent", resp.id);
       repo.incrQuotaDaily(botId, groupOpenid, date);
-      this.recordOutgoing(botId, groupOpenid, resp.id, content);
+      this.recordOutgoing(
+        botId,
+        groupOpenid,
+        resp.id,
+        media !== undefined
+          ? `![图片]${content === "" ? "" : ` ${content}`}`
+          : content,
+      );
       this.log.info("proactive sent", {
         group: groupOpenid,
         provider: resp.id,
@@ -497,30 +580,82 @@ export class Sender {
     /** 可选：引用群内某条消息（客户端显示引用样式）。须为缓存中存在的官方消息ID */
     quoteMsgId?: string,
   ): Promise<SendResult> {
+    const { bindMsgId, quote } = this.resolveChannel(
+      botId,
+      groupOpenid,
+      quoteMsgId,
+    );
+    if (bindMsgId !== undefined) {
+      return this.reply(botId, groupOpenid, bindMsgId, text, false, quote);
+    }
+    return this.proactive(botId, groupOpenid, text, quoteMsgId);
+  }
+
+  /** send_media 工具入口：富媒体（首版仅图片），通道自动路由（与 sendAuto 同款被动优先）。
+   * 2026-10-27 真机验证：msg_type=7 被动/主动/引用块三形态官方均受理。 */
+  async sendMediaAuto(
+    botId: string,
+    groupOpenid: string,
+    /** 图片来源：http(s):// URL 或 data:image/...;base64（传输自足，跨机安全） */
+    mediaParam: string,
+    /** 可选配文（msg_type=7 的 content） */
+    text?: string,
+    /** 可选：引用群内某条消息（须在缓存中） */
+    quoteMsgId?: string,
+  ): Promise<SendResult> {
+    const app = this.gate(botId, groupOpenid); // 先门禁：上传同属写路径前置
+    const src = parseMediaSource(mediaParam);
+    const { bindMsgId, quote } = this.resolveChannel(
+      botId,
+      groupOpenid,
+      quoteMsgId,
+    );
+    // 上传转存（官方对同内容返回相同 file_info，TTL 24h；失败不消耗通道额度）
+    let fileInfo: string;
+    try {
+      fileInfo = await this
+        .api(app)
+        .uploadMedia("group", groupOpenid, credsOf(app), src);
+    } catch (e) {
+      throw new Error(
+        t("media_upload_failed", { reason: describeSendError(e) }),
+      );
+    }
+    this.log.info("media uploaded", {
+      group: groupOpenid,
+      file_info_len: fileInfo.length,
+    });
+    if (bindMsgId !== undefined) {
+      return this.reply(botId, groupOpenid, bindMsgId, text, false, quote, {
+        fileInfo,
+      });
+    }
+    return this.proactive(botId, groupOpenid, text, quoteMsgId, { fileInfo });
+  }
+
+  /** 通道判定（sendAuto/sendMediaAuto 共用）：引用目标窗内→绑=引（形态A）；
+   * 无引用→绑最新可绑消息（白嫖被动）；否则主动兜底 */
+  private resolveChannel(
+    botId: string,
+    groupOpenid: string,
+    quoteMsgId?: string,
+  ): { bindMsgId?: string; quote: boolean } {
     if (quoteMsgId !== undefined) {
       const q = this.deps.repo.getMessageByMsgId(botId, groupOpenid, quoteMsgId);
       if (q === null || q.ts === null) {
         throw new Error(t("send_quote_not_found", { msg_id: quoteMsgId }));
       }
     }
-    // 绑定目标：引用目标在窗内 → 绑=引（形态A）；无引用时绑最新可绑消息（白嫖被动）
     let bindMsgId: string | undefined;
     if (quoteMsgId !== undefined && this.bindable(botId, groupOpenid, quoteMsgId)) {
       bindMsgId = quoteMsgId;
     } else if (quoteMsgId === undefined) {
       bindMsgId = this.latestBindable(botId, groupOpenid);
     }
-    if (bindMsgId !== undefined) {
-      return this.reply(
-        botId,
-        groupOpenid,
-        bindMsgId,
-        text,
-        false,
-        bindMsgId === quoteMsgId, // 仅绑=引时带引用块
-      );
-    }
-    return this.proactive(botId, groupOpenid, text, quoteMsgId);
+    return {
+      bindMsgId,
+      quote: bindMsgId !== undefined && bindMsgId === quoteMsgId,
+    };
   }
 
   /** 消息可否作被动绑定目标：在缓存、窗内（5 分钟）、未用尽次数（5 次） */

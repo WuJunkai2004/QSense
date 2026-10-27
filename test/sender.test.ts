@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLogger } from "../src/logger";
-import { Sender } from "../src/sender";
+import { Sender, beijingDate } from "../src/sender";
 import { handleGatewayEvent } from "../src/normalize/handler";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
@@ -41,12 +41,23 @@ function makeApiMock(
 ): {
   calls: Call[];
   recalls: string[];
+  uploads: Array<{
+    scope: "group" | "c2c";
+    targetId: string;
+    src: import("../src/sender").MediaSource;
+  }>;
 } & import("../src/sender").SendApi {
   const calls: Call[] = [];
   const recalls: string[] = [];
+  const uploads: Array<{
+    scope: "group" | "c2c";
+    targetId: string;
+    src: import("../src/sender").MediaSource;
+  }> = [];
   return {
     calls,
     recalls,
+    uploads,
     async sendRaw(
       scope: "group" | "c2c",
       targetId: string,
@@ -64,6 +75,15 @@ function makeApiMock(
       messageId: string,
     ) {
       recalls.push(messageId);
+    },
+    async uploadMedia(
+      scope: "group" | "c2c",
+      targetId: string,
+      _creds: { appId: string; clientSecret: string },
+      src: import("../src/sender").MediaSource,
+    ) {
+      uploads.push({ scope, targetId, src });
+      return `FILEINFO_${uploads.length}`;
     },
   } as never;
 }
@@ -718,6 +738,107 @@ test("M4-15 sendAuto：quote 不在缓存 → 报错不发送；被动次数用�
     const r = await sender.sendAuto(BOT, GROUP, "第六次");
     assert.equal(r.channel, "proactive", "次数用尽后应换主动通道");
     assert.equal(m2.calls[m2.calls.length - 1]!.body.msg_id, undefined);
+  } finally {
+    fx.close();
+  }
+});
+
+test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地路径拒绝/上传失败兜底", async () => {
+  const fx = setupDb();
+  try {
+    // 场景1：窗内有消息 → 被动图（绑最新），msg_type=7 + 配文，不带引用块
+    seedInbound(fx.repo, "M_PIC", 60_000); // 1 分钟前
+    const m1 = makeApiMock();
+    const r1 = await makeSender(fx, m1).sendMediaAuto(
+      BOT,
+      GROUP,
+      "https://example.com/cat.png",
+      "看看这只猫",
+    );
+    assert.equal(r1.channel, "passive", "窗内有消息应走被动图（免额度）");
+    assert.equal(r1.msg_seq, 1);
+    assert.equal(m1.uploads.length, 1);
+    assert.deepEqual(m1.uploads[0]!.src, {
+      kind: "url",
+      url: "https://example.com/cat.png",
+    });
+    assert.equal(m1.calls[0]!.body.msg_type, 7);
+    assert.equal(m1.calls[0]!.body.msg_id, "M_PIC");
+    assert.equal(m1.calls[0]!.body.content, "看看这只猫");
+    assert.deepEqual(m1.calls[0]!.body.media, { file_info: "FILEINFO_1" });
+    assert.equal(m1.calls[0]!.body.message_reference, undefined);
+    // 补记行：读取层以 ![图片] 占位（与附件占位符约定一致）
+    const latest = fx.repo.browseLatest(BOT, GROUP, 1)[0]!;
+    assert.equal(latest.direction, 1);
+    assert.equal(latest.content, "![图片] 看看这只猫");
+
+    // 场景2：无窗内消息 → 主动图（独立 fixture：场景1 的 M_PIC 仍窗内会干扰路由）
+    const fx2 = setupDb();
+    try {
+      const m2 = makeApiMock();
+      const r2 = await makeSender(fx2, m2).sendMediaAuto(
+        BOT,
+        GROUP,
+        "data:image/png;base64,AAAA",
+      );
+      assert.equal(r2.channel, "proactive");
+      assert.equal(m2.calls[0]!.body.msg_type, 7);
+      assert.equal(m2.calls[0]!.body.msg_id, undefined);
+      assert.deepEqual(m2.uploads[0]!.src, { kind: "b64", data: "AAAA" });
+      assert.equal(
+        fx2.repo.proactiveCountFor(BOT, GROUP, beijingDate()),
+        1,
+        "主动图应计入日额度",
+      );
+    } finally {
+      fx2.close();
+    }
+
+    // 场景3：quote 超窗目标 → 主动 + 引用块（2026-10-27 真机验证受理）
+    seedInbound(fx.repo, "M_OLDPIC", 6 * 60_000);
+    const m3 = makeApiMock();
+    const r3 = await makeSender(fx, m3).sendMediaAuto(
+      BOT,
+      GROUP,
+      "https://example.com/d.gif",
+      undefined,
+      "M_OLDPIC",
+    );
+    assert.equal(r3.channel, "proactive");
+    assert.deepEqual(m3.calls[0]!.body.message_reference, {
+      message_id: "M_OLDPIC",
+      ignore_get_message_error: true,
+    });
+
+    // 场景4：本地路径 → 硬拒绝（MCP 服务可能与智能体不同机），上传与发送零调用
+    const m4 = makeApiMock();
+    await assert.rejects(
+      () =>
+        makeSender(fx, m4).sendMediaAuto(
+          BOT,
+          GROUP,
+          "C:\\Users\\tester\\cat.png",
+        ),
+      /media 参数格式不支持/,
+    );
+    assert.equal(m4.uploads.length, 0);
+    assert.equal(m4.calls.length, 0);
+
+    // 场景5：上传转存失败 → media_upload_failed 文案，不发送任何消息
+    const m5 = makeApiMock();
+    m5.uploadMedia = async () => {
+      throw new Error("HTTP 500");
+    };
+    await assert.rejects(
+      () =>
+        makeSender(fx, m5).sendMediaAuto(
+          BOT,
+          GROUP,
+          "https://example.com/x.png",
+        ),
+      /图片上传官方转存失败/,
+    );
+    assert.equal(m5.calls.length, 0, "上传失败不得发送消息");
   } finally {
     fx.close();
   }

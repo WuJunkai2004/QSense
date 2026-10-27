@@ -50,8 +50,12 @@ const zh = {
     "Markdown 无模板权限（官方码 304036），已自动降级为纯文本发送成功。",
   send_text_too_long:
     "消息内容 {len} 字符，超过官方上限 5000。请分段发送或精简内容。",
+  media_source_invalid:
+    "media 参数格式不支持：仅接受 http(s):// 图片 URL 或 data:<mime>;base64,… 内联数据。不支持本地路径——MCP 服务可能与智能体不在同一台机器上（本地文件请先读出并 base64 内联）。",
+  media_upload_failed:
+    "图片上传官方转存失败：{reason}。可更换图片来源后重试（URL 须公网可访问；data: 内联数据须为有效图片）。",
   err_40034004:
-    "富媒体转存失败（官方码 40034004）。v1 仅支持文本/Markdown，不应出现此码；可重试一次。",
+    "富媒体转存失败（官方码 40034004）。可重试一次；反复失败请更换图片 URL（须公网可访问）或改用 data: 内联。",
   err_40034005:
     "回复目标 msg_id 已过期（官方码 40034005）：超出被动窗口。可改为直接发送（自动走主动通道）或放弃。",
   err_304027:
@@ -122,8 +126,12 @@ const en: Translation = {
     "Markdown has no template permission (official code 304036); automatically sent as plain text instead.",
   send_text_too_long:
     "Message content is {len} chars, exceeding the official 5000 limit. Split or shorten the content.",
+  media_source_invalid:
+    "Unsupported media format: only http(s):// image URLs or data:<mime>;base64,… inline data are accepted. Local paths are not supported — the MCP server may run on a different machine than the agent (read local files and inline them as base64).",
+  media_upload_failed:
+    "Image upload/transfer failed: {reason}. Retry with a different source (URL must be publicly accessible; data: payload must be a valid image).",
   err_40034004:
-    "Rich media transfer failed (official code 40034004). v1 only supports text/markdown; retry once if unexpected.",
+    "Rich media transfer failed (official code 40034004). Retry once; if it keeps failing, use a different image URL (must be publicly accessible) or switch to data: inline.",
   err_40034005:
     "Reply target msg_id expired (official code 40034005): passive window exceeded. Send directly instead (auto-routes to proactive) or skip.",
   err_304027:
