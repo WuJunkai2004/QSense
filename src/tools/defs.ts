@@ -1,8 +1,9 @@
 // MCP 工具面定义：以"人类操作QQ"为隐喻组织——
-//   列表层 list_all/list_group/list_chat/list_new（消息列表视角）→
+//   列表层 list_all/list_new（消息列表视角；类型/私聊过滤走 list_all 的 type 参数）→
 //   读取层 get_new/browse/search/context → 名册与额度 list_members/quota →
-//   写工具 send/recall（双重门禁）→ 管理 register_bot/token_refresh。
+//   写工具 send/send_media/request_upload/recall（双重门禁）→ 管理 register_bot。
 // 已读水位（拉取即已读）与整群删除（原 forget，迁 WebUI）为服务端内部状态/管理操作，不在 agent 工具面。
+// token 轮换收归 WebUI（2026-10-27 工具面缩窄）：调用即自毁凭证且新值落进对话上下文，属人的运维决策。
 // 写工具经 Sender（真实官方API）：发送总开关（SQLite）开启且群在该 bot allow_groups 内才生效，否则硬拒绝。
 // 多机器人：token 绑定制，一个 agent_token 只属于一个 bot；
 // `bot` 参数已全工具面退役（绑定关系在 HTTP 层 Bearer→bot 完成，agent 无需感知 bot 维度）。
@@ -175,7 +176,7 @@ function optType(args: Record<string, unknown>): "chat" | "group" | "all" {
 }
 
 /**
- * 会话列表统一输出（list_all/list_group/list_chat/list_new 共用 envelope）：
+ * 会话列表统一输出（list_all/list_new 共用 envelope）：
  * 条目形状 { type, id, unread, last_msg_ts }，恒按 last_msg_ts 倒序（null 最后）。
  */
 function conversationsOut(
@@ -221,7 +222,7 @@ export const TOOLS: ToolDef[] = [
       "【管理操作】注册新机器人：直接传 appid 与 secret（q.qq.com 开发设置页获取）。" +
       "服务端校验凭据后落库，并生成随机 agent_token——它只在本次返回中出现一次，必须立即保存。" +
       "此后本服务所有工具连接时都应使用该 token（一个 token 只绑定这一个 bot）。" +
-      "token 丢失时可用 token_refresh 轮换（需持有旧 token）或在 WebUI 设置页重置。",
+      "token 丢失时在 WebUI 设置页重置。",
     inputSchema: {
       type: "object",
       required: ["appid", "secret"],
@@ -262,28 +263,7 @@ export const TOOLS: ToolDef[] = [
       return {
         bot: { appid: registered.app.appid, name: registered.app.name },
         agent_token: registered.agentToken,
-        note: "agent_token 仅本次返回：请立即保存。再次获取请走 token_refresh 或 WebUI 设置页。",
-      };
-    },
-  },
-  {
-    name: "token_refresh",
-    description:
-      "【管理操作】轮换当前 token：注销正在使用的 agent_token，返回一个新的 agent_token（仅此一次返回，请立即保存）。" +
-      "适合 token 疑似泄漏或定期轮换；旧 token 在本调用成功后立即失效，请保存好新值再断开。",
-    inputSchema: { type: "object", properties: {} },
-    handler: (_args, ctx) => {
-      if (ctx.bots === undefined) {
-        throw new ToolError("机器人注册表未装配（服务端配置缺失）。");
-      }
-      if (ctx.botId === undefined) {
-        throw new ToolError("当前 token 未绑定任何 bot，无法轮换。");
-      }
-      const agentToken = ctx.bots.rotateToken(ctx.botId);
-      return {
-        bot: ctx.botId,
-        agent_token: agentToken,
-        note: "旧 token 已失效。新 agent_token 仅本次返回：请立即更新到 MCP 客户端配置并保存。",
+        note: "agent_token 仅本次返回：请立即保存。再次获取请在 WebUI 设置页重置。",
       };
     },
   },
@@ -306,19 +286,6 @@ export const TOOLS: ToolDef[] = [
     handler: (args, ctx) => {
       return conversationsOut(ctx, optType(args), false);
     },
-  },
-  {
-    name: "list_group",
-    description: "列出全部群聊会话（list_all 的群聊视图，等价 type=group）。",
-    inputSchema: { type: "object", properties: {} },
-    handler: (_args, ctx) => conversationsOut(ctx, "group", false),
-  },
-  {
-    name: "list_chat",
-    description:
-      "列出全部私聊会话（list_all 的私聊视图，等价 type=chat）。当前 bot 无单聊能力，恒为空列表。",
-    inputSchema: { type: "object", properties: {} },
-    handler: (_args, ctx) => conversationsOut(ctx, "chat", false),
   },
   {
     name: "list_new",

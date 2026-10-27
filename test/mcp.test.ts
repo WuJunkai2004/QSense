@@ -235,7 +235,7 @@ test("M3-1 未带 token / 错 token → 401", async () => {
   }
 });
 
-test("M3-2 listTools 含 17 个工具；未开启发送时写工具硬拒绝", async () => {
+test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
@@ -248,8 +248,6 @@ test("M3-2 listTools 含 17 个工具；未开启发送时写工具硬拒绝", a
       "get_media",
       "get_new",
       "list_all",
-      "list_chat",
-      "list_group",
       "list_members",
       "list_new",
       "quota",
@@ -259,7 +257,6 @@ test("M3-2 listTools 含 17 个工具；未开启发送时写工具硬拒绝", a
       "search",
       "send",
       "send_media",
-      "token_refresh",
     ]);
     // 双重门禁未开（发送开关缺省关）→ 写工具硬拒绝且不炸
     const denied = (await client.callTool({

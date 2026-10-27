@@ -124,7 +124,7 @@ export class BotRegistry {
       : "uncertified";
     if (this.get(appid) !== undefined) {
       throw new BotRegistryError(
-        `注册失败：appid=${appid} 已存在。重复注册请改用 token_refresh 轮换 token，或在 WebUI 设置页操作。`,
+        `注册失败：appid=${appid} 已存在。重复注册请走 WebUI 设置页轮换 token 或管理 bot。`,
       );
     }
     const app: BotApp = { appid, secret, name };

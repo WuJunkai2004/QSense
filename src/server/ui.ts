@@ -240,7 +240,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             ok: true,
             bot: { appid: registered.app.appid, name: registered.app.name },
             agent_token: registered.agentToken,
-            note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换或 token_refresh。",
+            note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换。",
           };
         } catch (e) {
           const m = mapError(uiLog, e);

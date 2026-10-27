@@ -1,7 +1,7 @@
 // M8/M9 验收（注册表）：bots 表唯一存储、agent_token 生命周期（生成/轮换/反查）、
 // 每 bot 白名单、每 bot 认证等级（M9 落库）、注册制（M9 起无任何 env/kv 播种——
-// bot 只能经 add/WebUI 注册进表），register_bot / token_refresh 工具面与
-// token 绑定 bot 强校验。
+// bot 只能经 add/WebUI 注册进表），register_bot 工具面与 token 绑定 bot 强校验。
+// 注：token 轮换已收归 WebUI（2026-10-27 工具面缩窄），域层 rotateToken 保留、本文件直测。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -240,19 +240,12 @@ test("M9-B7b register_bot：auth_level 参数落库（certified 生效）", asyn
   }
 });
 
-test("M8-B8 token_refresh：换发新 token，旧 token 立即失效", async () => {
+test("M8-B8 token 轮换（域层，MCP 工具面已收归 WebUI）：换发新 token，旧 token 立即失效", async () => {
   const fx = setupDb();
   try {
     const reg = newRegistry(fx.db);
     const added = await reg.add({ appid: "20002", secret: "s2" });
-    const ctx: ToolContext = {
-      repo: new Repo(fx.db),
-      bots: reg,
-      botId: "20002",
-    };
-    const raw = await runTool("token_refresh", {}, ctx);
-    const out = JSON.parse(raw.text) as Record<string, unknown>;
-    const fresh = String(out.agent_token);
+    const fresh = reg.rotateToken("20002");
     assert.notEqual(fresh, added.agentToken);
     assert.equal(reg.appIdByToken(added.agentToken), null);
     assert.equal(reg.appIdByToken(fresh), "20002");

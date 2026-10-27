@@ -61,11 +61,11 @@ M9 起 env 只承担部署拓扑与运维参数；**bot 注册（appid/secret/�
 | `LOG_CONTENT` | | 日志记消息正文，**默认 false（生产禁止开启）** |
 | `LOG_LEVEL` | | debug/info/warn/error/fatal |
 
-## MCP 工具面（16 个）
+## MCP 工具面（14 个）
 
-**管理（自服务）**：`register_bot`（注册新 bot：官方凭据校验 → 落库 → 返回 agent_token 仅此一次）· `token_refresh`（轮换当前绑定 bot 的 agent_token，旧值立即失效）
+**管理（自服务）**：`register_bot`（注册新 bot：官方凭据校验 → 落库 → 返回 agent_token 仅此一次；token 轮换收归 WebUI 设置页——调用即自毁凭证的操作不留给 agent）
 
-**只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数）· `list_group` / `list_chat` / `list_new`（分类型/未读视图）· `list_members`（名册）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索）· `context`（前后文）· `get_media`（点开看图：按 ![附件n] 编号拉取图像内容，多模态模型直接读图）· `quota`（额度水位）
+**只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数；`type` 参数过滤 group/chat——C2C 开通后即用此参数，无独立工具）· `list_new`（未读视图=红点）· `list_members`（名册）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索）· `context`（前后文）· `get_media`（点开看图：按 ![附件n] 编号拉取图像内容，多模态模型直接读图）· `quota`（额度水位）
 
 **写（双重门禁：kv 总开关 + 该 bot 白名单，均 WebUI 设置页管理）**：`send`（统一发送：被动优先自动路由——窗内可绑走被动回复免额度免审，否则主动消息过令牌桶+每群每日 1000 条记账；`quote_msg_id` 可选引用块，与窗口解耦；返回 `channel` 标明实际通道）· `send_media`（图片发送，支持 GIF 表情包：`media` 收 `asset:<id>`（推荐，本地图片经 `request_upload` 上传）/ http(s) URL / data: base64 小图兜底；路由/引用/额度同 send；视频/语音/文件后续扩展）· `request_upload`（上传协商：签发一次性 PUT 票据（15 分钟），执行环境直传字节到服务端资产区——控制平面/数据平面分离，字节不进模型上下文）· `recall`（撤回）
 
