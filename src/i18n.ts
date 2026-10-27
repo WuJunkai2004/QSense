@@ -54,6 +54,8 @@ const zh = {
     "media 参数格式不支持：仅接受 http(s):// 图片 URL 或 data:<mime>;base64,… 内联数据。不支持本地路径——MCP 服务可能与智能体不在同一台机器上（本地文件请先读出并 base64 内联）。",
   media_upload_failed:
     "图片上传官方转存失败：{reason}。可更换图片来源后重试（URL 须公网可访问；data: 内联数据须为有效图片）。",
+  asset_not_found:
+    "资产不存在：asset:{id}。请先调 request_upload 拿上传票据，并按返回的 curl 命令用执行环境直传图片字节（票据 15 分钟有效、单次使用）。",
   err_40034004:
     "富媒体转存失败（官方码 40034004）。可重试一次；反复失败请更换图片 URL（须公网可访问）或改用 data: 内联。",
   err_40034005:
@@ -130,6 +132,8 @@ const en: Translation = {
     "Unsupported media format: only http(s):// image URLs or data:<mime>;base64,… inline data are accepted. Local paths are not supported — the MCP server may run on a different machine than the agent (read local files and inline them as base64).",
   media_upload_failed:
     "Image upload/transfer failed: {reason}. Retry with a different source (URL must be publicly accessible; data: payload must be a valid image).",
+  asset_not_found:
+    "Asset not found: asset:{id}. Call request_upload first to get an upload ticket, then PUT the image bytes from your execution environment following the returned curl command (ticket valid 15 min, single use).",
   err_40034004:
     "Rich media transfer failed (official code 40034004). Retry once; if it keeps failing, use a different image URL (must be publicly accessible) or switch to data: inline.",
   err_40034005:

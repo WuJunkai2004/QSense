@@ -28,6 +28,10 @@ export interface McpDeps {
   bots?: BotRegistry;
   /** 网关接入器：register_bot 后立即接入新 bot；缺省=测试环境不接入 */
   supervisor?: { addBot: (app: BotApp) => void };
+  /** 资产存储（request_upload / send_media asset: 引用）；缺省=资产功能未装配 */
+  assets?: import("../assets").AssetStore;
+  /** agent_token 反查（request_upload 票据密钥取自绑定 bot 的 agent_token）；缺省=票据不可签发 */
+  agentTokenOf?: (botId: string) => string | null;
   /** MCP 工具执行全局并发上限（M6 限流）：SQLite 同步查询毫秒级、写工具 API 调用秒级，8 足够且防打爆 */
   maxConcurrent?: number;
   version: string;
@@ -80,18 +84,24 @@ export function createMcpHandler(
     transport: StreamableHTTPServerTransport;
     /** M8：会话与 bot 绑定（token→bot 在 HTTP 层解析，initialize 时落定） */
     botId: string;
+    /** initialize 请求的 Host（upload_url 拼接用；会话期内通常不变） */
+    baseUrl: string;
   }
   const sessions = new Map<string, Session>();
 
-  const createContext = (session: { botId: string }) => ({
+  const createContext = (session: Session) => ({
     repo,
     sender: deps.sender,
     bots: deps.bots,
     supervisor: deps.supervisor,
+    assets: deps.assets,
+    baseUrl: session.baseUrl,
+    agentToken:
+      deps.agentTokenOf?.(session.botId) ?? undefined,
     botId: session.botId,
   });
 
-  const createSession = (botId: string): Session => {
+  const createSession = (botId: string, baseUrl: string): Session => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       enableJsonResponse: true, // 纯请求/响应工具面，JSON 体便于 curl/调试；SSE 流式响应暂无需求
@@ -125,7 +135,7 @@ export function createMcpHandler(
       }
       active += 1;
       try {
-        const result = await runTool(name, args, createContext({ botId }));
+        const result = await runTool(name, args, createContext(session));
         mcpLog.debug("tool call", {
           tool: name,
           error: result.isError === true,
@@ -144,8 +154,9 @@ export function createMcpHandler(
       const sid = transport.sessionId;
       if (sid !== undefined) sessions.delete(sid);
     };
+    const session: Session = { server, transport, botId, baseUrl };
     void server.connect(transport);
-    return { server, transport, botId };
+    return session;
   };
 
   // 每个请求都已在 HTTP 层完成 Bearer→bot 解析；这里只做会话归属一致性校验
@@ -187,7 +198,9 @@ export function createMcpHandler(
         typeof body === "object" &&
         isInitializeRequest(body)
       ) {
-        const session = createSession(botId);
+        const host = (req.headers.host ?? "").trim();
+        const baseUrl = host !== "" ? `http://${host}` : "";
+        const session = createSession(botId, baseUrl);
         await session.transport.handleRequest(req, res, body);
         const sid2 = session.transport.sessionId;
         if (sid2 !== undefined) sessions.set(sid2, session);

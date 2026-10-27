@@ -3,6 +3,7 @@
 // MCP 官方 SDK 的 StreamableHTTPServerTransport 基于 Node 原生 req/res，Fastify 可直接对接，零适配层。
 
 import Fastify from "fastify";
+import type { AssetStore } from "../assets";
 import type { BotRegistry } from "../bots";
 import type { GatewayStatus, GatewaySupervisor } from "../gateway";
 import type { TokenService } from "../gateway/token";
@@ -12,6 +13,8 @@ import type { DB } from "../store/db";
 import { Repo } from "../store/repo";
 import { bearerOk, createMcpHandler } from "../tools/mcp";
 import { registerUiRoutes } from "./ui";
+
+const ASSET_MAX_BYTES = 20 * 1024 * 1024;
 
 export interface ServerDeps {
   log: Logger;
@@ -27,6 +30,8 @@ export interface ServerDeps {
   botStatuses?: () => GatewayStatus[];
   /** MCP 工具执行全局并发上限（测试注入口；缺省 8，语义见 mcp.ts McpDeps） */
   maxConcurrent?: number;
+  /** 资产存储（request_upload 票据 + PUT /assets 数据端点 + asset: 引用）；缺省=未装配 */
+  assets?: AssetStore;
 }
 
 /** Authorization: Bearer <token> 提取；无效返回 null */
@@ -45,6 +50,14 @@ export function buildServer(deps: ServerDeps) {
   app.addHook("onRequest", async (req) => {
     httpLog.debug("req", { method: req.method, path: req.url.split("?")[0] });
   });
+
+  // 数据平面：非 JSON 的请求体（资产直传 octet-stream 等）按 buffer 接收，
+  // 上限 20MB（控制平面 /mcp、/ui/api 的 JSON 由内置 parser 处理，互不影响）
+  app.addContentTypeParser(
+    "*",
+    { parseAs: "buffer", bodyLimit: ASSET_MAX_BYTES },
+    (_req, body, done) => done(null, body),
+  );
 
   app.get("/healthz", async () => {
     let dbOk = true;
@@ -71,6 +84,11 @@ export function buildServer(deps: ServerDeps) {
     sender: deps.sender,
     bots: deps.registry,
     supervisor: deps.supervisor,
+    assets: deps.assets,
+    agentTokenOf:
+      deps.assets !== undefined && deps.registry !== undefined
+        ? (botId) => deps.registry!.agentTokenOf(botId)
+        : undefined,
     maxConcurrent: deps.maxConcurrent,
     version,
   });
@@ -98,6 +116,62 @@ export function buildServer(deps: ServerDeps) {
       reply.hijack(); // 响应由 SDK transport 直接写原生 res
       await handleMcp(req.raw, reply.raw, req.body, botId);
     },
+  });
+
+  // 数据平面：资产直传端点（票据自鉴权，不走 Bearer）。字节从执行环境流到此落盘，
+  // 不经过 MCP 消息与模型上下文（控制平面/数据平面分离）。
+  app.put("/assets/:botId/:assetId", async (req, reply) => {
+    if (deps.assets === undefined) {
+      return reply.code(501).send({ error: "资产功能未启用。" });
+    }
+    if (deps.registry === undefined) {
+      return reply.code(501).send({ error: "注册表未装配。" });
+    }
+    const { botId, assetId } = req.params as {
+      botId: string;
+      assetId: string;
+    };
+    const code = deps.assets.verifyPut(
+      botId,
+      assetId,
+      deps.registry.agentTokenOf(botId),
+      (req.query as Record<string, unknown>).exp,
+      (req.query as Record<string, unknown>).sig,
+    );
+    if (code !== null) {
+      const why: Record<number, string> = {
+        400: "缺少 exp/sig 参数。",
+        403: "票据无效：bot 不存在、token 已轮换、签名不符或已过期。",
+        404: "asset_id 非法。",
+        409: "该 asset_id 已上传过（票据单次使用）。",
+        410: "票据已过期（15 分钟），请重新 request_upload。",
+      };
+      return reply.code(code).send({ error: why[code] ?? "校验失败。" });
+    }
+    const body = req.body;
+    if (!Buffer.isBuffer(body)) {
+      return reply
+        .code(400)
+        .send({ error: "请求体缺失：请以二进制（--data-binary）直传图片字节。" });
+    }
+    try {
+      const { mime, size } = deps.assets.save(assetId, body);
+      httpLog.info("asset stored", { assetId, botId, mime, size });
+      return {
+        ok: true,
+        asset_id: assetId,
+        mime,
+        size,
+        next: `send_media({ group, media: "asset:${assetId}", text: "配文" })`,
+      };
+    } catch (e) {
+      if (e instanceof RangeError) {
+        return reply.code(415).send({
+          error: "内容不是图片（魔数嗅探失败）。仅支持 png/jpeg/gif/webp/bmp。",
+        });
+      }
+      throw e;
+    }
   });
 
   // WebUI（M7）：registry+supervisor+tokens 齐备才挂载（缺省=测试旧行为，不挂 /ui）

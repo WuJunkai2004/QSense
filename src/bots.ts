@@ -251,6 +251,14 @@ export class BotRegistry {
       .get(token) as { appid: string } | undefined;
     return row?.appid ?? null;
   }
+
+  /** 资产上传票据签发/校验：appid → agent_token（bot 不存在或已轮换=null） */
+  agentTokenOf(appid: string): string | null {
+    const row = this.deps.db
+      .prepare("SELECT agent_token FROM bots WHERE appid = ?")
+      .get(appid) as { agent_token: string } | undefined;
+    return row?.agent_token ?? null;
+  }
 }
 
 function newAgentToken(): string {

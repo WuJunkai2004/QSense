@@ -80,13 +80,14 @@ export interface SendApi {
     targetId: string,
     creds: { appId: string; clientSecret: string },
     src: MediaSource,
-  ): Promise<string>;
-}
+  ): Promise<string>;}
 
-/** 富媒体来源（传输自足：MCP 服务可能与智能体不同机，不收本地路径） */
+/** 富媒体来源（传输自足：MCP 服务可能与智能体不同机，不收智能体侧本地路径；
+ * "file" 为服务端资产（DATA_DIR/assets，经 request_upload 票据上传），跨机安全） */
 export type MediaSource =
   | { kind: "url"; url: string }
-  | { kind: "b64"; data: string };
+  | { kind: "b64"; data: string }
+  | { kind: "file"; path: string };
 
 /** 解析 send_media 的 media 参数：http(s):// URL 或 data:image/...;base64,… 内联 */
 export function parseMediaSource(media: string): MediaSource {
@@ -107,8 +108,10 @@ export interface SenderDeps {
   bots?: BotRegistry;
   /** 测试注入：覆盖限额默认值 */
   limits?: Partial<SendLimits>;
-  /** 测试注入：替换真实 MessageApi */
+  /** 测试注入：替换真实 MessageApi/MediaApi */
   apiFor?: (app: BotApp) => SendApi;
+  /** 资产存储（send_media 的 asset:<id> 引用解析）；缺省=资产功能未装配 */
+  assets?: import("../assets").AssetStore;
 }
 
 /** 内存令牌桶：容量=配额，按 refillPerMin 匀速回填 */
@@ -209,7 +212,11 @@ export class Sender {
               targetId,
               MediaFileType.IMAGE,
               creds,
-              src.kind === "url" ? { url: src.url } : { fileData: src.data },
+              src.kind === "url"
+                ? { url: src.url }
+                : src.kind === "file"
+                  ? { localPath: src.path }
+                  : { fileData: src.data },
             )
             .then((up) => up.file_info),
       };
@@ -604,7 +611,16 @@ export class Sender {
     quoteMsgId?: string,
   ): Promise<SendResult> {
     const app = this.gate(botId, groupOpenid); // 先门禁：上传同属写路径前置
-    const src = parseMediaSource(mediaParam);
+    // 来源解析：asset:<id>（服务端资产）→ file；其余按 URL / data: 内联
+    let src: MediaSource;
+    if (mediaParam.startsWith("asset:")) {
+      const id = mediaParam.slice("asset:".length).trim();
+      const p = this.deps.assets?.pathOf(id) ?? null;
+      if (p === null) throw new Error(t("asset_not_found", { id }));
+      src = { kind: "file", path: p };
+    } else {
+      src = parseMediaSource(mediaParam);
+    }
     const { bindMsgId, quote } = this.resolveChannel(
       botId,
       groupOpenid,

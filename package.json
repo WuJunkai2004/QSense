@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
     "dev": "node build.mjs && node --watch dist/index.js",
-    "test": "tsx --test test/config.test.ts test/store.test.ts test/logger.test.ts test/gateway.test.ts test/dedup.test.ts test/normalize.test.ts test/mcp.test.ts test/sender.test.ts test/bots.test.ts test/ui-api.test.ts"
+    "test": "tsx --test test/config.test.ts test/store.test.ts test/logger.test.ts test/gateway.test.ts test/dedup.test.ts test/normalize.test.ts test/assets.test.ts test/mcp.test.ts test/sender.test.ts test/bots.test.ts test/ui-api.test.ts"
   },
   "license": "MIT",
   "dependencies": {

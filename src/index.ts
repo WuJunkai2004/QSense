@@ -3,6 +3,7 @@
 // Fastify（/healthz；M3 起 /mcp；M7 起 /ui）→ 优雅退出（SIGINT/SIGTERM）。
 
 import { loadConfig, loadDotEnv } from "./config";
+import { AssetStore } from "./assets";
 import { BotRegistry } from "./bots";
 import { GatewaySupervisor, type GatewayStatus } from "./gateway";
 import { fetchGatewayUrl } from "./gateway/url";
@@ -15,6 +16,7 @@ import { buildServer } from "./server/http";
 import { openDatabase, runMigrations } from "./store/db";
 import { migrations } from "./store/migrations";
 import { Repo } from "./store/repo";
+import { join } from "node:path";
 
 const VERSION = "0.2.0";
 
@@ -57,12 +59,14 @@ async function main(): Promise<void> {
       await fetchGatewayUrl(token);
     },
   });
+  const assets = new AssetStore(join(config.dataDir, "assets"));
   const sender = new Sender({
     log,
     db,
     repo,
     tokenManager: tokens.sdk,
     bots: registry,
+    assets,
   });
 
   // 各 bot 网关状态快照（/healthz 无关；list_bots 与 /ui/api/bootstrap 展示用）
@@ -119,6 +123,7 @@ async function main(): Promise<void> {
     supervisor: gateway,
     tokens,
     botStatuses: () => [...statuses.values()],
+    assets,
   });
 
   const purgeOld = (): void => {
