@@ -112,8 +112,6 @@ npm start       # 起服务（读取 .env，自动连官方网关）
 ```
 
 - `scripts/mcp-call.mts`：单工具调试器
-- `examples/integrations.md`：cron 日报流水线 + 人格会话 prompt 样例
-- `PROGRESS.md`：里程碑与踩坑清单；`DESIGN.md` 架构；`API-FACTS.md` 官方事实
 
 ## 已验证（2026-10-24 真机）
 
