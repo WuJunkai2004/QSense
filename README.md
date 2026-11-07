@@ -60,7 +60,7 @@ M9 起 env 只承担部署拓扑与运维参数；**bot 注册（appid/secret/�
 
 ## MCP 工具面（14 个）
 
-**参数命名（2026-11-07 硬切换）**：会话标识参数统一叫 **`id`**（群聊=群 openid；私聊=对方 user_openid，配 `type:"chat"`）——与 `list_all`/`list_new` 返回的 `conversations[].id` 对齐；传旧名 `group` 报可操作更名提示。消息标识保留 `msg_id`/`quote_msg_id`；返回值成员标识统一 `id`/`member_id`（原 `openid`/`member_openid`）。
+**参数命名（2026-11-07 硬切换）**：会话标识参数统一叫 **`id`**（群聊=群 openid；私聊=对方 user_openid）——与 `list_all`/`list_new` 返回的 `conversations[].id` 对齐；传旧名 `group` 报可操作更名提示。**会话侧别由服务端按 id 自动探测**（openid 是权威定位标识，群/用户 openid 命名空间互斥；群侧证据=消息缓存/注册表/白名单，单聊侧=单聊缓存），读写工具无 `type` 参数（仅 `list_all` 保留 `type` 作结果过滤）。消息标识保留 `msg_id`/`quote_msg_id`；返回值成员标识统一 `id`/`member_id`（原 `openid`/`member_openid`）。
 
 **管理（自服务）**：`register_bot`（注册新 bot：官方凭据校验 → 落库 → 返回 agent_token 仅此一次；token 轮换收归 WebUI 设置页——调用即自毁凭证的操作不留给 agent）
 

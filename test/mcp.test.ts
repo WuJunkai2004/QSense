@@ -784,7 +784,7 @@ test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防�
   }
 });
 
-test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存；锚点跨侧可操作提示", async () => {
+test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存；侧别由 id 自动探测", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
@@ -832,18 +832,18 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     assert.equal(chat.id, USER);
     assert.equal(chat.unread, 2);
 
-    // get_new type:"chat"：拉取即已读，重复调用不重拉；引用回溯内联被引原文
+    // get_new：拉取即已读，重复调用不重拉；引用回溯内联被引原文（侧别由 id 探测）
     const first = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { id: USER, type: "chat" },
+        arguments: { id: USER },
       })) as never,
     );
     assert.equal(first.count, 2);
     const again = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { id: USER, type: "chat" },
+        arguments: { id: USER },
       })) as never,
     );
     assert.equal(again.count, 0, "水位已推进，重拉为空");
@@ -871,14 +871,14 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     const fts = payloadOf(
       (await client.callTool({
         name: "search",
-        arguments: { id: USER, type: "chat", query: "单聊原文" },
+        arguments: { id: USER, query: "单聊原文" },
       })) as never,
     );
     assert.equal(fts.count, 1, "FTS 只命中 C1");
     const like = payloadOf(
       (await client.callTool({
         name: "search",
-        arguments: { id: USER, type: "chat", query: "引用" },
+        arguments: { id: USER, query: "引用" },
       })) as never,
     );
     assert.equal(like.count, 1, "LIKE 兜底命中 C2 令牌行");
@@ -887,12 +887,12 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     const around = payloadOf(
       (await client.callTool({
         name: "browse",
-        arguments: { id: USER, type: "chat", msg_id: "C1", mode: "around" },
+        arguments: { id: USER, msg_id: "C1", mode: "around" },
       })) as never,
     );
     assert.equal(around.count, 2, "前后文含 C1/C2 两条");
 
-    // 群聊侧不受影响（type 缺省=group，向后兼容）
+    // 群聊侧不受影响（探测：GROUP 命中群缓存）
     const g = payloadOf(
       (await client.callTool({
         name: "get_new",
@@ -901,15 +901,15 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     );
     assert.equal(g.count, 5, "群聊种子消息照常拉取");
 
-    // 锚点跨侧提示：私聊会话里查群聊消息（及反向）→ 指出实际所在与应传 type
+    // 探测语义：侧别由 id 决定——单聊 id 查群消息（及反向）均报"不存在，可先 search"
     const wrongSide = (await client.callTool({
       name: "context",
-      arguments: { id: USER, type: "chat", msg_id: "M1" },
+      arguments: { id: USER, msg_id: "M1" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(wrongSide.isError, true);
     assert.ok(
-      wrongSide.content[0]!.text.includes('type:"group"'),
-      "提示消息在群聊侧",
+      wrongSide.content[0]!.text.includes("search"),
+      "跨会话锚点报可定位错误",
     );
     const wrongSide2 = (await client.callTool({
       name: "context",
@@ -917,25 +917,28 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(wrongSide2.isError, true);
     assert.ok(
-      wrongSide2.content[0]!.text.includes('type:"chat"'),
-      "提示消息在私聊侧",
+      wrongSide2.content[0]!.text.includes("search"),
+      "反向同理",
     );
 
     // 真不存在的消息 → 仍走"可先 search"路径
     const miss = (await client.callTool({
       name: "context",
-      arguments: { id: USER, type: "chat", msg_id: "NOPE" },
+      arguments: { id: USER, msg_id: "NOPE" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(miss.isError, true);
     assert.ok(miss.content[0]!.text.includes("search"));
 
-    // type 非法值 → 可操作错误
-    const badType = (await client.callTool({
+    // 探测失败 → 可操作错误（未知 id：两侧无缓存且不在白名单）
+    const unknown = (await client.callTool({
       name: "get_new",
-      arguments: { id: USER, type: "all" },
+      arguments: { id: "NO_SUCH_SESSION" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
-    assert.equal(badType.isError, true);
-    assert.ok(badType.content[0]!.text.includes("group/chat"));
+    assert.equal(unknown.isError, true);
+    assert.ok(
+      unknown.content[0]!.text.includes("无法定位会话"),
+      "探测失败应给可操作提示",
+    );
   } finally {
     try {
       await client?.close();

@@ -642,7 +642,7 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
       limits: { perGroupDaily: 1 },
       apiFor: () => mock,
     });
-    const ctx = { repo: fx.repo, botId: BOT, sender };
+    const ctx = { repo: fx.repo, botId: BOT, sender, bots: fx.registry };
     const ok = await runTool("send", { id: GROUP, text: "首条" }, ctx);
     assert.ok(!ok.isError);
 

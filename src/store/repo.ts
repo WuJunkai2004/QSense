@@ -536,25 +536,30 @@ export class Repo {
   }
 
   /**
-   * 跨会话 msg_id 定位（官方 msg_id 全局唯一，不限会话）：
-   * 仅服务端在锚点未命中时用于"消息实际在另一侧缓存"的可操作提示，不影响读取语义。
+   * 会话侧别自动探测（读写工具的 type 参数退役后的裁决源）：
+   * openid 是权威定位标识（群 openid 与用户 openid 命名空间互斥、不可能同值），
+   * 按缓存归属即可唯一裁决：group=群消息缓存或群注册表；chat=单聊消息缓存；null=两侧均无。
    */
-  findC2cMessageByMsgId(botId: string, msgId: string): MsgRow | null {
-    const row = this.db
-      .prepare(
-        "SELECT rowid AS rid, * FROM c2c_messages WHERE bot_id = ? AND msg_id = ?",
-      )
-      .get(botId, msgId) as MsgRow | undefined;
-    return row ?? null;
-  }
-
-  findGroupMessageByMsgId(botId: string, msgId: string): MsgRow | null {
-    const row = this.db
-      .prepare(
-        "SELECT rowid AS rid, * FROM messages WHERE bot_id = ? AND msg_id = ?",
-      )
-      .get(botId, msgId) as MsgRow | undefined;
-    return row ?? null;
+  detectSessionKind(botId: string, id: string): "group" | "chat" | null {
+    const inGroup =
+      this.db
+        .prepare(
+          "SELECT 1 FROM messages WHERE bot_id = ? AND group_openid = ? LIMIT 1",
+        )
+        .get(botId, id) !== undefined ||
+      this.db
+        .prepare(
+          "SELECT 1 FROM groups WHERE bot_id = ? AND group_openid = ? LIMIT 1",
+        )
+        .get(botId, id) !== undefined;
+    if (inGroup) return "group";
+    const inChat =
+      this.db
+        .prepare(
+          "SELECT 1 FROM c2c_messages WHERE bot_id = ? AND user_openid = ? LIMIT 1",
+        )
+        .get(botId, id) !== undefined;
+    return inChat ? "chat" : null;
   }
 
   /**
