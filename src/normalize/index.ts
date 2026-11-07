@@ -103,7 +103,8 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
     scopeId = typeof r.group_openid === "string" ? r.group_openid : "";
   } else if (event.type === "C2C_MESSAGE_CREATE") {
     scope = "c2c";
-    scopeId = typeof r.user_openid === "string" ? r.user_openid : "";
+    // 官方单聊事件体无顶层 user_openid：作者标识在 author 内（author.user_openid，兜底 author.id）
+    scopeId = authorField(r, ["user_openid", "id"]);
   } else {
     return null;
   }

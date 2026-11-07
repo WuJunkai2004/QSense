@@ -321,10 +321,10 @@ test("M2-7 C2C 单聊入库 + 用户级主动消息开关（kv）", () => {
       repo,
       ev("C2C_MESSAGE_CREATE", {
         id: "C1",
-        user_openid: "C2C_OPENID_U1",
         content: "私聊你好",
         timestamp: "2026-10-24T21:00:00+08:00",
-        author: { user_openid: "C2C_OPENID_U1" },
+        // 官方真实载荷：user_openid 仅在 author 内，无顶层 user_openid
+        author: { id: "C2C_OPENID_U1", user_openid: "C2C_OPENID_U1" },
       }),
     );
     const row = db

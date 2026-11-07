@@ -271,7 +271,7 @@ export const TOOLS: ToolDef[] = [
     name: "list_all",
     description:
       "列出全部会话（群聊+私聊）：含未读数与最后消息时间，按最近消息倒序。" +
-      "人类视角：打开QQ看到的完整消息列表。私聊需 bot 具备单聊能力，当前恒为空。",
+      "人类视角：打开QQ看到的完整消息列表。",
     inputSchema: {
       type: "object",
       properties: {

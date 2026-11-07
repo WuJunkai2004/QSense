@@ -335,7 +335,7 @@ export class Repo {
     });
   }
 
-  /** 私聊会话列表（自建于 c2c_messages 聚合；当前 bot 无单聊事件，恒为空） */
+  /** 私聊会话列表（自建于 c2c_messages 聚合；有单聊消息即有条目） */
   listChatConversations(
     botId: string,
   ): Array<{ user_openid: string; unread: number; last_ts: number | null }> {
