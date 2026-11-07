@@ -420,6 +420,24 @@ export class Repo {
     });
   }
 
+  /** WebUI 单聊会话列表：openid + 最后一条消息摘要（作者名=名册映射，见 saveC2cMessage） */
+  listChatsWithLast(botId: string): Array<Record<string, unknown>> {
+    return this.db
+      .prepare(
+        `
+        SELECT c.user_openid, lm.ts AS last_ts, lm.content AS last_content,
+               lm.author_name AS last_author
+        FROM (
+          SELECT user_openid, MAX(rowid) AS rid FROM c2c_messages
+          WHERE bot_id = ? GROUP BY user_openid
+        ) c
+        JOIN c2c_messages lm ON lm.rowid = c.rid
+        ORDER BY lm.ts DESC
+      `,
+      )
+      .all(botId) as Array<Record<string, unknown>>;
+  }
+
   /** 私聊会话列表（自建于 c2c_messages 聚合；有单聊消息即有条目） */
   listChatConversations(
     botId: string,
@@ -707,6 +725,26 @@ export class Repo {
       `,
       )
       .all(botId, groupOpenid, beforeRid, beforeRid ?? 0, limit) as MsgRow[];
+    return rows.reverse();
+  }
+
+  /** WebUI 单聊消息流翻页（messagesPageBefore 的 c2c_messages 镜像）：beforeRid=null 取最新一页；
+   *  返回按 rowid 升序（气泡渲染序） */
+  c2cMessagesPageBefore(
+    botId: string,
+    userOpenid: string,
+    beforeRid: number | null,
+    limit: number,
+  ): MsgRow[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT rowid AS rid, * FROM c2c_messages
+        WHERE bot_id = ? AND user_openid = ? AND (? IS NULL OR rowid < ?)
+        ORDER BY rowid DESC LIMIT ?
+      `,
+      )
+      .all(botId, userOpenid, beforeRid, beforeRid ?? 0, limit) as MsgRow[];
     return rows.reverse();
   }
 

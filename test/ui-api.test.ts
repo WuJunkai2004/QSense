@@ -49,6 +49,8 @@ function makeApiMock(): MockApi & SendApi {
 interface Fixture {
   baseUrl: string;
   api: MockApi & SendApi;
+  db: import("../src/store/db").DB;
+  repo: Repo;
   added: string[];
   removed: string[];
   cleared: string[];
@@ -154,6 +156,8 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     api,
+    db,
+    repo,
     added,
     removed,
     cleared,
@@ -611,6 +615,121 @@ test("M7-U10 quota：水位与令牌桶快照", async () => {
     assert.equal(body.send_enabled, true);
     assert.equal(body.proactive_sent_today, 0);
     assert.ok(body.buckets !== undefined);
+  } finally {
+    await fx.close();
+  }
+});
+
+// —— M10 单聊（C2C）：WebUI 会话合并 / 镜像读取 / 发送与补记 ——
+
+test("M10 UI 单聊：type=all 合并会话（名册反查昵称）+ type=chat 镜像读取 + 发送走 c2c scope", async () => {
+  const fx = await setupServer();
+  try {
+    const USER = "C2C_USER_1";
+    // 名册（映射源）：该用户在本 bot 群里发过言；单聊载荷本身无昵称
+    fx.db
+      .prepare(
+        "INSERT INTO members(bot_id, group_openid, member_openid, username, member_role, first_seen, last_seen, msg_count) VALUES (?, ?, ?, 'Venti', 'member', ?, ?, 1)",
+      )
+      .run(BOT, GROUP, USER, Date.now(), Date.now());
+    fx.repo.saveC2cMessage({
+      botId: BOT,
+      scope: "c2c",
+      scopeId: USER,
+      msgId: "C1",
+      authorOpenid: USER,
+      ts: Date.now() - 60_000,
+      content: "你好",
+      mentions: [],
+      elements: undefined,
+      attachments: [],
+      raw: {},
+    });
+    fx.repo.saveC2cMessage({
+      botId: BOT,
+      scope: "c2c",
+      scopeId: USER,
+      msgId: "C2",
+      authorOpenid: USER,
+      ts: Date.now(),
+      content: "nih",
+      mentions: [],
+      elements: undefined,
+      attachments: [],
+      raw: {},
+    });
+
+    // ① 会话列表（type=all 缺省）：单聊条目合并，最后消息作者=名册映射名
+    const sessions = (await (
+      await get(fx.baseUrl, `/ui/api/groups?bot=${BOT}`, authHeaders())
+    ).json()) as {
+      groups: Array<{
+        type: string;
+        group_openid: string;
+        last: { author: string | null; snippet: string } | null;
+      }>;
+    };
+    const chat = sessions.groups.find((g) => g.type === "chat");
+    assert.ok(chat !== undefined, "type=all 应合并单聊会话");
+    assert.equal(chat.group_openid, USER);
+    assert.equal(chat.last?.author, "Venti");
+    assert.equal(chat.last?.snippet, "nih");
+    assert.equal(
+      sessions.groups.find((g) => g.type === "group")?.group_openid,
+      GROUP,
+      "群聊条目不受影响",
+    );
+
+    // ② 消息镜像：type=chat 读 c2c_messages（升序），作者名已映射
+    const msgs = (await (
+      await get(
+        fx.baseUrl,
+        `/ui/api/messages?bot=${BOT}&group=${USER}&type=chat&limit=10`,
+        authHeaders(),
+      )
+    ).json()) as {
+      messages: Array<{
+        msg_id: string;
+        content: string | null;
+        author: { name: string | null };
+      }>;
+    };
+    assert.deepEqual(
+      msgs.messages.map((m) => m.msg_id),
+      ["C1", "C2"],
+    );
+    assert.equal(msgs.messages[0].author.name, "Venti");
+
+    // ③ 发送：type=chat → 官方调用 scope=c2c（C2 在 60 分钟被动窗内，免 opt-in）
+    const ok = await fetch(`${fx.baseUrl}/ui/api/send`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        bot: BOT,
+        group: USER,
+        type: "chat",
+        text: "UI 单聊回复",
+        reply_msg_id: "C2",
+      }),
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(fx.api.calls.length, 1);
+    assert.equal(fx.api.calls[0].scope, "c2c");
+    assert.equal(fx.api.calls[0].targetId, USER);
+
+    // ④ 外发补记落 c2c_messages（direction=1），消息流可见
+    const after = (await (
+      await get(
+        fx.baseUrl,
+        `/ui/api/messages?bot=${BOT}&group=${USER}&type=chat&limit=10`,
+        authHeaders(),
+      )
+    ).json()) as {
+      messages: Array<{ out: boolean; content: string | null }>;
+    };
+    const sent = after.messages.find((m) => m.out === true);
+    assert.ok(sent !== undefined, "发送后 c2c 镜像应有 out=true 行");
+    assert.equal(sent.content, "UI 单聊回复");
   } finally {
     await fx.close();
   }

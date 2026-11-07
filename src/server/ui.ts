@@ -373,28 +373,65 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
 
       plugin.get("/groups", async (req, reply) => {
         try {
-          const botId = resolveBot((req.query as Record<string, unknown>).bot);
-          const groups = repo.listGroupsWithLast(botId).map((g) => ({
-            group_openid: g.group_openid,
-            full_msg_enabled: g.full_msg_enabled === 1,
-            member_count: Number(g.member_count ?? 0),
-            updated_at:
-              g.updated_at !== null
-                ? new Date(Number(g.updated_at)).toISOString()
-                : null,
-            last:
-              g.last_ts !== null
-                ? {
-                    ts: new Date(Number(g.last_ts)).toISOString(),
-                    author: (g.last_author as string | null) ?? null,
-                    snippet: ((g.last_content as string | null) ?? "").slice(
-                      0,
-                      80,
-                    ),
-                  }
-                : null,
-          }));
-          return { bot: botId, groups };
+          const q = req.query as Record<string, unknown>;
+          const botId = resolveBot(q.bot);
+          // type=all（缺省）合并单聊会话：单聊自建于 c2c_messages，作者名=群聊名册映射
+          // （saveC2cMessage）；会话键统一走 group_openid 字段（单聊时为对端 user_openid）
+          const type = q.type === "group" || q.type === "chat" ? q.type : "all";
+          const sessionTs = (s: {
+            last: { ts: string } | null;
+            updated_at: string | null;
+          }): number =>
+            Date.parse(s.last?.ts ?? s.updated_at ?? "1970-01-01T00:00:00Z");
+          const groups =
+            type === "chat"
+              ? []
+              : repo.listGroupsWithLast(botId).map((g) => ({
+                  type: "group" as const,
+                  group_openid: g.group_openid as string,
+                  full_msg_enabled: g.full_msg_enabled === 1,
+                  member_count: Number(g.member_count ?? 0),
+                  updated_at:
+                    g.updated_at !== null
+                      ? new Date(Number(g.updated_at)).toISOString()
+                      : null,
+                  last:
+                    g.last_ts !== null
+                      ? {
+                          ts: new Date(Number(g.last_ts)).toISOString(),
+                          author: (g.last_author as string | null) ?? null,
+                          snippet: ((g.last_content as string | null) ?? "").slice(
+                            0,
+                            80,
+                          ),
+                        }
+                      : null,
+                }));
+          const chats =
+            type === "group"
+              ? []
+              : repo.listChatsWithLast(botId).map((c) => ({
+                  type: "chat" as const,
+                  group_openid: c.user_openid as string,
+                  full_msg_enabled: null,
+                  member_count: 0,
+                  updated_at: null,
+                  last:
+                    c.last_ts !== null
+                      ? {
+                          ts: new Date(Number(c.last_ts)).toISOString(),
+                          author: (c.last_author as string | null) ?? null,
+                          snippet: ((c.last_content as string | null) ?? "").slice(
+                            0,
+                            80,
+                          ),
+                        }
+                      : null,
+                }));
+          const sessions = [...groups, ...chats].sort(
+            (a, b) => sessionTs(b) - sessionTs(a),
+          );
+          return { bot: botId, groups: sessions };
         } catch (e) {
           const m = mapError(uiLog, e);
           reply.code(m.status).send({ error: m.message });
@@ -422,6 +459,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const botId = resolveBot(q.bot);
           const group = groupOf(q.group);
           const limit = intParam(q.limit, 1, 200, 50);
+          // type=chat 读 c2c_messages 镜像（group 参数此时为对端 user_openid，读取层同形）
+          const isChat = q.type === "chat";
           const out = (rows: MsgRow[]) =>
             rows.map((r) => ({
               rid: r.rid,
@@ -432,7 +471,9 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
                 name: r.author_name,
                 role: r.author_role,
               },
-              content: repo.resolveQuotes(botId, group, r.content),
+              content: isChat
+                ? repo.resolveQuotesC2c(botId, group, r.content)
+                : repo.resolveQuotes(botId, group, r.content),
               has_attachments: r.attachments_json !== null,
               attachments: r.attachments_json
                 ? JSON.parse(r.attachments_json)
@@ -445,14 +486,18 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           if (q.after !== undefined && q.after !== "") {
             // 轮询模式：rowid > after 的增量（升序）
             const after = intParam(q.after, 0, Number.MAX_SAFE_INTEGER, 0);
-            const rows = repo.getMessagesAfter(botId, group, after, limit);
+            const rows = isChat
+              ? repo.getC2cMessagesAfter(botId, group, after, limit)
+              : repo.getMessagesAfter(botId, group, after, limit);
             return { bot: botId, group, mode: "after", messages: out(rows) };
           }
           const before =
             q.before !== undefined && q.before !== ""
               ? intParam(q.before, 0, Number.MAX_SAFE_INTEGER, 0)
               : null;
-          const rows = repo.messagesPageBefore(botId, group, before, limit);
+          const rows = isChat
+            ? repo.c2cMessagesPageBefore(botId, group, before, limit)
+            : repo.messagesPageBefore(botId, group, before, limit);
           return {
             bot: botId,
             group,
@@ -476,7 +521,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           if (msgId === "") {
             throw new BotRegistryError("缺少 msg_id 参数。");
           }
-          const row = repo.getMessageByMsgId(botId, group, msgId);
+          const isChat = q.type === "chat";
+          const row = isChat
+            ? repo.getC2cMessageByMsgId(botId, group, msgId)
+            : repo.getMessageByMsgId(botId, group, msgId);
           if (row === null) {
             reply
               .code(404)
@@ -492,7 +540,9 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               name: row.author_name,
               role: row.author_role,
             },
-            content: repo.resolveQuotes(botId, group, row.content),
+            content: isChat
+              ? repo.resolveQuotesC2c(botId, group, row.content)
+              : repo.resolveQuotes(botId, group, row.content),
             out: row.direction === 1,
             mentions: row.mentions_json ? JSON.parse(row.mentions_json) : null,
             attachments: row.attachments_json
@@ -513,6 +563,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const q = req.query as Record<string, unknown>;
           const botId = resolveBot(q.bot);
           const group = groupOf(q.group);
+          // 单聊无名册（openid 按 bot 隔离，映射名见 saveC2cMessage）；返回空列表保持响应同形
+          if (q.type === "chat") {
+            return { bot: botId, group, members: [] };
+          }
           const limit = intParam(q.limit, 1, 500, 200);
           const members = repo.listMembers(botId, group, limit).map((m) => ({
             member_openid: m.member_openid,
@@ -589,6 +643,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           typeof body.reply_msg_id === "string" && body.reply_msg_id !== ""
             ? body.reply_msg_id
             : undefined;
+        // type=chat → 单聊（group 字段=对端 user_openid；门禁=opt-in 开关，见 Sender.gate）
+        const kind = body.type === "chat" ? ("chat" as const) : ("group" as const);
         if (group === "" || text.trim() === "") {
           reply.code(400).send({ error: "参数 group 与 text 均不能为空。" });
           return;
@@ -598,22 +654,45 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const botId = resolveBot(body.bot);
           const result =
             replyMsgId !== undefined
-              ? await sender.reply(botId, group, replyMsgId, text, false, quote)
-              : await sender.proactive(botId, group, text);
+              ? await sender.reply(
+                  botId,
+                  group,
+                  replyMsgId,
+                  text,
+                  false,
+                  quote,
+                  undefined,
+                  kind,
+                )
+              : await sender.proactive(botId, group, text, undefined, undefined, kind);
           // 官方不回推 bot 自发消息：发送成功后本地补记，WebUI 刷新后仍可见。
           // 落库失败不影响发送结果（消息已出账，只记日志）。
           try {
-            repo.saveOutgoingGroupMessage({
-              botId,
-              groupOpenid: group,
-              msgId:
-                result.provider_msg_id ??
-                `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              content: text,
-              ts: Date.now(),
-              authorName:
-                registry.list().find((b) => b.appid === botId)?.name ?? null,
-            });
+            if (kind === "chat") {
+              repo.saveOutgoingC2cMessage({
+                botId,
+                userOpenid: group,
+                msgId:
+                  result.provider_msg_id ??
+                  `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                content: text,
+                ts: Date.now(),
+                authorName:
+                  registry.list().find((b) => b.appid === botId)?.name ?? null,
+              });
+            } else {
+              repo.saveOutgoingGroupMessage({
+                botId,
+                groupOpenid: group,
+                msgId:
+                  result.provider_msg_id ??
+                  `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                content: text,
+                ts: Date.now(),
+                authorName:
+                  registry.list().find((b) => b.appid === botId)?.name ?? null,
+              });
+            }
           } catch (pe) {
             const pm = pe instanceof Error ? pe.message : String(pe);
             uiLog.error("outgoing message persist failed", {
