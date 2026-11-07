@@ -261,7 +261,7 @@ test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", a
     // 双重门禁未开（发送开关缺省关）→ 写工具硬拒绝且不炸
     const denied = (await client.callTool({
       name: "send",
-      arguments: { group: GROUP, text: "test" },
+      arguments: { id: GROUP, text: "test" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(denied.isError, true);
     assert.ok(
@@ -306,7 +306,7 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
     const first = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { group: GROUP },
+        arguments: { id: GROUP },
       })) as never,
     );
     assert.equal(first.count, 5);
@@ -316,7 +316,7 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
     const second = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { group: GROUP },
+        arguments: { id: GROUP },
       })) as never,
     );
     assert.equal(second.count, 0);
@@ -343,7 +343,7 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
     const inc = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { group: GROUP },
+        arguments: { id: GROUP },
       })) as never,
     );
     assert.deepEqual(
@@ -356,7 +356,7 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
     const search = payloadOf(
       (await client.callTool({
         name: "search",
-        arguments: { group: GROUP, query: "排期表" },
+        arguments: { id: GROUP, query: "排期表" },
       })) as never,
     );
     const hitIds = (search.messages as Array<Record<string, unknown>>).map(
@@ -372,7 +372,7 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
     const search2 = payloadOf(
       (await client.callTool({
         name: "search",
-        arguments: { group: GROUP, query: "开会" },
+        arguments: { id: GROUP, query: "开会" },
       })) as never,
     );
     assert.equal((search2.messages as unknown[]).length, 1);
@@ -394,7 +394,7 @@ test("M6-14 MCP 并发闸（真实路径）：占满上限后第二请求立即�
     // 请求 A：进闸（active=1）并卡在挂起的 sendRaw——账本出现 reserved 行即视为已进闸
     const slowP = client.callTool({
       name: "send",
-      arguments: { group: GROUP, text: "慢请求" },
+      arguments: { id: GROUP, text: "慢请求" },
     }) as Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
     let reserved = 0;
     for (let i = 0; i < 500 && reserved === 0; i++) {
@@ -452,7 +452,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
     const ctx = payloadOf(
       (await client.callTool({
         name: "context",
-        arguments: { group: GROUP, msg_id: "M3", radius: 2 },
+        arguments: { id: GROUP, msg_id: "M3", radius: 2 },
       })) as never,
     );
     const ctxIds = (ctx.messages as Array<Record<string, unknown>>).map(
@@ -463,7 +463,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
     const before = payloadOf(
       (await client.callTool({
         name: "browse",
-        arguments: { group: GROUP, msg_id: "M3", mode: "before", limit: 10 },
+        arguments: { id: GROUP, msg_id: "M3", mode: "before", limit: 10 },
       })) as never,
     );
     // before 方向按时间轴降序（新→旧，聊天回滚语义）
@@ -475,7 +475,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
     const latest = payloadOf(
       (await client.callTool({
         name: "browse",
-        arguments: { group: GROUP, limit: 2 },
+        arguments: { id: GROUP, limit: 2 },
       })) as never,
     );
     assert.deepEqual(
@@ -486,7 +486,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
     const members = payloadOf(
       (await client.callTool({
         name: "list_members",
-        arguments: { group: GROUP },
+        arguments: { id: GROUP },
       })) as never,
     );
     const memberList = members.members as Array<Record<string, unknown>>;
@@ -502,7 +502,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
     // 不存在的锚点 → 可操作错误（isError=true 且不炸）
     const miss = (await client.callTool({
       name: "context",
-      arguments: { group: GROUP, msg_id: "NOPE" },
+      arguments: { id: GROUP, msg_id: "NOPE" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(miss.isError, true);
     assert.ok(miss.content[0]!.text.includes("search"), "错误提示应引导先搜索");
@@ -513,7 +513,18 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
       arguments: {},
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(missing.isError, true);
-    assert.ok(missing.content[0]!.text.includes("group"), "缺参提示应点名参数");
+    assert.ok(missing.content[0]!.text.includes("id"), "缺参提示应点名参数");
+
+    // 旧参数名 group → 可操作的更名提示（存量调用模式可立即自愈）
+    const renamed = (await client.callTool({
+      name: "get_new",
+      arguments: { group: GROUP },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(renamed.isError, true);
+    assert.ok(
+      renamed.content[0]!.text.includes("已更名 id"),
+      "旧名 group 应报更名提示",
+    );
   } finally {
     // 关闭顺序：先客户端（SSE/keep-alive 归还），再服务端；断言失败也不能跳过
     try {
@@ -584,7 +595,7 @@ test("M3-5 引用回溯 + 信封统一：get_new 内联被引原文；条目/信
     const res = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { group: GROUP },
+        arguments: { id: GROUP },
       })) as never,
     );
     assert.ok(!("group" in res), "信封无会话回显字段");
@@ -675,7 +686,7 @@ test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消�
     client = await connectClient(fx.baseUrl, fx.agentToken);
     const ok = (await client.callTool({
       name: "get_media",
-      arguments: { group: GROUP, msg_id: "MD1", n: 1 },
+      arguments: { id: GROUP, msg_id: "MD1", n: 1 },
     })) as { isError?: boolean; content: Array<Record<string, unknown>> };
     assert.equal(ok.isError, undefined);
     assert.equal(ok.content[0]!.type, "image", "首块为 MCP 图像块");
@@ -690,21 +701,21 @@ test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消�
 
     const notImg = (await client.callTool({
       name: "get_media",
-      arguments: { group: GROUP, msg_id: "MD1", n: 2 },
+      arguments: { id: GROUP, msg_id: "MD1", n: 2 },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(notImg.isError, true);
     assert.ok(notImg.content[0]!.text.includes("不是图片"));
 
     const oob = (await client.callTool({
       name: "get_media",
-      arguments: { group: GROUP, msg_id: "MD1", n: 3 },
+      arguments: { id: GROUP, msg_id: "MD1", n: 3 },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(oob.isError, true);
     assert.ok(oob.content[0]!.text.includes("越界"));
 
     const miss = (await client.callTool({
       name: "get_media",
-      arguments: { group: GROUP, msg_id: "NOPE", n: 1 },
+      arguments: { id: GROUP, msg_id: "NOPE", n: 1 },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(miss.isError, true);
     assert.ok(miss.content[0]!.text.includes("search"));
@@ -752,7 +763,7 @@ test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防�
     const res = payloadOf(
       (await client.callTool({
         name: "context",
-        arguments: { group: GROUP, msg_id: "M_SELF", radius: 1 },
+        arguments: { id: GROUP, msg_id: "M_SELF", radius: 1 },
       })) as never,
     );
     const msgs = res.messages as Array<{
@@ -825,14 +836,14 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     const first = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { group: USER, type: "chat" },
+        arguments: { id: USER, type: "chat" },
       })) as never,
     );
     assert.equal(first.count, 2);
     const again = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { group: USER, type: "chat" },
+        arguments: { id: USER, type: "chat" },
       })) as never,
     );
     assert.equal(again.count, 0, "水位已推进，重拉为空");
@@ -860,14 +871,14 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     const fts = payloadOf(
       (await client.callTool({
         name: "search",
-        arguments: { group: USER, type: "chat", query: "单聊原文" },
+        arguments: { id: USER, type: "chat", query: "单聊原文" },
       })) as never,
     );
     assert.equal(fts.count, 1, "FTS 只命中 C1");
     const like = payloadOf(
       (await client.callTool({
         name: "search",
-        arguments: { group: USER, type: "chat", query: "引用" },
+        arguments: { id: USER, type: "chat", query: "引用" },
       })) as never,
     );
     assert.equal(like.count, 1, "LIKE 兜底命中 C2 令牌行");
@@ -876,7 +887,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     const around = payloadOf(
       (await client.callTool({
         name: "browse",
-        arguments: { group: USER, type: "chat", msg_id: "C1", mode: "around" },
+        arguments: { id: USER, type: "chat", msg_id: "C1", mode: "around" },
       })) as never,
     );
     assert.equal(around.count, 2, "前后文含 C1/C2 两条");
@@ -885,7 +896,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     const g = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { group: GROUP },
+        arguments: { id: GROUP },
       })) as never,
     );
     assert.equal(g.count, 5, "群聊种子消息照常拉取");
@@ -893,7 +904,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     // 锚点跨侧提示：私聊会话里查群聊消息（及反向）→ 指出实际所在与应传 type
     const wrongSide = (await client.callTool({
       name: "context",
-      arguments: { group: USER, type: "chat", msg_id: "M1" },
+      arguments: { id: USER, type: "chat", msg_id: "M1" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(wrongSide.isError, true);
     assert.ok(
@@ -902,7 +913,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     );
     const wrongSide2 = (await client.callTool({
       name: "context",
-      arguments: { group: GROUP, msg_id: "C1" },
+      arguments: { id: GROUP, msg_id: "C1" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(wrongSide2.isError, true);
     assert.ok(
@@ -913,7 +924,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     // 真不存在的消息 → 仍走"可先 search"路径
     const miss = (await client.callTool({
       name: "context",
-      arguments: { group: USER, type: "chat", msg_id: "NOPE" },
+      arguments: { id: USER, type: "chat", msg_id: "NOPE" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(miss.isError, true);
     assert.ok(miss.content[0]!.text.includes("search"));
@@ -921,7 +932,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     // type 非法值 → 可操作错误
     const badType = (await client.callTool({
       name: "get_new",
-      arguments: { group: USER, type: "all" },
+      arguments: { id: USER, type: "all" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(badType.isError, true);
     assert.ok(badType.content[0]!.text.includes("group/chat"));

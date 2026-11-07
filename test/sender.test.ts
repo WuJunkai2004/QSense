@@ -643,12 +643,12 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
       apiFor: () => mock,
     });
     const ctx = { repo: fx.repo, botId: BOT, sender };
-    const ok = await runTool("send", { group: GROUP, text: "首条" }, ctx);
+    const ok = await runTool("send", { id: GROUP, text: "首条" }, ctx);
     assert.ok(!ok.isError);
 
     const exceeded = await runTool(
       "send",
-      { group: GROUP, text: "第二条" },
+      { id: GROUP, text: "第二条" },
       ctx,
     );
     assert.equal(exceeded.isError, true);

@@ -60,6 +60,8 @@ M9 起 env 只承担部署拓扑与运维参数；**bot 注册（appid/secret/�
 
 ## MCP 工具面（14 个）
 
+**参数命名（2026-11-07 硬切换）**：会话标识参数统一叫 **`id`**（群聊=群 openid；私聊=对方 user_openid，配 `type:"chat"`）——与 `list_all`/`list_new` 返回的 `conversations[].id` 对齐；传旧名 `group` 报可操作更名提示。消息标识保留 `msg_id`/`quote_msg_id`；返回值成员标识统一 `id`/`member_id`（原 `openid`/`member_openid`）。
+
 **管理（自服务）**：`register_bot`（注册新 bot：官方凭据校验 → 落库 → 返回 agent_token 仅此一次；token 轮换收归 WebUI 设置页——调用即自毁凭证的操作不留给 agent）
 
 **只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数；`type` 参数过滤 group/chat——C2C 开通后即用此参数，无独立工具）· `list_new`（未读视图=红点）· `list_members`（名册）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索）· `context`（前后文）· `get_media`（点开看图：按 ![附件n] 编号拉取图像内容，多模态模型直接读图）· `quota`（额度水位）
