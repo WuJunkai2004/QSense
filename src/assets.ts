@@ -32,7 +32,12 @@ export function sniffImageMime(buf: Buffer): string | null {
   if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
     return "image/jpeg";
   }
-  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) {
+  if (
+    buf[0] === 0x47 &&
+    buf[1] === 0x49 &&
+    buf[2] === 0x46 &&
+    buf[3] === 0x38
+  ) {
     return "image/gif";
   }
   if (
@@ -67,7 +72,10 @@ export function sniffAudioMime(buf: Buffer): string | null {
   // SILK v3：QQ 语音原生格式，头部常带 1 字节 0x02 前缀（首字节偏移 0 或 1 均识别）
   const silk = "#!SILK";
   for (const off of [0, 1]) {
-    if (buf.length >= off + 6 && buf.subarray(off, off + 6).toString("latin1") === silk) {
+    if (
+      buf.length >= off + 6 &&
+      buf.subarray(off, off + 6).toString("latin1") === silk
+    ) {
       return "audio/silk";
     }
   }

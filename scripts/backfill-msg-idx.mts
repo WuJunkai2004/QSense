@@ -10,8 +10,7 @@ const db = new Database(process.env.DATA_DB ?? "./data/qqbot.db");
 function extractMsgIdx(raw: string): string | null {
   try {
     const scene = (JSON.parse(raw) as Record<string, unknown>).message_scene as
-      | { ext?: unknown }
-      | undefined;
+      { ext?: unknown } | undefined;
     const ext = scene?.ext;
     if (!Array.isArray(ext)) return null;
     for (const item of ext) {

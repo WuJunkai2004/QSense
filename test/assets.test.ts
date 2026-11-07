@@ -9,7 +9,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLogger } from "../src/logger";
-import { AssetStore, sniffAudioMime, sniffPathMime, uploadSig } from "../src/assets";
+import {
+  AssetStore,
+  sniffAudioMime,
+  sniffPathMime,
+  uploadSig,
+} from "../src/assets";
 import { Sender, beijingDate } from "../src/sender";
 import { buildServer } from "../src/server/http";
 import { BotRegistry } from "../src/bots";
@@ -49,7 +54,15 @@ function setupFx(): Fixture {
   db.prepare(
     `INSERT INTO bots(appid, name, secret, agent_token, allow_groups, auth_level, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(BOT, "t", "s", AGENT_TOKEN, JSON.stringify([GROUP]), "uncertified", Date.now());
+  ).run(
+    BOT,
+    "t",
+    "s",
+    AGENT_TOKEN,
+    JSON.stringify([GROUP]),
+    "uncertified",
+    Date.now(),
+  );
   repo.ensureRuntime();
   repo.setSendEnable(true);
   const registry = new BotRegistry({ db });

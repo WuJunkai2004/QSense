@@ -150,9 +150,9 @@ export function buildServer(deps: ServerDeps) {
     }
     const body = req.body;
     if (!Buffer.isBuffer(body)) {
-      return reply
-        .code(400)
-        .send({ error: "请求体缺失：请以二进制（--data-binary）直传图片字节。" });
+      return reply.code(400).send({
+        error: "请求体缺失：请以二进制（--data-binary）直传图片字节。",
+      });
     }
     try {
       const { mime, size } = deps.assets.save(assetId, body);

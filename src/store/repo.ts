@@ -495,8 +495,7 @@ export class Repo {
     msgId: string,
   ): MsgRow | null {
     const row = this.c2cByMsgIdStmt.get(botId, userOpenid, msgId) as
-      | MsgRow
-      | undefined;
+      MsgRow | undefined;
     return row ?? null;
   }
 
@@ -565,8 +564,7 @@ export class Repo {
         continue;
       }
       const row = stmt.get(botId, scopeId, m[1]!) as
-        | { author_name: string | null; body: string | null }
-        | undefined;
+        { author_name: string | null; body: string | null } | undefined;
       if (row === undefined) {
         out.push(line);
         continue;

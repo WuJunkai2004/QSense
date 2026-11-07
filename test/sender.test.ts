@@ -646,7 +646,11 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
     const ok = await runTool("send", { group: GROUP, text: "首条" }, ctx);
     assert.ok(!ok.isError);
 
-    const exceeded = await runTool("send", { group: GROUP, text: "第二条" }, ctx);
+    const exceeded = await runTool(
+      "send",
+      { group: GROUP, text: "第二条" },
+      ctx,
+    );
     assert.equal(exceeded.isError, true);
     assert.ok(exceeded.text.includes("日额度不足"));
 
@@ -660,7 +664,10 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
 
 // —— sendAuto 路由矩阵（M4-14）：被动/主动换道 + 引用块，全部落在已真机验证形态 ——
 
-function makeSender(fx: ReturnType<typeof setupDb>, mock: ReturnType<typeof makeApiMock>): Sender {
+function makeSender(
+  fx: ReturnType<typeof setupDb>,
+  mock: ReturnType<typeof makeApiMock>,
+): Sender {
   return new Sender({
     log: createLogger("error"),
     db: fx.db,
@@ -692,7 +699,8 @@ test("M4-14 sendAuto 路由：quote 窗内 → 被动绑=引；quote 超窗 → 
     assert.equal(r2.channel, "proactive");
     assert.equal(m2.calls[0]!.body.msg_id, undefined);
     assert.equal(
-      (m2.calls[0]!.body.message_reference as { message_id: string }).message_id,
+      (m2.calls[0]!.body.message_reference as { message_id: string })
+        .message_id,
       "M_OLD",
     );
 
@@ -918,11 +926,7 @@ test("M4-18 单聊被动回复：窗内 sendAuto 绑定 msg_id（seq=1）走 c2c
     assert.equal(mock.calls[0]!.body.msg_id, "C1", "被动绑定目标消息");
     assert.equal(mock.calls[0]!.body.msg_seq, 1);
     assert.equal(mock.calls[0]!.body.msg_type, 0);
-    const row = fx.repo.getC2cMessageByMsgId(
-      BOT,
-      C2C_USER,
-      r.provider_msg_id!,
-    );
+    const row = fx.repo.getC2cMessageByMsgId(BOT, C2C_USER, r.provider_msg_id!);
     assert.ok(row !== null, "自发消息应补记进单聊缓存");
     assert.equal(Number(row.direction), 1);
   } finally {
@@ -945,9 +949,7 @@ test("M4-19 单聊被动窗超时 → 主动兜底需 opt-in：无 C2C_MSG_RECEI
     });
     await assert.rejects(
       () => sender.sendAuto(BOT, C2C_USER, "早", undefined, "chat"),
-      (e: Error) =>
-        e.message ===
-        t("send_c2c_not_optin", { user: C2C_USER }),
+      (e: Error) => e.message === t("send_c2c_not_optin", { user: C2C_USER }),
       "无 opt-in 记录的主动单聊硬拒绝",
     );
     assert.equal(mock.calls.length, 0, "硬拒绝不得触发 API");
@@ -986,14 +988,32 @@ test("M4-20 单聊门禁：对方拒绝（C2C_MSG_REJECT）连被动回复也硬
     fx.repo.setC2cSwitch(BOT, C2C_USER, false);
     await assert.rejects(
       () =>
-        sender.reply(BOT, C2C_USER, "C1", "hi", false, false, undefined, "chat"),
+        sender.reply(
+          BOT,
+          C2C_USER,
+          "C1",
+          "hi",
+          false,
+          false,
+          undefined,
+          "chat",
+        ),
       (e: Error) => e.message === t("send_c2c_optout", { user: C2C_USER }),
     );
     assert.equal(mock.calls.length, 0);
     fx.repo.setSendEnable(false);
     await assert.rejects(
       () =>
-        sender.reply(BOT, C2C_USER, "C1", "hi", false, false, undefined, "chat"),
+        sender.reply(
+          BOT,
+          C2C_USER,
+          "C1",
+          "hi",
+          false,
+          false,
+          undefined,
+          "chat",
+        ),
       (e: Error) =>
         e.message ===
         t("send_disabled", {
@@ -1035,10 +1055,18 @@ test("M4-21 单聊被动窗次数上限 4 次；撤回走 c2c scope", async () =
     }
     await assert.rejects(
       () =>
-        sender.reply(BOT, C2C_USER, "C1", "第5次", false, false, undefined, "chat"),
+        sender.reply(
+          BOT,
+          C2C_USER,
+          "C1",
+          "第5次",
+          false,
+          false,
+          undefined,
+          "chat",
+        ),
       (e: Error) =>
-        e.message ===
-        t("send_window_exhausted_c2c", { used: 4, max: 4 }),
+        e.message === t("send_window_exhausted_c2c", { used: 4, max: 4 }),
       "官方限制每条单聊消息最多回复 4 次",
     );
     assert.equal(mock.calls.length, 4);

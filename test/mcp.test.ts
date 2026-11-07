@@ -644,7 +644,11 @@ test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消�
           width: 10,
           height: 10,
         },
-        { url: "https://cdn.example/b.bin", filename: "b.bin", content_type: "file" },
+        {
+          url: "https://cdn.example/b.bin",
+          filename: "b.bin",
+          content_type: "file",
+        },
       ],
       raw: {},
     });

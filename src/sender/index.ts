@@ -91,7 +91,8 @@ export interface SendApi {
     creds: { appId: string; clientSecret: string },
     src: MediaSource,
     mediaType: MediaKind,
-  ): Promise<string>;}
+  ): Promise<string>;
+}
 
 /** 富媒体来源（传输自足：MCP 服务可能与智能体不同机，不收智能体侧本地路径；
  * "file" 为服务端资产（DATA_DIR/assets，经 request_upload 票据上传），跨机安全） */
@@ -122,7 +123,9 @@ function labelOf(mediaType: MediaKind): string {
 export function parseMediaSource(media: string): MediaSource {
   const trimmed = media.trim();
   if (/^https?:\/\/\S+$/i.test(trimmed)) return { kind: "url", url: trimmed };
-  const m = /^data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(trimmed);
+  const m = /^data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(
+    trimmed,
+  );
   if (m) return { kind: "b64", data: m[2]!.replace(/\s+/g, "") };
   throw new Error(t("media_source_invalid"));
 }
@@ -411,24 +414,24 @@ export class Sender {
               : {}),
           }
         : asMarkdown
-        ? {
-            msg_type: 2,
-            markdown: { content },
-            msg_id: replyMsgId,
-            msg_seq: seq,
-            ...(messageReference !== undefined
-              ? { message_reference: messageReference }
-              : {}),
-          }
-        : {
-            msg_type: 0,
-            content,
-            msg_id: replyMsgId,
-            msg_seq: seq,
-            ...(messageReference !== undefined
-              ? { message_reference: messageReference }
-              : {}),
-          };
+          ? {
+              msg_type: 2,
+              markdown: { content },
+              msg_id: replyMsgId,
+              msg_seq: seq,
+              ...(messageReference !== undefined
+                ? { message_reference: messageReference }
+                : {}),
+            }
+          : {
+              msg_type: 0,
+              content,
+              msg_id: replyMsgId,
+              msg_seq: seq,
+              ...(messageReference !== undefined
+                ? { message_reference: messageReference }
+                : {}),
+            };
       try {
         const resp = await this.api(app).sendRaw(
           scopeOf(kind),
@@ -452,7 +455,12 @@ export class Sender {
           seq,
           provider: resp.id,
         });
-        return { status: "sent", channel: "passive", msg_seq: seq, provider_msg_id: resp.id };
+        return {
+          status: "sent",
+          channel: "passive",
+          msg_seq: seq,
+          provider_msg_id: resp.id,
+        };
       } catch (e) {
         const biz = extractBizCode(e);
         if (isAuditPendingCode(biz)) {
@@ -660,7 +668,16 @@ export class Sender {
       quoteMsgId,
     );
     if (bindMsgId !== undefined) {
-      return this.reply(botId, targetId, bindMsgId, text, false, quote, undefined, kind);
+      return this.reply(
+        botId,
+        targetId,
+        bindMsgId,
+        text,
+        false,
+        quote,
+        undefined,
+        kind,
+      );
     }
     return this.proactive(botId, targetId, text, quoteMsgId, undefined, kind);
   }
@@ -702,9 +719,13 @@ export class Sender {
     const mediaType = mediaTypeOf(src);
     let fileInfo: string;
     try {
-      fileInfo = await this
-        .api(app)
-        .uploadMedia(scopeOf(kind), targetId, credsOf(app), src, mediaType);
+      fileInfo = await this.api(app).uploadMedia(
+        scopeOf(kind),
+        targetId,
+        credsOf(app),
+        src,
+        mediaType,
+      );
     } catch (e) {
       throw new Error(
         t("media_upload_failed", { reason: describeSendError(e) }),
@@ -717,15 +738,31 @@ export class Sender {
       file_info_len: fileInfo.length,
     });
     if (bindMsgId !== undefined) {
-      return this.reply(botId, targetId, bindMsgId, text, false, quote, {
+      return this.reply(
+        botId,
+        targetId,
+        bindMsgId,
+        text,
+        false,
+        quote,
+        {
+          fileInfo,
+          label: labelOf(mediaType),
+        },
+        kind,
+      );
+    }
+    return this.proactive(
+      botId,
+      targetId,
+      text,
+      quoteMsgId,
+      {
         fileInfo,
         label: labelOf(mediaType),
-      }, kind);
-    }
-    return this.proactive(botId, targetId, text, quoteMsgId, {
-      fileInfo,
-      label: labelOf(mediaType),
-    }, kind);
+      },
+      kind,
+    );
   }
 
   /** 通道判定（sendAuto/sendMediaAuto 共用）：引用目标窗内→绑=引（形态A）；
@@ -746,7 +783,10 @@ export class Sender {
       }
     }
     let bindMsgId: string | undefined;
-    if (quoteMsgId !== undefined && this.bindable(botId, kind, targetId, quoteMsgId)) {
+    if (
+      quoteMsgId !== undefined &&
+      this.bindable(botId, kind, targetId, quoteMsgId)
+    ) {
       bindMsgId = quoteMsgId;
     } else if (quoteMsgId === undefined) {
       bindMsgId = this.latestBindable(botId, kind, targetId);

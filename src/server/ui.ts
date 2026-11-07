@@ -256,7 +256,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const name = typeof body.name === "string" ? body.name : "";
           const renamed = registry.rename(appid, name);
           uiLog.info("bot renamed via ui", { appid, name: renamed.name });
-          return { ok: true, bot: { appid: renamed.appid, name: renamed.name } };
+          return {
+            ok: true,
+            bot: { appid: renamed.appid, name: renamed.name },
+          };
         } catch (e) {
           const m = mapError(uiLog, e);
           reply.code(m.status).send({ error: m.message });

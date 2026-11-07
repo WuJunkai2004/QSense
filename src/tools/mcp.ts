@@ -96,8 +96,7 @@ export function createMcpHandler(
     supervisor: deps.supervisor,
     assets: deps.assets,
     baseUrl: session.baseUrl,
-    agentToken:
-      deps.agentTokenOf?.(session.botId) ?? undefined,
+    agentToken: deps.agentTokenOf?.(session.botId) ?? undefined,
     botId: session.botId,
   });
 
@@ -141,9 +140,7 @@ export function createMcpHandler(
           error: result.isError === true,
         });
         return {
-          content: result.content ?? [
-            { type: "text", text: result.text },
-          ],
+          content: result.content ?? [{ type: "text", text: result.text }],
           ...(result.isError === true ? { isError: true } : {}),
         };
       } finally {

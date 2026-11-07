@@ -453,10 +453,10 @@ test("M7-U12 改备注名：PATCH 即时落库；空名回落 appid；未知 app
       body: JSON.stringify({ name: "  雅南  " }),
     });
     assert.equal(renamed.status, 200);
-    assert.deepEqual(
-      (await renamed.json()) as { bot: { name: string } },
-      { ok: true, bot: { appid: "20002", name: "雅南" } },
-    );
+    assert.deepEqual((await renamed.json()) as { bot: { name: string } }, {
+      ok: true,
+      bot: { appid: "20002", name: "雅南" },
+    });
     const settings = (await (
       await fetch(`${fx.baseUrl}/ui/api/settings`, { headers: authHeaders() })
     ).json()) as { bots: Array<{ appid: string; name: string }> };
