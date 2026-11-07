@@ -61,6 +61,9 @@ export class Repo {
     [string, string, number, number, number, number]
   >;
   private readonly c2cLatestStmt: Stmt<[string, string, number]>;
+  /** 单聊作者名映射源：群聊名册（members）反查昵称。openid 按 bot 维度隔离——
+   *  同一人在不同 bot 处 openid 不同，查询必须绑定 bot_id，防止跨 bot 串名 */
+  private readonly c2cNameStmt: Stmt<[string, string]>;
   private readonly upsertGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly ensureGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly setGroupSwitchStmt: Stmt<[Record<string, unknown>]>;
@@ -140,6 +143,11 @@ export class Repo {
       WHERE bot_id = ? AND user_openid = ?
       ORDER BY ts DESC, rowid DESC LIMIT ?
     `);
+    // 单聊作者名映射：数据源=群聊消息积累的 members 名册（同一 bot 下同一用户 openid 稳定，
+    // 跨群复用）；单聊事件载荷无昵称，saveC2cMessage 据此反查补齐
+    this.c2cNameStmt = db.prepare(
+      "SELECT username FROM members WHERE bot_id = ? AND member_openid = ? AND username IS NOT NULL ORDER BY last_seen DESC LIMIT 1",
+    );
     this.upsertGroupStmt = db.prepare(`
       INSERT INTO groups(bot_id, group_openid, full_msg_enabled, added_at, updated_at)
       VALUES (@bot_id, @group_openid, @full_msg_enabled, @now, @now)
@@ -212,6 +220,16 @@ export class Repo {
 
   /** 单聊消息入库（无名册表，单聊无群成员概念） */
   saveC2cMessage(m: NormalizedMessage): boolean {
+    // 单聊载荷无昵称：从本 bot 群聊名册反查补齐（key=对端用户 openid，authorOpenid 与
+    // scopeId 同值，回退兜底）；名册未命中保持 null，展示层回落 openid 前缀
+    if ((m.authorName ?? "") === "") {
+      const key = m.authorOpenid !== "" ? m.authorOpenid : m.scopeId;
+      const hit = this.c2cNameStmt.get(m.botId, key) as
+        | { username: string | null }
+        | undefined;
+      const name = hit?.username ?? null;
+      if (name !== null) m = { ...m, authorName: name };
+    }
     const info = this.insertC2cMsg.run(
       messageParams(m, "user_openid", m.scopeId),
     );

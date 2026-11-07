@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
+import { Repo } from "../src/store/repo";
+import type { NormalizedMessage } from "../src/normalize/types";
 
 /** best-effort 清理：Windows 下新建 .db 文件可能被 AV/索引服务短暂持有句柄，删除失败留给系统回收 */
 function cleanupDir(dir: string): void {
@@ -117,5 +119,68 @@ test("openDatabase 自动创建数据目录", () => {
     db.close();
   } finally {
     cleanupDir(parent);
+  }
+});
+
+test("单聊作者名映射：入站单聊从本 bot 群聊名册反查昵称；openid 按 bot 隔离不串名", () => {
+  const dir = tempDbDir();
+  try {
+    const db = openDatabase(dir);
+    runMigrations(db, migrations);
+    const repo = new Repo(db);
+
+    const base: NormalizedMessage = {
+      botId: "",
+      scope: "c2c",
+      scopeId: "",
+      msgId: "",
+      authorOpenid: "",
+      ts: Date.now(),
+      content: "你好",
+      mentions: [],
+      elements: undefined,
+      attachments: [],
+      raw: {},
+    };
+
+    // bot A 名册里有 USER_A（群聊消息积累；单聊载荷本身无昵称）
+    db.prepare(
+      "INSERT INTO members(bot_id, group_openid, member_openid, username, member_role, first_seen, last_seen, msg_count) VALUES ('BOT_A','G_A','USER_A','小肥鱼','member',?, ?, 1)",
+    ).run(Date.now(), Date.now());
+
+    // bot A 收到 USER_A 单聊 → 反查补名
+    repo.saveC2cMessage({
+      ...base,
+      botId: "BOT_A",
+      scopeId: "USER_A",
+      authorOpenid: "USER_A",
+      msgId: "M1",
+    });
+    const m1 = repo.getC2cMessageByMsgId("BOT_A", "USER_A", "M1");
+    assert.equal(m1?.author_name, "小肥鱼");
+
+    // openid 按 bot 维度隔离：同一 openid 字面量在 bot B 名册无记录 → 不串名
+    repo.saveC2cMessage({
+      ...base,
+      botId: "BOT_B",
+      scopeId: "USER_A",
+      authorOpenid: "USER_A",
+      msgId: "M2",
+    });
+    const m2 = repo.getC2cMessageByMsgId("BOT_B", "USER_A", "M2");
+    assert.equal(m2?.author_name, null);
+
+    // 名册未命中（对方未与 bot 在任何群互动过）→ 保持 null，展示层回落 openid
+    repo.saveC2cMessage({
+      ...base,
+      botId: "BOT_A",
+      scopeId: "USER_X",
+      authorOpenid: "USER_X",
+      msgId: "M3",
+    });
+    const m3 = repo.getC2cMessageByMsgId("BOT_A", "USER_X", "M3");
+    assert.equal(m3?.author_name, null);
+  } finally {
+    cleanupDir(dir);
   }
 });
