@@ -64,6 +64,10 @@ export class Repo {
   /** 单聊作者名映射源：群聊名册（members）反查昵称。openid 按 bot 维度隔离——
    *  同一人在不同 bot 处 openid 不同，查询必须绑定 bot_id，防止跨 bot 串名 */
   private readonly c2cNameStmt: Stmt<[string, string]>;
+  /** 侧别探测三件套（detectSessionKind 专用——全部读写工具的必经热路径） */
+  private readonly detectGroupMsgStmt: Stmt<[string, string]>;
+  private readonly detectGroupRegStmt: Stmt<[string, string]>;
+  private readonly detectC2cMsgStmt: Stmt<[string, string]>;
   private readonly upsertGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly ensureGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly setGroupSwitchStmt: Stmt<[Record<string, unknown>]>;
@@ -147,6 +151,15 @@ export class Repo {
     // 跨群复用）；单聊事件载荷无昵称，saveC2cMessage 据此反查补齐
     this.c2cNameStmt = db.prepare(
       "SELECT username FROM members WHERE bot_id = ? AND member_openid = ? AND username IS NOT NULL ORDER BY last_seen DESC LIMIT 1",
+    );
+    this.detectGroupMsgStmt = db.prepare(
+      "SELECT 1 FROM messages WHERE bot_id = ? AND group_openid = ? LIMIT 1",
+    );
+    this.detectGroupRegStmt = db.prepare(
+      "SELECT 1 FROM groups WHERE bot_id = ? AND group_openid = ? LIMIT 1",
+    );
+    this.detectC2cMsgStmt = db.prepare(
+      "SELECT 1 FROM c2c_messages WHERE bot_id = ? AND user_openid = ? LIMIT 1",
     );
     this.upsertGroupStmt = db.prepare(`
       INSERT INTO groups(bot_id, group_openid, full_msg_enabled, added_at, updated_at)
@@ -538,27 +551,18 @@ export class Repo {
   /**
    * 会话侧别自动探测（读写工具的 type 参数退役后的裁决源）：
    * openid 是权威定位标识（群 openid 与用户 openid 命名空间互斥、不可能同值），
-   * 按缓存归属即可唯一裁决：group=群消息缓存或群注册表；chat=单聊消息缓存；null=两侧均无。
+   * 按缓存归属即可唯一裁决。group 证据=群消息缓存或群注册表；
+   * chat 证据=单聊消息缓存或 C2C 开关 kv 记录——后者不受保留期清理，且主动消息
+   * 门禁本就要求该记录存在，恰好覆盖"缓存被清后仍合法可发送"的场景；null=两侧均无。
    */
   detectSessionKind(botId: string, id: string): "group" | "chat" | null {
     const inGroup =
-      this.db
-        .prepare(
-          "SELECT 1 FROM messages WHERE bot_id = ? AND group_openid = ? LIMIT 1",
-        )
-        .get(botId, id) !== undefined ||
-      this.db
-        .prepare(
-          "SELECT 1 FROM groups WHERE bot_id = ? AND group_openid = ? LIMIT 1",
-        )
-        .get(botId, id) !== undefined;
+      this.detectGroupMsgStmt.get(botId, id) !== undefined ||
+      this.detectGroupRegStmt.get(botId, id) !== undefined;
     if (inGroup) return "group";
     const inChat =
-      this.db
-        .prepare(
-          "SELECT 1 FROM c2c_messages WHERE bot_id = ? AND user_openid = ? LIMIT 1",
-        )
-        .get(botId, id) !== undefined;
+      this.detectC2cMsgStmt.get(botId, id) !== undefined ||
+      this.getC2cSwitch(botId, id) !== null;
     return inChat ? "chat" : null;
   }
 

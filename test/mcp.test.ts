@@ -939,6 +939,29 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
       unknown.content[0]!.text.includes("无法定位会话"),
       "探测失败应给可操作提示",
     );
+
+    // list_members 传单聊 id → 可操作报错（名册仅群聊语义，不静默返回空册）
+    const roster = (await client.callTool({
+      name: "list_members",
+      arguments: { id: USER },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(roster.isError, true);
+    assert.ok(
+      roster.content[0]!.text.includes("单聊会话"),
+      "list_members 单聊 id 应报可操作错误",
+    );
+
+    // 探测耐久性：单聊缓存被保留期清空后，C2C 开关 kv 记录仍可裁决侧别
+    //（主动消息门禁本就要求该记录存在，缓存清理不影响合法发送路径）
+    repo.setC2cSwitch("10001", USER, true);
+    assert.ok(repo.purgeOldMessages(0) >= 2, "保留期清理应清掉两条单聊缓存");
+    const durable = payloadOf(
+      (await client.callTool({
+        name: "get_new",
+        arguments: { id: USER },
+      })) as never,
+    );
+    assert.equal(durable.count, 0, "缓存已清但探测仍路由 chat：不报错、返回空页");
   } finally {
     try {
       await client?.close();

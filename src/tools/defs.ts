@@ -1,6 +1,6 @@
 // MCP 工具面定义：以"人类操作QQ"为隐喻组织——
-//   列表层 list_all/list_new（消息列表视角；类型/私聊过滤走 list_all 的 type 参数）→
-//   读取层 get_new/browse/search/context（群聊+私聊，读取工具以 type 参数区分会话侧）→
+//   列表层 list_all/list_new（消息列表视角；list_all 的 type 参数作结果过滤）→
+//   读取层 get_new/browse/search/context（会话侧别由 id 自动探测，repo.detectSessionKind）→
 //   名册与额度 list_members/quota →
 //   写工具 send/send_media/request_upload/recall（双重门禁）→ 管理 register_bot。
 // 已读水位（拉取即已读）与整群删除（原 forget，迁 WebUI）为服务端内部状态/管理操作，不在 agent 工具面。
@@ -11,8 +11,6 @@
 
 import type { AuthLevel, BotApp } from "../config";
 import type { BotRegistry } from "../bots";
-import type { GatewayStatus } from "../gateway";
-import { t } from "../i18n";
 import type { Sender } from "../sender";
 import type { MsgRow, Repo } from "../store/repo";
 import { Buffer } from "node:buffer";
@@ -218,16 +216,21 @@ function detectKind(
   );
 }
 
+/** 会话三元组一站式解析（读写工具共用样板）：botId（token 绑定）→ id 取参（旧名报错）→ 侧别探测 */
+function resolveSession(
+  ctx: ToolContext,
+  args: Record<string, unknown>,
+): { botId: string; scopeId: string; kind: "group" | "chat" } {
+  const botId = resolveBotId(ctx);
+  const scopeId = scopeIdArg(args);
+  return { botId, scopeId, kind: detectKind(ctx, botId, scopeId) };
+}
+
 /** 私聊会话的已读水位键（与 listChatConversations 的未读统计一致） */
 function cursorKeyOf(kind: "group" | "chat", scopeId: string): string {
   return kind === "chat" ? `c2c:${scopeId}` : scopeId;
 }
 
-/**
- * 锚点定位（browse/context/get_media 共用）：先按调用方声明的类型查；
- * 未命中时探测另一侧缓存（官方 msg_id 全局唯一）——命中即报"消息实际在哪、该传什么"的
- * 可操作错误，而非笼统的"不存在"，避免 type 传错的调用被误导去空搜。
- */
 /**
  * 锚点定位（browse/context/get_media 共用）：侧别已由 id 探测确定，直接查对应表；
  * 未命中报可操作错误（search 可先定位）。
@@ -386,6 +389,12 @@ export const TOOLS: ToolDef[] = [
     handler: (args, ctx) => {
       const botId = resolveBotId(ctx);
       const group = scopeIdArg(args);
+      const kind = detectKind(ctx, botId, group);
+      if (kind === "chat") {
+        throw new ToolError(
+          `${group} 是单聊会话：list_members 仅群聊有成员名册（单聊无名册概念）。`,
+        );
+      }
       const limit = optInt(args, "limit", 1, 500, 100);
       return {
         id: group,
@@ -422,9 +431,7 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: (args, ctx) => {
-      const botId = resolveBotId(ctx);
-      const scopeId = scopeIdArg(args);
-      const kind = detectKind(ctx, botId, scopeId);
+      const { botId, scopeId, kind } = resolveSession(ctx, args);
       const limit = optInt(args, "limit", 1, 500, 100);
       const cursorKey = cursorKeyOf(kind, scopeId);
       const mark = ctx.repo.getCursor(botId, cursorKey);
@@ -469,9 +476,7 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: (args, ctx) => {
-      const botId = resolveBotId(ctx);
-      const scopeId = scopeIdArg(args);
-      const kind = detectKind(ctx, botId, scopeId);
+      const { botId, scopeId, kind } = resolveSession(ctx, args);
       const limit = optInt(args, "limit", 1, 100, 30);
       const repo = ctx.repo;
       const msgId = optStr(args, "msg_id");
@@ -563,9 +568,7 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: (args, ctx) => {
-      const botId = resolveBotId(ctx);
-      const scopeId = scopeIdArg(args);
-      const kind = detectKind(ctx, botId, scopeId);
+      const { botId, scopeId, kind } = resolveSession(ctx, args);
       const query = str(args, "query", "关键词");
       if ([...query].length > 100) {
         throw new ToolError("参数 query 超长（>100 字符）。请缩短关键词。");
@@ -599,9 +602,7 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: (args, ctx) => {
-      const botId = resolveBotId(ctx);
-      const scopeId = scopeIdArg(args);
-      const kind = detectKind(ctx, botId, scopeId);
+      const { botId, scopeId, kind } = resolveSession(ctx, args);
       const msgId = str(args, "msg_id", "消息 id");
       const radius = optInt(args, "radius", 1, 50, 5);
       const anchor = anchorOf(ctx, botId, kind, scopeId, msgId);
@@ -636,17 +637,10 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: async (args, ctx) => {
-      const botId = resolveBotId(ctx);
-      const scopeId = scopeIdArg(args);
-      const kind = detectKind(ctx, botId, scopeId);
+      const { botId, scopeId, kind } = resolveSession(ctx, args);
       const msgId = str(args, "msg_id", "消息 id");
       const n = optInt(args, "n", 1, 50, 1);
       const row = anchorOf(ctx, botId, kind, scopeId, msgId);
-      if (row === null) {
-        throw new ToolError(
-          `消息不存在（或已过保留期被清理）：${msgId}。可先 search 定位。`,
-        );
-      }
       const atts: Array<Record<string, unknown>> = row.attachments_json
         ? JSON.parse(row.attachments_json)
         : [];
@@ -755,9 +749,7 @@ export const TOOLS: ToolDef[] = [
     },
     handler: async (args, ctx) => {
       const sender = requireSender(ctx);
-      const botId = resolveBotId(ctx);
-      const scopeId = scopeIdArg(args);
-      const kind = detectKind(ctx, botId, scopeId);
+      const { botId, scopeId, kind } = resolveSession(ctx, args);
       return sender.sendAuto(
         botId,
         scopeId,
@@ -797,9 +789,7 @@ export const TOOLS: ToolDef[] = [
     },
     handler: async (args, ctx) => {
       const sender = requireSender(ctx);
-      const botId = resolveBotId(ctx);
-      const scopeId = scopeIdArg(args);
-      const kind = detectKind(ctx, botId, scopeId);
+      const { botId, scopeId, kind } = resolveSession(ctx, args);
       return sender.sendMediaAuto(
         botId,
         scopeId,
@@ -856,9 +846,7 @@ export const TOOLS: ToolDef[] = [
     },
     handler: async (args, ctx) => {
       const sender = requireSender(ctx);
-      const botId = resolveBotId(ctx);
-      const scopeId = scopeIdArg(args);
-      const kind = detectKind(ctx, botId, scopeId);
+      const { botId, scopeId, kind } = resolveSession(ctx, args);
       return sender.recall(
         botId,
         scopeId,
