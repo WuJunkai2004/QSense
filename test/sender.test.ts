@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLogger } from "../src/logger";
 import { Sender, beijingDate } from "../src/sender";
+import { t } from "../src/i18n";
 import { handleGatewayEvent } from "../src/normalize/handler";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
@@ -839,6 +840,179 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
       /图片上传官方转存失败/,
     );
     assert.equal(m5.calls.length, 0, "上传失败不得发送消息");
+  } finally {
+    fx.close();
+  }
+});
+
+// —— 单聊（c2c）发送面：被动窗 60 分钟/4 次、opt-in 门禁、补记与撤回 ——
+
+const C2C_USER = "C2C_USER_OPENID";
+
+function seedC2cInbound(repo: Repo, msgId: string, ageMs = 0): void {
+  repo.saveC2cMessage({
+    botId: BOT,
+    scope: "c2c",
+    scopeId: C2C_USER,
+    msgId,
+    authorOpenid: C2C_USER,
+    ts: Date.now() - ageMs,
+    content: "回复这条消息",
+    mentions: [],
+    elements: undefined,
+    attachments: [],
+    raw: {},
+  });
+}
+
+test("M4-18 单聊被动回复：窗内 sendAuto 绑定 msg_id（seq=1）走 c2c scope；自发消息补记进 c2c_messages", async () => {
+  const fx = setupDb();
+  try {
+    seedC2cInbound(fx.repo, "C1", 60_000);
+    const mock = makeApiMock();
+    const sender = new Sender({
+      log: createLogger("error"),
+      db: fx.db,
+      repo: fx.repo,
+      tokenManager: {} as never,
+      bots: fx.registry,
+      apiFor: () => mock,
+    });
+    const r = await sender.sendAuto(BOT, C2C_USER, "收到！", undefined, "chat");
+    assert.equal(r.status, "sent");
+    assert.equal(r.channel, "passive", "60 分钟窗内走被动");
+    assert.equal(mock.calls.length, 1);
+    assert.equal(mock.calls[0]!.scope, "c2c", "sendRaw 用官方 c2c scope");
+    assert.equal(mock.calls[0]!.targetId, C2C_USER);
+    assert.equal(mock.calls[0]!.body.msg_id, "C1", "被动绑定目标消息");
+    assert.equal(mock.calls[0]!.body.msg_seq, 1);
+    assert.equal(mock.calls[0]!.body.msg_type, 0);
+    const row = fx.repo.getC2cMessageByMsgId(
+      BOT,
+      C2C_USER,
+      r.provider_msg_id!,
+    );
+    assert.ok(row !== null, "自发消息应补记进单聊缓存");
+    assert.equal(Number(row.direction), 1);
+  } finally {
+    fx.close();
+  }
+});
+
+test("M4-19 单聊被动窗超时 → 主动兜底需 opt-in：无 C2C_MSG_RECEIVE 硬拒，开启后放行并记额度", async () => {
+  const fx = setupDb();
+  try {
+    seedC2cInbound(fx.repo, "C1", 61 * 60_000); // 超出 60 分钟被动窗
+    const mock = makeApiMock();
+    const sender = new Sender({
+      log: createLogger("error"),
+      db: fx.db,
+      repo: fx.repo,
+      tokenManager: {} as never,
+      bots: fx.registry,
+      apiFor: () => mock,
+    });
+    await assert.rejects(
+      () => sender.sendAuto(BOT, C2C_USER, "早", undefined, "chat"),
+      (e: Error) =>
+        e.message ===
+        t("send_c2c_not_optin", { user: C2C_USER }),
+      "无 opt-in 记录的主动单聊硬拒绝",
+    );
+    assert.equal(mock.calls.length, 0, "硬拒绝不得触发 API");
+    fx.repo.setC2cSwitch(BOT, C2C_USER, true);
+    const r = await sender.sendAuto(BOT, C2C_USER, "早", undefined, "chat");
+    assert.equal(r.channel, "proactive");
+    assert.equal(mock.calls[0]!.scope, "c2c");
+    assert.equal(
+      mock.calls[0]!.body.msg_id,
+      undefined,
+      "主动消息不绑定 msg_id",
+    );
+    assert.equal(
+      fx.repo.proactiveCountFor(BOT, C2C_USER, beijingDate()),
+      1,
+      "单关系日额度记账 +1",
+    );
+  } finally {
+    fx.close();
+  }
+});
+
+test("M4-20 单聊门禁：对方拒绝（C2C_MSG_REJECT）连被动回复也硬拒；总开关关 → 拒", async () => {
+  const fx = setupDb();
+  try {
+    seedC2cInbound(fx.repo, "C1");
+    const mock = makeApiMock();
+    const sender = new Sender({
+      log: createLogger("error"),
+      db: fx.db,
+      repo: fx.repo,
+      tokenManager: {} as never,
+      bots: fx.registry,
+      apiFor: () => mock,
+    });
+    fx.repo.setC2cSwitch(BOT, C2C_USER, false);
+    await assert.rejects(
+      () =>
+        sender.reply(BOT, C2C_USER, "C1", "hi", false, false, undefined, "chat"),
+      (e: Error) => e.message === t("send_c2c_optout", { user: C2C_USER }),
+    );
+    assert.equal(mock.calls.length, 0);
+    fx.repo.setSendEnable(false);
+    await assert.rejects(
+      () =>
+        sender.reply(BOT, C2C_USER, "C1", "hi", false, false, undefined, "chat"),
+      (e: Error) =>
+        e.message ===
+        t("send_disabled", {
+          enabled: "false",
+          allow: 1, // setupDb：白名单 [GROUP]
+        }),
+    );
+    assert.equal(mock.calls.length, 0);
+  } finally {
+    fx.close();
+  }
+});
+
+test("M4-21 单聊被动窗次数上限 4 次；撤回走 c2c scope", async () => {
+  const fx = setupDb();
+  try {
+    seedC2cInbound(fx.repo, "C1");
+    const mock = makeApiMock();
+    const sender = new Sender({
+      log: createLogger("error"),
+      db: fx.db,
+      repo: fx.repo,
+      tokenManager: {} as never,
+      bots: fx.registry,
+      apiFor: () => mock,
+    });
+    for (let i = 0; i < 4; i += 1) {
+      const r = await sender.reply(
+        BOT,
+        C2C_USER,
+        "C1",
+        `回复${i}`,
+        false,
+        false,
+        undefined,
+        "chat",
+      );
+      assert.equal(r.status, "sent");
+    }
+    await assert.rejects(
+      () =>
+        sender.reply(BOT, C2C_USER, "C1", "第5次", false, false, undefined, "chat"),
+      (e: Error) =>
+        e.message ===
+        t("send_window_exhausted_c2c", { used: 4, max: 4 }),
+      "官方限制每条单聊消息最多回复 4 次",
+    );
+    assert.equal(mock.calls.length, 4);
+    await sender.recall(BOT, C2C_USER, "PROVIDER_1", "chat");
+    assert.equal(mock.recalls.length, 1, "撤回 API 被调用");
   } finally {
     fx.close();
   }

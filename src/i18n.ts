@@ -27,13 +27,21 @@ const zh = {
   retention_purged: "保留策略清理完成：删除 {removed} 条过期缓存消息。",
   // —— 发送器（M4） ——
   send_disabled:
-    "发送功能未开启，已硬拒绝。写操作需要双重门禁：发送总开关开启（WebUI 设置页管理）且目标群在该 bot 白名单内。当前开关 {enabled}，该 bot 白名单群数 {allow}。",
+    "发送功能未开启，已硬拒绝。写操作需要发送总开关开启（WebUI 设置页管理），且目标会话满足发送条件（群=在该 bot 白名单内；私聊=对方未拒绝消息接收）。当前开关 {enabled}，该 bot 白名单群数 {allow}。",
   send_not_allowlisted:
     "目标群 {group} 不在该 bot 的发送白名单中，已硬拒绝。如确需对该群发送，请在 WebUI 设置页将该群加入白名单（即时生效，无需重启）。",
+  send_c2c_optout:
+    "对方已关闭机器人的消息接收（官方 C2C_MSG_REJECT 事件），单聊发送已硬拒绝：{user}。",
+  send_c2c_not_optin:
+    "对方未开启机器人的主动消息接收（无 C2C_MSG_RECEIVE 记录），单聊主动消息已硬拒绝：{user}。可让对方先给 bot 发一条消息——60 分钟被动窗口内可直接回复。",
   send_window_expired:
     "被动回复窗口已过期：群聊消息仅可在官方消息时间后 5 分钟内回复（官方限制）。可改为直接发送（自动走主动消息，消耗群日额度），或放弃本次回复。",
+  send_window_expired_c2c:
+    "被动回复窗口已过期：单聊消息仅可在官方消息时间后 60 分钟内回复（官方限制）。请放弃本次回复。",
   send_window_exhausted:
     "该消息的被动回复次数已用完（{used}/{max}，官方限制每条群消息最多回复 5 次）。可改为直接发送（自动走主动通道）。",
+  send_window_exhausted_c2c:
+    "该消息的被动回复次数已用完（{used}/{max}，官方限制每条单聊消息最多回复 4 次）。",
   send_window_no_msg:
     "回复目标消息不在缓存中：msg_id={msg_id}。请先用 search / browse 确认消息存在（撤回/回复只能针对官方消息ID）。",
   send_quote_not_found:
@@ -105,13 +113,21 @@ const en: Translation = {
   retention_purged:
     "Retention purge done: removed {removed} expired cached messages.",
   send_disabled:
-    "Sending is disabled, rejected. Writes require two gates: the master send switch enabled (managed in the WebUI settings) and the target group in the bot's allowlist. Current switch {enabled}, allowlisted groups {allow}.",
+    "Sending is disabled, rejected. Writes require the master send switch enabled (managed in the WebUI settings) and the target conversation meeting send conditions (group = in the bot's allowlist; direct message = recipient has not rejected messages). Current switch {enabled}, allowlisted groups {allow}.",
   send_not_allowlisted:
     "Target group {group} is not in this bot's send allowlist, rejected. To enable, add the group to the allowlist in the WebUI settings page (effective immediately, no restart).",
+  send_c2c_optout:
+    "The recipient has disabled bot messages (official C2C_MSG_REJECT event); direct-message send rejected: {user}.",
+  send_c2c_not_optin:
+    "The recipient has not enabled proactive bot messages (no C2C_MSG_RECEIVE record); proactive direct message rejected: {user}. Ask them to message the bot first — replies are possible within the 60-minute passive window.",
   send_window_expired:
     "Passive reply window expired: group messages can only be replied within 5 minutes of the official timestamp (official limit). Send directly instead (auto-routes to proactive, consumes daily quota), or skip.",
+  send_window_expired_c2c:
+    "Passive reply window expired: direct messages can only be replied within 60 minutes of the official timestamp (official limit). Skip this reply.",
   send_window_exhausted:
     "Reply count exhausted for this message ({used}/{max}, official limit: max 5 replies per group message). Send directly instead (auto-routes to proactive).",
+  send_window_exhausted_c2c:
+    "Reply count exhausted for this message ({used}/{max}, official limit: max 4 replies per direct message).",
   send_window_no_msg:
     "Reply target not in cache: msg_id={msg_id}. Use search / browse to locate a cached message first (reply/recall require official message IDs).",
   send_quote_not_found:

@@ -250,6 +250,35 @@ export class Repo {
     return info.changes > 0;
   }
 
+  /** 单聊自发消息补记（官方不回推 bot 自发消息，发送成功后调用）；msg_id 重复=幂等重放 */
+  saveOutgoingC2cMessage(p: {
+    botId: string;
+    userOpenid: string;
+    msgId: string;
+    content: string;
+    ts: number;
+    authorName: string | null;
+  }): boolean {
+    const info = this.insertC2cMsg.run({
+      bot_id: p.botId,
+      user_openid: p.userOpenid,
+      msg_id: p.msgId,
+      author_openid: null,
+      author_name: p.authorName,
+      author_role: null,
+      ts: p.ts,
+      content: p.content,
+      mentions_json: null,
+      elements_json: null,
+      attachments_json: null,
+      ark_json: null,
+      raw_json: null,
+      direction: 1,
+      msg_idx: null,
+    });
+    return info.changes > 0;
+  }
+
   /** GROUP_ADD_ROBOT：注册表新增（full_msg_enabled=0 未确认，等 RECEIVE/REJECT 事件修正） */
   addGroup(botId: string, groupOpenid: string): void {
     this.upsertGroupStmt.run({

@@ -27,11 +27,16 @@ import {
   isMarkdownPermissionError,
 } from "./errors";
 
-/** 被动回复窗口（API-FACTS #3，官方限制）：群 5 分钟/5 次；单聊 60 分钟/4 次（v1 工具面仅群聊） */
+/** 被动回复窗口（API-FACTS #3，官方限制）：群 5 分钟/5 次；单聊 60 分钟/4 次 */
 export const PASSIVE_WINDOW = {
   group: { ms: 5 * 60_000, max: 5 },
   c2c: { ms: 60 * 60_000, max: 4 },
 } as const;
+
+/** 工具面会话类型（group/chat）→ 官方 API scope（group/c2c）：两套词汇在发送边界转换 */
+function scopeOf(kind: "group" | "chat"): "group" | "c2c" {
+  return kind === "chat" ? "c2c" : "group";
+}
 
 /** 官方限制常量：单关系（每群）主动消息 20 条/分钟、1000 条/天 */
 export const PER_RELATION_QPM = 20;
@@ -235,19 +240,37 @@ export class Sender {
     return app;
   }
 
-  /** 双重门禁（M8 读库版）：发送总开关（kv settings）+ 该 bot 白名单（bots 表）。硬拒绝不发任何请求。 */
-  private gate(botId: string, groupOpenid: string): BotApp {
+  /** 双重门禁（M8 读库版）：发送总开关（kv settings）+ 会话级发送条件——
+   * 群=该 bot 白名单（bots 表）；私聊=用户未拒绝（C2C_MSG_REJECT 置 false 即硬拒），
+   * 主动消息另需用户已同意（C2C_MSG_RECEIVE，requireOptIn=true 时校验）。硬拒绝不发任何请求。 */
+  private gate(
+    botId: string,
+    kind: "group" | "chat",
+    targetId: string,
+    requireOptIn = false,
+  ): BotApp {
     const sendEnabled = this.deps.repo.getSendEnable();
-    const allowGroups = this.deps.bots?.allowGroupsOf(botId) ?? [];
-    if (!sendEnabled || !allowGroups.includes(groupOpenid)) {
+    if (!sendEnabled) {
       throw new Error(
-        allowGroups.includes(groupOpenid)
-          ? t("send_disabled", {
-              enabled: String(sendEnabled),
-              allow: allowGroups.length,
-            })
-          : t("send_not_allowlisted", { group: groupOpenid }),
+        t("send_disabled", {
+          enabled: String(sendEnabled),
+          allow: this.deps.bots?.allowGroupsOf(botId).length ?? 0,
+        }),
       );
+    }
+    if (kind === "group") {
+      const allowGroups = this.deps.bots?.allowGroupsOf(botId) ?? [];
+      if (!allowGroups.includes(targetId)) {
+        throw new Error(t("send_not_allowlisted", { group: targetId }));
+      }
+    } else {
+      const optIn = this.deps.repo.getC2cSwitch(botId, targetId);
+      if (optIn === false) {
+        throw new Error(t("send_c2c_optout", { user: targetId }));
+      }
+      if (requireOptIn && optIn !== true) {
+        throw new Error(t("send_c2c_not_optin", { user: targetId }));
+      }
     }
     return this.appOf(botId);
   }
@@ -265,7 +288,7 @@ export class Sender {
 
   async reply(
     botId: string,
-    groupOpenid: string,
+    targetId: string,
     replyMsgId: string,
     /** 文本/markdown 内容；媒体发送时为可选配文（可空） */
     text: string | undefined,
@@ -274,8 +297,10 @@ export class Sender {
     quote = false,
     /** 富媒体（首版仅图片）：msg_type=7，text 降级为配文；file_info 由 uploadMedia 预先取得 */
     media?: { fileInfo: string },
+    /** 会话类型（缺省群聊）：决定被动窗口（群 5 分钟/5 次、单聊 60 分钟/4 次）与缓存查询表 */
+    kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
-    const app = this.gate(botId, groupOpenid);
+    const app = this.gate(botId, kind, targetId);
     const content = text === undefined ? "" : this.checkContent(text);
     const payloadHash =
       media !== undefined
@@ -303,20 +328,27 @@ export class Sender {
       };
     }
 
-    // 窗口与次数（官方限制：群 5 分钟/5 次）
-    const inbound = this.deps.repo.getMessageByMsgId(
-      botId,
-      groupOpenid,
-      replyMsgId,
-    );
+    // 窗口与次数（官方限制：群 5 分钟/5 次、单聊 60 分钟/4 次）
+    const inbound =
+      kind === "chat"
+        ? this.deps.repo.getC2cMessageByMsgId(botId, targetId, replyMsgId)
+        : this.deps.repo.getMessageByMsgId(botId, targetId, replyMsgId);
     if (inbound === null || inbound.ts === null)
       throw new Error(t("send_window_no_msg", { msg_id: replyMsgId }));
-    const win = PASSIVE_WINDOW.group;
+    const win = PASSIVE_WINDOW[scopeOf(kind)];
     if (Date.now() - inbound.ts > win.ms)
-      throw new Error(t("send_window_expired"));
+      throw new Error(
+        kind === "chat"
+          ? t("send_window_expired_c2c")
+          : t("send_window_expired"),
+      );
     const used = this.deps.repo.countPassiveSends(botId, replyMsgId);
     if (used >= win.max)
-      throw new Error(t("send_window_exhausted", { used, max: win.max }));
+      throw new Error(
+        kind === "chat"
+          ? t("send_window_exhausted_c2c", { used, max: win.max })
+          : t("send_window_exhausted", { used, max: win.max }),
+      );
 
     const send = async (
       asMarkdown: boolean,
@@ -324,7 +356,7 @@ export class Sender {
     ): Promise<SendResult> => {
       const reservation = this.deps.repo.insertSend({
         bot_id: botId,
-        target_openid: groupOpenid,
+        target_openid: targetId,
         kind: "passive",
         reply_msg_id: replyMsgId,
         msg_seq: seq,
@@ -374,22 +406,24 @@ export class Sender {
           };
       try {
         const resp = await this.api(app).sendRaw(
-          "group",
-          groupOpenid,
+          scopeOf(kind),
+          targetId,
           credsOf(app),
           body,
         );
         this.deps.repo.updateSendStatus(reservation, "sent", resp.id);
         this.recordOutgoing(
           botId,
-          groupOpenid,
+          kind,
+          targetId,
           resp.id,
           media !== undefined
             ? `![图片]${content === "" ? "" : ` ${content}`}`
             : content,
         );
         this.log.info("passive sent", {
-          group: groupOpenid,
+          kind,
+          target: targetId,
           seq,
           provider: resp.id,
         });
@@ -451,7 +485,7 @@ export class Sender {
 
   async proactive(
     botId: string,
-    groupOpenid: string,
+    targetId: string,
     /** 文本/markdown 内容；媒体发送时为可选配文（可空） */
     text: string | undefined,
     /**
@@ -461,8 +495,10 @@ export class Sender {
     quoteMsgId?: string,
     /** 富媒体（首版仅图片）：msg_type=7，text 降级为配文；file_info 由 uploadMedia 预先取得 */
     media?: { fileInfo: string },
+    /** 会话类型（缺省群聊）；私聊主动消息额外要求用户已同意（C2C_MSG_RECEIVE） */
+    kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
-    const app = this.gate(botId, groupOpenid);
+    const app = this.gate(botId, kind, targetId, true);
     const content = text === undefined ? "" : this.checkContent(text);
     const payloadHash =
       media !== undefined
@@ -471,12 +507,12 @@ export class Sender {
     const repo = this.deps.repo;
     const date = beijingDate();
 
-    // 日额度（官方 1000 条/天/群）：先查后记，超限明确报错不重试
-    const usedToday = repo.proactiveCountFor(botId, groupOpenid, date);
+    // 日额度（官方 1000 条/天/单关系）：先查后记，超限明确报错不重试
+    const usedToday = repo.proactiveCountFor(botId, targetId, date);
     if (usedToday >= this.limits.perGroupDaily) {
       throw new Error(
         t("send_quota_daily", {
-          group: groupOpenid,
+          group: targetId,
           used: usedToday,
           limit: this.limits.perGroupDaily,
         }),
@@ -497,7 +533,7 @@ export class Sender {
         }),
       );
     }
-    const relTake = this.relationBucket(botId, groupOpenid).tryTake();
+    const relTake = this.relationBucket(botId, targetId).tryTake();
     if (!relTake.ok) {
       throw new Error(
         t("send_rate_limited_relation", { wait: waitOf(relTake) }),
@@ -506,7 +542,7 @@ export class Sender {
 
     const reservation = repo.insertSend({
       bot_id: botId,
-      target_openid: groupOpenid,
+      target_openid: targetId,
       kind: "proactive",
       reply_msg_id: null,
       msg_seq: null,
@@ -515,8 +551,8 @@ export class Sender {
     });
     try {
       const resp = await this.api(app).sendRaw(
-        "group",
-        groupOpenid,
+        scopeOf(kind),
+        targetId,
         credsOf(app),
         {
           ...(media !== undefined
@@ -538,17 +574,19 @@ export class Sender {
         },
       );
       repo.updateSendStatus(reservation, "sent", resp.id);
-      repo.incrQuotaDaily(botId, groupOpenid, date);
+      repo.incrQuotaDaily(botId, targetId, date);
       this.recordOutgoing(
         botId,
-        groupOpenid,
+        kind,
+        targetId,
         resp.id,
         media !== undefined
           ? `![图片]${content === "" ? "" : ` ${content}`}`
           : content,
       );
       this.log.info("proactive sent", {
-        group: groupOpenid,
+        kind,
+        target: targetId,
         provider: resp.id,
       });
       return { status: "sent", channel: "proactive", provider_msg_id: resp.id };
@@ -562,7 +600,7 @@ export class Sender {
           undefined,
           biz ?? undefined,
         );
-        repo.incrQuotaDaily(botId, groupOpenid, date);
+        repo.incrQuotaDaily(botId, targetId, date);
         return {
           status: "pending_audit",
           channel: "proactive",
@@ -582,35 +620,40 @@ export class Sender {
   //   B. 主动 + 引用块（目标任意时效）——2026-10-26 真机验证受理
   async sendAuto(
     botId: string,
-    groupOpenid: string,
+    targetId: string,
     text: string,
-    /** 可选：引用群内某条消息（客户端显示引用样式）。须为缓存中存在的官方消息ID */
+    /** 可选：引用会话内某条消息（客户端显示引用样式）。须为缓存中存在的官方消息ID */
     quoteMsgId?: string,
+    /** 会话类型（缺省群聊） */
+    kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
     const { bindMsgId, quote } = this.resolveChannel(
       botId,
-      groupOpenid,
+      kind,
+      targetId,
       quoteMsgId,
     );
     if (bindMsgId !== undefined) {
-      return this.reply(botId, groupOpenid, bindMsgId, text, false, quote);
+      return this.reply(botId, targetId, bindMsgId, text, false, quote, undefined, kind);
     }
-    return this.proactive(botId, groupOpenid, text, quoteMsgId);
+    return this.proactive(botId, targetId, text, quoteMsgId, undefined, kind);
   }
 
   /** send_media 工具入口：富媒体（首版仅图片），通道自动路由（与 sendAuto 同款被动优先）。
    * 2026-10-27 真机验证：msg_type=7 被动/主动/引用块三形态官方均受理。 */
   async sendMediaAuto(
     botId: string,
-    groupOpenid: string,
+    targetId: string,
     /** 图片来源：http(s):// URL 或 data:image/...;base64（传输自足，跨机安全） */
     mediaParam: string,
     /** 可选配文（msg_type=7 的 content） */
     text?: string,
-    /** 可选：引用群内某条消息（须在缓存中） */
+    /** 可选：引用会话内某条消息（须在缓存中） */
     quoteMsgId?: string,
+    /** 会话类型（缺省群聊） */
+    kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
-    const app = this.gate(botId, groupOpenid); // 先门禁：上传同属写路径前置
+    const app = this.gate(botId, kind, targetId); // 先门禁：上传同属写路径前置
     // 来源解析：asset:<id>（服务端资产）→ file；其余按 URL / data: 内联
     let src: MediaSource;
     if (mediaParam.startsWith("asset:")) {
@@ -623,7 +666,8 @@ export class Sender {
     }
     const { bindMsgId, quote } = this.resolveChannel(
       botId,
-      groupOpenid,
+      kind,
+      targetId,
       quoteMsgId,
     );
     // 上传转存（官方对同内容返回相同 file_info，TTL 24h；失败不消耗通道额度）
@@ -631,42 +675,47 @@ export class Sender {
     try {
       fileInfo = await this
         .api(app)
-        .uploadMedia("group", groupOpenid, credsOf(app), src);
+        .uploadMedia(scopeOf(kind), targetId, credsOf(app), src);
     } catch (e) {
       throw new Error(
         t("media_upload_failed", { reason: describeSendError(e) }),
       );
     }
     this.log.info("media uploaded", {
-      group: groupOpenid,
+      kind,
+      target: targetId,
       file_info_len: fileInfo.length,
     });
     if (bindMsgId !== undefined) {
-      return this.reply(botId, groupOpenid, bindMsgId, text, false, quote, {
+      return this.reply(botId, targetId, bindMsgId, text, false, quote, {
         fileInfo,
-      });
+      }, kind);
     }
-    return this.proactive(botId, groupOpenid, text, quoteMsgId, { fileInfo });
+    return this.proactive(botId, targetId, text, quoteMsgId, { fileInfo }, kind);
   }
 
   /** 通道判定（sendAuto/sendMediaAuto 共用）：引用目标窗内→绑=引（形态A）；
    * 无引用→绑最新可绑消息（白嫖被动）；否则主动兜底 */
   private resolveChannel(
     botId: string,
-    groupOpenid: string,
+    kind: "group" | "chat",
+    targetId: string,
     quoteMsgId?: string,
   ): { bindMsgId?: string; quote: boolean } {
     if (quoteMsgId !== undefined) {
-      const q = this.deps.repo.getMessageByMsgId(botId, groupOpenid, quoteMsgId);
+      const q =
+        kind === "chat"
+          ? this.deps.repo.getC2cMessageByMsgId(botId, targetId, quoteMsgId)
+          : this.deps.repo.getMessageByMsgId(botId, targetId, quoteMsgId);
       if (q === null || q.ts === null) {
         throw new Error(t("send_quote_not_found", { msg_id: quoteMsgId }));
       }
     }
     let bindMsgId: string | undefined;
-    if (quoteMsgId !== undefined && this.bindable(botId, groupOpenid, quoteMsgId)) {
+    if (quoteMsgId !== undefined && this.bindable(botId, kind, targetId, quoteMsgId)) {
       bindMsgId = quoteMsgId;
     } else if (quoteMsgId === undefined) {
-      bindMsgId = this.latestBindable(botId, groupOpenid);
+      bindMsgId = this.latestBindable(botId, kind, targetId);
     }
     return {
       bindMsgId,
@@ -674,26 +723,43 @@ export class Sender {
     };
   }
 
-  /** 消息可否作被动绑定目标：在缓存、窗内（5 分钟）、未用尽次数（5 次） */
-  private bindable(botId: string, groupOpenid: string, msgId: string): boolean {
-    const row = this.deps.repo.getMessageByMsgId(botId, groupOpenid, msgId);
+  /** 消息可否作被动绑定目标：在缓存、窗内（群 5 分钟/单聊 60 分钟）、未用尽次数 */
+  private bindable(
+    botId: string,
+    kind: "group" | "chat",
+    targetId: string,
+    msgId: string,
+  ): boolean {
+    const row =
+      kind === "chat"
+        ? this.deps.repo.getC2cMessageByMsgId(botId, targetId, msgId)
+        : this.deps.repo.getMessageByMsgId(botId, targetId, msgId);
     if (row === null || row.ts === null) return false;
-    if (Date.now() - row.ts > PASSIVE_WINDOW.group.ms) return false;
+    if (Date.now() - row.ts > PASSIVE_WINDOW[scopeOf(kind)].ms) return false;
     return (
-      this.deps.repo.countPassiveSends(botId, msgId) < PASSIVE_WINDOW.group.max
+      this.deps.repo.countPassiveSends(botId, msgId) <
+      PASSIVE_WINDOW[scopeOf(kind)].max
     );
   }
 
   /** 最新可绑消息：新→旧扫 10 条，跳过自发补记行（direction=1，被动窗口语义是回复他人），
    * 第一条窗内且未超次的（窗内分钟级，10 条充裕） */
-  private latestBindable(botId: string, groupOpenid: string): string | undefined {
-    for (const row of this.deps.repo.browseLatest(botId, groupOpenid, 10)) {
+  private latestBindable(
+    botId: string,
+    kind: "group" | "chat",
+    targetId: string,
+  ): string | undefined {
+    const rows =
+      kind === "chat"
+        ? this.deps.repo.browseC2cLatest(botId, targetId, 10)
+        : this.deps.repo.browseLatest(botId, targetId, 10);
+    for (const row of rows) {
       if (row.direction === 1) continue;
       if (
         row.ts !== null &&
-        Date.now() - row.ts <= PASSIVE_WINDOW.group.ms &&
+        Date.now() - row.ts <= PASSIVE_WINDOW[scopeOf(kind)].ms &&
         this.deps.repo.countPassiveSends(botId, row.msg_id) <
-          PASSIVE_WINDOW.group.max
+          PASSIVE_WINDOW[scopeOf(kind)].max
       ) {
         return row.msg_id;
       }
@@ -708,20 +774,33 @@ export class Sender {
    */
   private recordOutgoing(
     botId: string,
-    groupOpenid: string,
+    kind: "group" | "chat",
+    targetId: string,
     providerMsgId: string,
     content: string,
   ): void {
     try {
-      this.deps.repo.saveOutgoingGroupMessage({
-        botId,
-        groupOpenid,
-        msgId: providerMsgId,
-        content,
-        ts: Date.now(),
-        authorName:
-          this.deps.bots?.list().find((b) => b.appid === botId)?.name ?? null,
-      });
+      const authorName =
+        this.deps.bots?.list().find((b) => b.appid === botId)?.name ?? null;
+      if (kind === "chat") {
+        this.deps.repo.saveOutgoingC2cMessage({
+          botId,
+          userOpenid: targetId,
+          msgId: providerMsgId,
+          content,
+          ts: Date.now(),
+          authorName,
+        });
+      } else {
+        this.deps.repo.saveOutgoingGroupMessage({
+          botId,
+          groupOpenid: targetId,
+          msgId: providerMsgId,
+          content,
+          ts: Date.now(),
+          authorName,
+        });
+      }
     } catch (e) {
       this.log.warn("outgoing message persist failed", {
         reason: e instanceof Error ? e.message : String(e),
@@ -733,13 +812,15 @@ export class Sender {
 
   async recall(
     botId: string,
-    groupOpenid: string,
+    targetId: string,
     messageId: string,
+    /** 会话类型（缺省群聊） */
+    kind: "group" | "chat" = "group",
   ): Promise<{ recalled: string }> {
-    const app = this.gate(botId, groupOpenid);
+    const app = this.gate(botId, kind, targetId);
     const reservation = this.deps.repo.insertSend({
       bot_id: botId,
-      target_openid: groupOpenid,
+      target_openid: targetId,
       kind: "recall",
       reply_msg_id: messageId,
       msg_seq: null,
@@ -748,13 +829,17 @@ export class Sender {
     });
     try {
       await this.api(app).recallMessage(
-        "group",
-        groupOpenid,
+        scopeOf(kind),
+        targetId,
         messageId,
         credsOf(app),
       );
       this.deps.repo.updateSendStatus(reservation, "sent");
-      this.log.info("message recalled", { group: groupOpenid, messageId });
+      this.log.info("message recalled", {
+        kind,
+        target: targetId,
+        messageId,
+      });
       return { recalled: messageId };
     } catch (e) {
       this.deps.repo.updateSendStatus(
