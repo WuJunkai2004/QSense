@@ -768,3 +768,165 @@ test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防�
     await fx.close();
   }
 });
+
+test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存；锚点跨侧可操作提示", async () => {
+  const fx = await setupServer();
+  let client: Client | null = null;
+  try {
+    const repo = new Repo(fx.db);
+    const USER = "C2C_OPENID_U1";
+    const c2cBase = {
+      botId: "10001",
+      scope: "c2c" as const,
+      scopeId: USER,
+      mentions: [],
+      elements: undefined,
+      attachments: [],
+      raw: {},
+    };
+    // 被引消息 + 引用消息（引用回溯应查 c2c_messages 而非群聊表）
+    repo.saveC2cMessage({
+      ...c2cBase,
+      msgId: "C1",
+      authorOpenid: USER,
+      authorName: undefined,
+      authorRole: undefined,
+      ts: Date.now() - 60_000,
+      content: "被引的单聊原文",
+      msgIdx: "REFIDX_C1",
+    });
+    repo.saveC2cMessage({
+      ...c2cBase,
+      msgId: "C2",
+      authorOpenid: USER,
+      authorName: undefined,
+      authorRole: undefined,
+      ts: Date.now(),
+      content: "[引用 msg_idx=REFIDX_C1]\n单聊里引用一下",
+    });
+
+    client = await connectClient(fx.baseUrl, fx.agentToken);
+
+    // list_new 红点含私聊会话（unread=2）
+    const fresh = payloadOf(
+      (await client.callTool({ name: "list_new", arguments: {} })) as never,
+    );
+    const chat = (fresh.conversations as Array<Record<string, unknown>>).find(
+      (c) => c.type === "chat",
+    )!;
+    assert.equal(chat.id, USER);
+    assert.equal(chat.unread, 2);
+
+    // get_new type:"chat"：拉取即已读，重复调用不重拉；引用回溯内联被引原文
+    const first = payloadOf(
+      (await client.callTool({
+        name: "get_new",
+        arguments: { group: USER, type: "chat" },
+      })) as never,
+    );
+    assert.equal(first.count, 2);
+    const again = payloadOf(
+      (await client.callTool({
+        name: "get_new",
+        arguments: { group: USER, type: "chat" },
+      })) as never,
+    );
+    assert.equal(again.count, 0, "水位已推进，重拉为空");
+    const c2 = (first.messages as Array<Record<string, unknown>>).find(
+      (m) => m.msg_id === "C2",
+    )!;
+    assert.ok(String(c2.content).includes("[引用 @"), "单聊引用内联被引作者");
+    assert.ok(String(c2.content).includes("> 被引的单聊原文"));
+
+    // 已读后红点消失
+    const after = payloadOf(
+      (await client.callTool({
+        name: "list_all",
+        arguments: { type: "chat" },
+      })) as never,
+    );
+    assert.equal(
+      (after.conversations as Array<Record<string, unknown>>).find(
+        (c) => c.id === USER,
+      )!.unread,
+      0,
+    );
+
+    // search：≥3 字 FTS 命中；<3 字降级 LIKE 兜底
+    const fts = payloadOf(
+      (await client.callTool({
+        name: "search",
+        arguments: { group: USER, type: "chat", query: "单聊原文" },
+      })) as never,
+    );
+    assert.equal(fts.count, 1, "FTS 只命中 C1");
+    const like = payloadOf(
+      (await client.callTool({
+        name: "search",
+        arguments: { group: USER, type: "chat", query: "引用" },
+      })) as never,
+    );
+    assert.equal(like.count, 1, "LIKE 兜底命中 C2 令牌行");
+
+    // browse：单聊锚点 around
+    const around = payloadOf(
+      (await client.callTool({
+        name: "browse",
+        arguments: { group: USER, type: "chat", msg_id: "C1", mode: "around" },
+      })) as never,
+    );
+    assert.equal(around.count, 2, "前后文含 C1/C2 两条");
+
+    // 群聊侧不受影响（type 缺省=group，向后兼容）
+    const g = payloadOf(
+      (await client.callTool({
+        name: "get_new",
+        arguments: { group: GROUP },
+      })) as never,
+    );
+    assert.equal(g.count, 5, "群聊种子消息照常拉取");
+
+    // 锚点跨侧提示：私聊会话里查群聊消息（及反向）→ 指出实际所在与应传 type
+    const wrongSide = (await client.callTool({
+      name: "context",
+      arguments: { group: USER, type: "chat", msg_id: "M1" },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(wrongSide.isError, true);
+    assert.ok(
+      wrongSide.content[0]!.text.includes('type:"group"'),
+      "提示消息在群聊侧",
+    );
+    const wrongSide2 = (await client.callTool({
+      name: "context",
+      arguments: { group: GROUP, msg_id: "C1" },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(wrongSide2.isError, true);
+    assert.ok(
+      wrongSide2.content[0]!.text.includes('type:"chat"'),
+      "提示消息在私聊侧",
+    );
+
+    // 真不存在的消息 → 仍走"可先 search"路径
+    const miss = (await client.callTool({
+      name: "context",
+      arguments: { group: USER, type: "chat", msg_id: "NOPE" },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(miss.isError, true);
+    assert.ok(miss.content[0]!.text.includes("search"));
+
+    // type 非法值 → 可操作错误
+    const badType = (await client.callTool({
+      name: "get_new",
+      arguments: { group: USER, type: "all" },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(badType.isError, true);
+    assert.ok(badType.content[0]!.text.includes("group/chat"));
+  } finally {
+    try {
+      await client?.close();
+    } catch {
+      /* 已关闭则忽略 */
+    }
+    await fx.close();
+  }
+});

@@ -50,6 +50,17 @@ export class Repo {
   private readonly insertC2cMsg: Stmt<[Record<string, unknown>]>;
   /** 引用回溯：msg_idx 令牌 → 被引消息行（resolveQuotes 专用） */
   private readonly msgIdxStmt: Stmt<[string, string, string]>;
+  /** 单聊镜像查询（c2c_messages，scope 列 user_openid）：与群聊读取层同形 */
+  private readonly c2cAfterStmt: Stmt<[string, string, number, number]>;
+  private readonly c2cByMsgIdStmt: Stmt<[string, string, string]>;
+  private readonly c2cMsgIdxStmt: Stmt<[string, string, string]>;
+  private readonly c2cBeforeStmt: Stmt<
+    [string, string, number, number, number, number]
+  >;
+  private readonly c2cAfterTsStmt: Stmt<
+    [string, string, number, number, number, number]
+  >;
+  private readonly c2cLatestStmt: Stmt<[string, string, number]>;
   private readonly upsertGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly ensureGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly setGroupSwitchStmt: Stmt<[Record<string, unknown>]>;
@@ -102,6 +113,33 @@ export class Repo {
     this.msgIdxStmt = db.prepare(
       "SELECT author_name, content AS body FROM messages WHERE bot_id = ? AND group_openid = ? AND msg_idx = ? ORDER BY rowid DESC LIMIT 1",
     );
+    // 单聊镜像（c2c_messages）：读取层五件套与引用回溯，SQL 与群聊版同形、scope 列为 user_openid
+    this.c2cAfterStmt = db.prepare(`
+      SELECT rowid AS rid, * FROM c2c_messages
+      WHERE bot_id = ? AND user_openid = ? AND rowid > ?
+      ORDER BY rowid ASC LIMIT ?
+    `);
+    this.c2cByMsgIdStmt = db.prepare(
+      "SELECT rowid AS rid, * FROM c2c_messages WHERE bot_id = ? AND user_openid = ? AND msg_id = ?",
+    );
+    this.c2cMsgIdxStmt = db.prepare(
+      "SELECT author_name, content AS body FROM c2c_messages WHERE bot_id = ? AND user_openid = ? AND msg_idx = ? ORDER BY rowid DESC LIMIT 1",
+    );
+    this.c2cBeforeStmt = db.prepare(`
+      SELECT rowid AS rid, * FROM c2c_messages
+      WHERE bot_id = ? AND user_openid = ? AND (ts < ? OR (ts = ? AND rowid < ?))
+      ORDER BY ts DESC, rowid DESC LIMIT ?
+    `);
+    this.c2cAfterTsStmt = db.prepare(`
+      SELECT rowid AS rid, * FROM c2c_messages
+      WHERE bot_id = ? AND user_openid = ? AND (ts > ? OR (ts = ? AND rowid > ?))
+      ORDER BY ts ASC, rowid ASC LIMIT ?
+    `);
+    this.c2cLatestStmt = db.prepare(`
+      SELECT rowid AS rid, * FROM c2c_messages
+      WHERE bot_id = ? AND user_openid = ?
+      ORDER BY ts DESC, rowid DESC LIMIT ?
+    `);
     this.upsertGroupStmt = db.prepare(`
       INSERT INTO groups(bot_id, group_openid, full_msg_enabled, added_at, updated_at)
       VALUES (@bot_id, @group_openid, @full_msg_enabled, @now, @now)
@@ -393,6 +431,21 @@ export class Repo {
       .all(botId, groupOpenid, afterRowid, limit) as MsgRow[];
   }
 
+  /** 单聊镜像：get_new 增量拉取（scope=user_openid；水位键 `c2c:{openid}`，见 getCursor） */
+  getC2cMessagesAfter(
+    botId: string,
+    userOpenid: string,
+    afterRowid: number,
+    limit: number,
+  ): MsgRow[] {
+    return this.c2cAfterStmt.all(
+      botId,
+      userOpenid,
+      afterRowid,
+      limit,
+    ) as MsgRow[];
+  }
+
   getMessageByMsgId(
     botId: string,
     groupOpenid: string,
@@ -403,6 +456,40 @@ export class Repo {
         "SELECT rowid AS rid, * FROM messages WHERE bot_id = ? AND group_openid = ? AND msg_id = ?",
       )
       .get(botId, groupOpenid, msgId) as MsgRow | undefined;
+    return row ?? null;
+  }
+
+  /** 单聊镜像：锚点定位（browse/context/get_media 共用） */
+  getC2cMessageByMsgId(
+    botId: string,
+    userOpenid: string,
+    msgId: string,
+  ): MsgRow | null {
+    const row = this.c2cByMsgIdStmt.get(botId, userOpenid, msgId) as
+      | MsgRow
+      | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * 跨会话 msg_id 定位（官方 msg_id 全局唯一，不限会话）：
+   * 仅服务端在锚点未命中时用于"消息实际在另一侧缓存"的可操作提示，不影响读取语义。
+   */
+  findC2cMessageByMsgId(botId: string, msgId: string): MsgRow | null {
+    const row = this.db
+      .prepare(
+        "SELECT rowid AS rid, * FROM c2c_messages WHERE bot_id = ? AND msg_id = ?",
+      )
+      .get(botId, msgId) as MsgRow | undefined;
+    return row ?? null;
+  }
+
+  findGroupMessageByMsgId(botId: string, msgId: string): MsgRow | null {
+    const row = this.db
+      .prepare(
+        "SELECT rowid AS rid, * FROM messages WHERE bot_id = ? AND msg_id = ?",
+      )
+      .get(botId, msgId) as MsgRow | undefined;
     return row ?? null;
   }
 
@@ -418,6 +505,25 @@ export class Repo {
     groupOpenid: string,
     content: string | null,
   ): string {
+    return this.resolveQuotesIn(this.msgIdxStmt, botId, groupOpenid, content);
+  }
+
+  /** 单聊镜像：引用令牌查 c2c_messages（MCP 读取层 type=chat 时使用） */
+  resolveQuotesC2c(
+    botId: string,
+    userOpenid: string,
+    content: string | null,
+  ): string {
+    return this.resolveQuotesIn(this.c2cMsgIdxStmt, botId, userOpenid, content);
+  }
+
+  /** resolveQuotes 共干：群聊/单聊仅被引查询的表不同，stmt 绑定 (botId, scopeId, msg_idx) */
+  private resolveQuotesIn(
+    stmt: Stmt<[string, string, string]>,
+    botId: string,
+    scopeId: string,
+    content: string | null,
+  ): string {
     const text = content ?? "";
     if (!text.includes("[引用 msg_idx=")) return text;
     const lines = text.split("\n");
@@ -429,7 +535,7 @@ export class Repo {
         out.push(line);
         continue;
       }
-      const row = this.msgIdxStmt.get(botId, groupOpenid, m[1]!) as
+      const row = stmt.get(botId, scopeId, m[1]!) as
         | { author_name: string | null; body: string | null }
         | undefined;
       if (row === undefined) {
@@ -500,6 +606,46 @@ export class Repo {
       .all(botId, groupOpenid, limit) as MsgRow[];
   }
 
+  // —— 单聊镜像（c2c_messages）：browse/context 的群聊查询同形翻版 ——
+
+  browseC2cBefore(
+    botId: string,
+    userOpenid: string,
+    ts: number,
+    rowid: number,
+    limit: number,
+  ): MsgRow[] {
+    return this.c2cBeforeStmt.all(
+      botId,
+      userOpenid,
+      ts,
+      ts,
+      rowid,
+      limit,
+    ) as MsgRow[];
+  }
+
+  browseC2cAfter(
+    botId: string,
+    userOpenid: string,
+    ts: number,
+    rowid: number,
+    limit: number,
+  ): MsgRow[] {
+    return this.c2cAfterTsStmt.all(
+      botId,
+      userOpenid,
+      ts,
+      ts,
+      rowid,
+      limit,
+    ) as MsgRow[];
+  }
+
+  browseC2cLatest(botId: string, userOpenid: string, limit: number): MsgRow[] {
+    return this.c2cLatestStmt.all(botId, userOpenid, limit) as MsgRow[];
+  }
+
   /** WebUI 消息流翻页：beforeRid=null 取最新一页；返回按 rowid 升序（气泡渲染序） */
   messagesPageBefore(
     botId: string,
@@ -560,6 +706,44 @@ export class Repo {
       .all(botId, groupOpenid, like, limit) as MsgRow[];
   }
 
+  /** 单聊镜像：关键词检索（c2c_messages_fts trigram；<3 字 LIKE 兜底，降级策略同群聊） */
+  searchC2cMessages(
+    botId: string,
+    userOpenid: string,
+    query: string,
+    limit: number,
+  ): MsgRow[] {
+    const q = query.trim();
+    if (q === "") return [];
+    if ([...q].length >= 3) {
+      try {
+        const phrase = `"${q.replace(/"/g, '""')}"`;
+        return this.db
+          .prepare(
+            `
+            SELECT m.rowid AS rid, m.* FROM c2c_messages_fts f
+            JOIN c2c_messages m ON m.rowid = f.rowid
+            WHERE c2c_messages_fts MATCH ? AND m.bot_id = ? AND m.user_openid = ?
+            ORDER BY m.ts DESC, m.rowid DESC LIMIT ?
+          `,
+          )
+          .all(phrase, botId, userOpenid, limit) as MsgRow[];
+      } catch {
+        // FTS 语法问题 → LIKE 兜底
+      }
+    }
+    const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    return this.db
+      .prepare(
+        `
+        SELECT rowid AS rid, * FROM c2c_messages
+        WHERE bot_id = ? AND user_openid = ? AND content LIKE ? ESCAPE '\\'
+        ORDER BY ts DESC, rowid DESC LIMIT ?
+      `,
+      )
+      .all(botId, userOpenid, like, limit) as MsgRow[];
+  }
+
   /** 某消息前后文：锚点前 radius 条 + 锚点后 radius 条，按时间轴升序返回 */
   contextMessages(
     botId: string,
@@ -577,6 +761,32 @@ export class Repo {
     const after = this.browseAfter(
       botId,
       groupOpenid,
+      anchor.ts ?? 0,
+      anchor.rid,
+      radius,
+    );
+    return [...before, anchor, ...after].sort(
+      (a, b) => (a.ts ?? 0) - (b.ts ?? 0) || a.rid - b.rid,
+    );
+  }
+
+  /** 单聊镜像：锚点前后文 */
+  contextC2cMessages(
+    botId: string,
+    userOpenid: string,
+    anchor: MsgRow,
+    radius: number,
+  ): MsgRow[] {
+    const before = this.browseC2cBefore(
+      botId,
+      userOpenid,
+      anchor.ts ?? 0,
+      anchor.rid,
+      radius,
+    );
+    const after = this.browseC2cAfter(
+      botId,
+      userOpenid,
       anchor.ts ?? 0,
       anchor.rid,
       radius,

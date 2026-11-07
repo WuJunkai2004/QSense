@@ -1,6 +1,7 @@
 // MCP 工具面定义：以"人类操作QQ"为隐喻组织——
 //   列表层 list_all/list_new（消息列表视角；类型/私聊过滤走 list_all 的 type 参数）→
-//   读取层 get_new/browse/search/context → 名册与额度 list_members/quota →
+//   读取层 get_new/browse/search/context（群聊+私聊，读取工具以 type 参数区分会话侧）→
+//   名册与额度 list_members/quota →
 //   写工具 send/send_media/request_upload/recall（双重门禁）→ 管理 register_bot。
 // 已读水位（拉取即已读）与整群删除（原 forget，迁 WebUI）为服务端内部状态/管理操作，不在 agent 工具面。
 // token 轮换收归 WebUI（2026-10-27 工具面缩窄）：调用即自毁凭证且新值落进对话上下文，属人的运维决策。
@@ -127,13 +128,15 @@ function requireSender(ctx: ToolContext): Sender {
 }
 
 // —— 行 → 输出形状：无任何会话回显（group 是 agent 刚传的参数，不再 echo）；
-// content 引用行读取时内联被引原文；不含 raw_json/elements_json（content 已含展开文本）；
-// bot 自发消息落库 direction=1（官方不回推，发送侧本地补记），读取层据此标 author.role="yourself" ——
+// content 引用行读取时内联被引原文（群聊/私聊分别查各自缓存表）；不含 raw_json/elements_json
+//（content 已含展开文本）；bot 自发消息落库 direction=1（官方不回推，发送侧本地补记），
+// 读取层据此标 author.role="yourself" ——
 
 function msgOut(
   repo: Repo,
   botId: string,
-  group: string,
+  kind: "group" | "chat",
+  scopeId: string,
   row: MsgRow,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {
@@ -144,7 +147,10 @@ function msgOut(
       name: row.author_name,
       role: Number(row.direction) === 1 ? "yourself" : row.author_role,
     },
-    content: repo.resolveQuotes(botId, group, row.content),
+    content:
+      kind === "chat"
+        ? repo.resolveQuotesC2c(botId, scopeId, row.content)
+        : repo.resolveQuotes(botId, scopeId, row.content),
   };
   if (row.mentions_json) out.mentions = JSON.parse(row.mentions_json);
   if (row.attachments_json) out.attachments = JSON.parse(row.attachments_json);
@@ -155,10 +161,11 @@ function msgOut(
 function rowsOut(
   repo: Repo,
   botId: string,
-  group: string,
+  kind: "group" | "chat",
+  scopeId: string,
   rows: MsgRow[],
 ): Record<string, unknown>[] {
-  return rows.map((r) => msgOut(repo, botId, group, r));
+  return rows.map((r) => msgOut(repo, botId, kind, scopeId, r));
 }
 
 function isoTs(ts: number | null | undefined): string | null {
@@ -173,6 +180,59 @@ function optType(args: Record<string, unknown>): "chat" | "group" | "all" {
     throw new ToolError(`参数 type 只接受 chat/group/all，收到：${v}。`);
   }
   return v;
+}
+
+/**
+ * 读取工具（get_new/browse/search/context/get_media）的会话类型：
+ * 缺省 group（向后兼容：存量调用不传 type 即群聊）；chat=私聊（group 参数填对方 user_openid）。
+ * 不做自动探测——QQ 群聊与单聊的 openid 可能同值，按"哪张表有数据"猜会猜错。
+ */
+function optReadType(args: Record<string, unknown>): "group" | "chat" {
+  const v = optStr(args, "type") ?? "group";
+  if (v !== "chat" && v !== "group") {
+    throw new ToolError(
+      `参数 type 只接受 group/chat（私聊传 type:"chat"，group 参数填对方 user_openid），收到：${v}。`,
+    );
+  }
+  return v;
+}
+
+/** 私聊会话的已读水位键（与 listChatConversations 的未读统计一致） */
+function cursorKeyOf(kind: "group" | "chat", scopeId: string): string {
+  return kind === "chat" ? `c2c:${scopeId}` : scopeId;
+}
+
+/**
+ * 锚点定位（browse/context/get_media 共用）：先按调用方声明的类型查；
+ * 未命中时探测另一侧缓存（官方 msg_id 全局唯一）——命中即报"消息实际在哪、该传什么"的
+ * 可操作错误，而非笼统的"不存在"，避免 type 传错的调用被误导去空搜。
+ */
+function anchorOf(
+  ctx: ToolContext,
+  botId: string,
+  kind: "group" | "chat",
+  scopeId: string,
+  msgId: string,
+): MsgRow {
+  const hit =
+    kind === "chat"
+      ? ctx.repo.getC2cMessageByMsgId(botId, scopeId, msgId)
+      : ctx.repo.getMessageByMsgId(botId, scopeId, msgId);
+  if (hit !== null) return hit;
+  const other =
+    kind === "chat"
+      ? ctx.repo.findGroupMessageByMsgId(botId, msgId)
+      : ctx.repo.findC2cMessageByMsgId(botId, msgId);
+  if (other !== null) {
+    const where =
+      kind === "chat"
+        ? `群聊 ${String(other.group_openid)}（改传 type:"group"）`
+        : `私聊 ${String(other.user_openid)}（改传 type:"chat"）`;
+    throw new ToolError(`消息 ${msgId} 不在指定会话，而在${where}。`);
+  }
+  throw new ToolError(
+    `锚点消息不存在（或已过保留期被清理）：${msgId}。可先 search 定位。`,
+  );
 }
 
 /**
@@ -214,6 +274,14 @@ function conversationsOut(
 }
 
 // —— 工具集 ——
+
+/** 读取工具同构的 type 参数（schema 复用，描述保持一致） */
+const READ_TYPE_SCHEMA = {
+  type: "string",
+  enum: ["group", "chat"],
+  description:
+    "会话类型：group=群聊（缺省）；chat=私聊（此时 group 参数填对方 user_openid）",
+};
 
 export const TOOLS: ToolDef[] = [
   {
@@ -335,31 +403,40 @@ export const TOOLS: ToolDef[] = [
   {
     name: "get_new",
     description:
-      "增量拉取某群在已读水位之后的新消息（按到达序）。拉取即已读：水位由服务端自动推进，重复调用不会重拉。has_more=true 表示还有剩余，请继续调用直至取完。可先看 list_new 找出有未读的会话。",
+      "增量拉取某会话在已读水位之后的新消息（按到达序；群聊/私聊，私聊传 type:\"chat\" 且 group 填对方 user_openid）。拉取即已读：水位由服务端自动推进，重复调用不会重拉。has_more=true 表示还有剩余，请继续调用直至取完。可先看 list_new 找出有未读的会话。",
     inputSchema: {
       type: "object",
       required: ["group"],
       properties: {
-        group: { type: "string", description: "群 openid" },
+        group: {
+          type: "string",
+          description: "会话 openid（群聊=群 openid；私聊=对方 user_openid）",
+        },
+        type: READ_TYPE_SCHEMA,
         limit: { type: "number", description: "返回上限 1-500，默认 100" },
       },
     },
     handler: (args, ctx) => {
       const botId = resolveBotId(ctx);
-      const group = str(args, "group", "群 openid");
+      const scopeId = str(args, "group", "会话 openid");
+      const kind = optReadType(args);
       const limit = optInt(args, "limit", 1, 500, 100);
-      const mark = ctx.repo.getCursor(botId, group);
-      const rows = ctx.repo.getMessagesAfter(
-        botId,
-        group,
-        mark === null ? 0 : Number(mark),
-        limit,
-      );
+      const cursorKey = cursorKeyOf(kind, scopeId);
+      const mark = ctx.repo.getCursor(botId, cursorKey);
+      const after = mark === null ? 0 : Number(mark);
+      const rows =
+        kind === "chat"
+          ? ctx.repo.getC2cMessagesAfter(botId, scopeId, after, limit)
+          : ctx.repo.getMessagesAfter(botId, scopeId, after, limit);
       if (rows.length > 0) {
-        ctx.repo.setCursor(botId, group, String(rows[rows.length - 1]!.rid));
+        ctx.repo.setCursor(
+          botId,
+          cursorKey,
+          String(rows[rows.length - 1]!.rid),
+        );
       }
       return {
-        messages: rowsOut(ctx.repo, botId, group, rows),
+        messages: rowsOut(ctx.repo, botId, kind, scopeId, rows),
         count: rows.length,
         has_more: rows.length >= limit,
       };
@@ -368,12 +445,16 @@ export const TOOLS: ToolDef[] = [
   {
     name: "browse",
     description:
-      "按时间轴翻历史。给 msg_id + mode(before/after/around) 以某消息为锚点；不给 msg_id 返回最新 limit 条。has_more=true 表示该方向还有更多。",
+      "按时间轴翻某会话历史（群聊/私聊，私聊传 type:\"chat\"）。给 msg_id + mode(before/after/around) 以某消息为锚点；不给 msg_id 返回最新 limit 条。has_more=true 表示该方向还有更多。",
     inputSchema: {
       type: "object",
       required: ["group"],
       properties: {
-        group: { type: "string", description: "群 openid" },
+        group: {
+          type: "string",
+          description: "会话 openid（群聊=群 openid；私聊=对方 user_openid）",
+        },
+        type: READ_TYPE_SCHEMA,
         msg_id: { type: "string", description: "锚点消息 id（可选）" },
         mode: {
           type: "string",
@@ -385,24 +466,24 @@ export const TOOLS: ToolDef[] = [
     },
     handler: (args, ctx) => {
       const botId = resolveBotId(ctx);
-      const group = str(args, "group", "群 openid");
+      const scopeId = str(args, "group", "会话 openid");
+      const kind = optReadType(args);
       const limit = optInt(args, "limit", 1, 100, 30);
       const repo = ctx.repo;
       const msgId = optStr(args, "msg_id");
       if (msgId === undefined) {
-        const rows = repo.browseLatest(botId, group, limit).reverse();
+        const rows = (
+          kind === "chat"
+            ? repo.browseC2cLatest(botId, scopeId, limit)
+            : repo.browseLatest(botId, scopeId, limit)
+        ).reverse();
         return {
-          messages: rowsOut(ctx.repo, botId, group, rows),
+          messages: rowsOut(ctx.repo, botId, kind, scopeId, rows),
           count: rows.length,
           has_more: rows.length >= limit,
         };
       }
-      const anchor = repo.getMessageByMsgId(botId, group, msgId);
-      if (anchor === null) {
-        throw new ToolError(
-          `锚点消息不存在（或已过保留期被清理）：${msgId}。可先 search 定位。`,
-        );
-      }
+      const anchor = anchorOf(ctx, botId, kind, scopeId, msgId);
       const mode = optStr(args, "mode") ?? "before";
       if (mode !== "before" && mode !== "after" && mode !== "around") {
         throw new ToolError(
@@ -412,29 +493,50 @@ export const TOOLS: ToolDef[] = [
       let rows: MsgRow[];
       let cap = limit;
       if (mode === "before")
-        rows = repo.browseBefore(
-          botId,
-          group,
-          anchor.ts ?? 0,
-          anchor.rid,
-          limit,
-        );
+        rows =
+          kind === "chat"
+            ? repo.browseC2cBefore(
+                botId,
+                scopeId,
+                anchor.ts ?? 0,
+                anchor.rid,
+                limit,
+              )
+            : repo.browseBefore(
+                botId,
+                scopeId,
+                anchor.ts ?? 0,
+                anchor.rid,
+                limit,
+              );
       else if (mode === "after")
-        rows = repo.browseAfter(
-          botId,
-          group,
-          anchor.ts ?? 0,
-          anchor.rid,
-          limit,
-        );
+        rows =
+          kind === "chat"
+            ? repo.browseC2cAfter(
+                botId,
+                scopeId,
+                anchor.ts ?? 0,
+                anchor.rid,
+                limit,
+              )
+            : repo.browseAfter(
+                botId,
+                scopeId,
+                anchor.ts ?? 0,
+                anchor.rid,
+                limit,
+              );
       else {
         const half = Math.floor(limit / 2);
-        rows = repo.contextMessages(botId, group, anchor, half);
+        rows =
+          kind === "chat"
+            ? repo.contextC2cMessages(botId, scopeId, anchor, half)
+            : repo.contextMessages(botId, scopeId, anchor, half);
         // around 两侧各 half：两侧都满页才提示还有更多
         cap = 2 * half;
       }
       return {
-        messages: rowsOut(ctx.repo, botId, group, rows),
+        messages: rowsOut(ctx.repo, botId, kind, scopeId, rows),
         count: rows.length,
         has_more: rows.length >= cap,
       };
@@ -443,27 +545,35 @@ export const TOOLS: ToolDef[] = [
   {
     name: "search",
     description:
-      "按关键词检索某群历史消息（FTS，中文子串可命中；<3 字符自动降级子串扫描）。has_more=true 表示命中还有更多，可加大 limit。",
+      "按关键词检索某会话历史消息（群聊/私聊，私聊传 type:\"chat\"；FTS，中文子串可命中；<3 字符自动降级子串扫描）。has_more=true 表示命中还有更多，可加大 limit。",
     inputSchema: {
       type: "object",
       required: ["group", "query"],
       properties: {
-        group: { type: "string", description: "群 openid" },
+        group: {
+          type: "string",
+          description: "会话 openid（群聊=群 openid；私聊=对方 user_openid）",
+        },
+        type: READ_TYPE_SCHEMA,
         query: { type: "string", description: "关键词（1-100 字符）" },
         limit: { type: "number", description: "返回上限 1-50，默认 30" },
       },
     },
     handler: (args, ctx) => {
       const botId = resolveBotId(ctx);
-      const group = str(args, "group", "群 openid");
+      const scopeId = str(args, "group", "会话 openid");
+      const kind = optReadType(args);
       const query = str(args, "query", "关键词");
       if ([...query].length > 100) {
         throw new ToolError("参数 query 超长（>100 字符）。请缩短关键词。");
       }
       const limit = optInt(args, "limit", 1, 50, 30);
-      const rows = ctx.repo.searchMessages(botId, group, query, limit);
+      const rows =
+        kind === "chat"
+          ? ctx.repo.searchC2cMessages(botId, scopeId, query, limit)
+          : ctx.repo.searchMessages(botId, scopeId, query, limit);
       return {
-        messages: rowsOut(ctx.repo, botId, group, rows),
+        messages: rowsOut(ctx.repo, botId, kind, scopeId, rows),
         count: rows.length,
         has_more: rows.length >= limit,
       };
@@ -477,25 +587,28 @@ export const TOOLS: ToolDef[] = [
       type: "object",
       required: ["group", "msg_id"],
       properties: {
-        group: { type: "string", description: "群 openid" },
+        group: {
+          type: "string",
+          description: "会话 openid（群聊=群 openid；私聊=对方 user_openid）",
+        },
+        type: READ_TYPE_SCHEMA,
         msg_id: { type: "string", description: "锚点消息 id" },
         radius: { type: "number", description: "前后各取 1-50 条，默认 5" },
       },
     },
     handler: (args, ctx) => {
       const botId = resolveBotId(ctx);
-      const group = str(args, "group", "群 openid");
+      const scopeId = str(args, "group", "会话 openid");
+      const kind = optReadType(args);
       const msgId = str(args, "msg_id", "消息 id");
       const radius = optInt(args, "radius", 1, 50, 5);
-      const anchor = ctx.repo.getMessageByMsgId(botId, group, msgId);
-      if (anchor === null) {
-        throw new ToolError(
-          `消息不存在（或已过保留期被清理）：${msgId}。可先 search 定位。`,
-        );
-      }
-      const rows = ctx.repo.contextMessages(botId, group, anchor, radius);
+      const anchor = anchorOf(ctx, botId, kind, scopeId, msgId);
+      const rows =
+        kind === "chat"
+          ? ctx.repo.contextC2cMessages(botId, scopeId, anchor, radius)
+          : ctx.repo.contextMessages(botId, scopeId, anchor, radius);
       return {
-        messages: rowsOut(ctx.repo, botId, group, rows),
+        messages: rowsOut(ctx.repo, botId, kind, scopeId, rows),
         count: rows.length,
         has_more: rows.length >= radius * 2,
       };
@@ -509,7 +622,11 @@ export const TOOLS: ToolDef[] = [
       type: "object",
       required: ["group", "msg_id", "n"],
       properties: {
-        group: { type: "string", description: "群 openid" },
+        group: {
+          type: "string",
+          description: "会话 openid（群聊=群 openid；私聊=对方 user_openid）",
+        },
+        type: READ_TYPE_SCHEMA,
         msg_id: { type: "string", description: "消息 id" },
         n: {
           type: "number",
@@ -519,10 +636,11 @@ export const TOOLS: ToolDef[] = [
     },
     handler: async (args, ctx) => {
       const botId = resolveBotId(ctx);
-      const group = str(args, "group", "群 openid");
+      const scopeId = str(args, "group", "会话 openid");
+      const kind = optReadType(args);
       const msgId = str(args, "msg_id", "消息 id");
       const n = optInt(args, "n", 1, 50, 1);
-      const row = ctx.repo.getMessageByMsgId(botId, group, msgId);
+      const row = anchorOf(ctx, botId, kind, scopeId, msgId);
       if (row === null) {
         throw new ToolError(
           `消息不存在（或已过保留期被清理）：${msgId}。可先 search 定位。`,
