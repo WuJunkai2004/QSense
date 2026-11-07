@@ -46,6 +46,7 @@ function makeApiMock(
     scope: "group" | "c2c";
     targetId: string;
     src: import("../src/sender").MediaSource;
+    mediaType: import("../src/sender").MediaKind;
   }>;
 } & import("../src/sender").SendApi {
   const calls: Call[] = [];
@@ -54,6 +55,7 @@ function makeApiMock(
     scope: "group" | "c2c";
     targetId: string;
     src: import("../src/sender").MediaSource;
+    mediaType: import("../src/sender").MediaKind;
   }> = [];
   return {
     calls,
@@ -82,8 +84,9 @@ function makeApiMock(
       targetId: string,
       _creds: { appId: string; clientSecret: string },
       src: import("../src/sender").MediaSource,
+      mediaType: import("../src/sender").MediaKind,
     ) {
-      uploads.push({ scope, targetId, src });
+      uploads.push({ scope, targetId, src, mediaType });
       return `FILEINFO_${uploads.length}`;
     },
   } as never;
@@ -840,6 +843,34 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
       /图片上传官方转存失败/,
     );
     assert.equal(m5.calls.length, 0, "上传失败不得发送消息");
+  } finally {
+    fx.close();
+  }
+});
+
+test("M10 sendMediaAuto 语音：.mp3 URL → file_type=3 类别，补记 ![语音] 占位", async () => {
+  const fx = setupDb();
+  try {
+    seedInbound(fx.repo, "M_SONG", 60_000);
+    const mock = makeApiMock();
+    const r = await makeSender(fx, mock).sendMediaAuto(
+      BOT,
+      GROUP,
+      "https://example.com/song.mp3",
+      "听听这个",
+    );
+    assert.equal(r.channel, "passive", "窗内语音同样走被动回复");
+    assert.equal(mock.uploads.length, 1);
+    assert.equal(
+      mock.uploads[0]!.mediaType,
+      "voice",
+      "mp3 扩展名应分类为语音（生产适配映射 file_type=3）",
+    );
+    assert.equal(mock.calls[0]!.body.msg_type, 7);
+    // 补记行：读取层以 ![语音] 占位（与 ![图片]/![附件n] 占位符约定一致）
+    const latest = fx.repo.browseLatest(BOT, GROUP, 1)[0]!;
+    assert.equal(latest.direction, 1);
+    assert.equal(latest.content, "![语音] 听听这个");
   } finally {
     fx.close();
   }

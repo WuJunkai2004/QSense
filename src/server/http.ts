@@ -167,7 +167,8 @@ export function buildServer(deps: ServerDeps) {
     } catch (e) {
       if (e instanceof RangeError) {
         return reply.code(415).send({
-          error: "内容不是图片（魔数嗅探失败）。仅支持 png/jpeg/gif/webp/bmp。",
+          error:
+            "内容不是图片/音频（魔数嗅探失败）。仅支持 png/jpeg/gif/webp/bmp 与 mp3/wav/silk。",
         });
       }
       throw e;

@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLogger } from "../src/logger";
-import { AssetStore, uploadSig } from "../src/assets";
+import { AssetStore, sniffAudioMime, sniffPathMime, uploadSig } from "../src/assets";
 import { Sender, beijingDate } from "../src/sender";
 import { buildServer } from "../src/server/http";
 import { BotRegistry } from "../src/bots";
@@ -79,7 +79,11 @@ function setupFx(): Fixture {
   };
 }
 
-function makeSender(fx: Fixture, uploadInfo: { fileInfo: string }): Sender {
+function makeSender(
+  fx: Fixture,
+  uploadInfo: { fileInfo: string },
+  expectMediaType: "image" | "voice" = "image",
+): Sender {
   return new Sender({
     log: createLogger("error"),
     db: fx.db,
@@ -90,11 +94,18 @@ function makeSender(fx: Fixture, uploadInfo: { fileInfo: string }): Sender {
     apiFor: () => ({
       sendRaw: async () => ({ id: "PROVIDER_MEDIA" }),
       recallMessage: async () => {},
-      uploadMedia: async (_scope, _target, _creds, src) => {
-        // 服务端资产应走 localPath（file 源）直通 SDK
+      uploadMedia: async (_scope, _target, _creds, src, mediaType) => {
+        // 服务端资产应走 localPath（file 源）直通 SDK；类别按来源魔数判定
         assert.equal(src.kind, "file", "asset: 引用应解析为 file 源");
+        assert.equal(
+          mediaType,
+          expectMediaType,
+          `uploadMedia 类别应为 ${expectMediaType}`,
+        );
         const onDisk = readFileSync(src.path);
-        assert.ok(onDisk.subarray(0, 4).equals(PNG_BYTES.subarray(0, 4)));
+        if (expectMediaType === "image") {
+          assert.ok(onDisk.subarray(0, 4).equals(PNG_BYTES.subarray(0, 4)));
+        }
         return uploadInfo.fileInfo;
       },
     }),
@@ -230,6 +241,90 @@ test("M4-17 PUT 数据端点：成功落盘/魔数拒绝/签名篡改/过期/重
 
     // ⑧ 日额度未被被动图污染（走的是 passive，不计 proactive）
     assert.equal(fx.repo.proactiveCountFor(BOT, GROUP, beijingDate()), 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+// —— M10 语音扩展：音频魔数嗅探 + 语音资产闭环（asset: → file_type=3） ——
+
+// 最小 mp3 仿制：ID3v2 头 + 裸 MPEG 帧同步字 + 数据体
+const MP3_BYTES = Buffer.concat([
+  Buffer.from("ID3", "latin1"),
+  Buffer.alloc(7, 0),
+  Buffer.from([0xff, 0xfb, 0x90, 0x00]),
+  Buffer.alloc(64, 1),
+]);
+// 最小 wav 仿制：RIFF 容器 + WAVE 标识
+const WAV_BYTES = Buffer.concat([
+  Buffer.from("RIFF", "latin1"),
+  Buffer.alloc(4, 0),
+  Buffer.from("WAVE", "latin1"),
+  Buffer.alloc(16, 0),
+]);
+// SILK v3 头：QQ 语音原生格式（常带 1 字节 0x02 前缀）
+const SILK_BYTES = Buffer.concat([
+  Buffer.from([0x02]),
+  Buffer.from("#!SILK_V3", "latin1"),
+  Buffer.alloc(16, 0),
+]);
+
+test("M10 音频魔数嗅探：mp3(ID3/裸帧)/wav/silk 命中，杂讯拒收", () => {
+  assert.equal(sniffAudioMime(MP3_BYTES), "audio/mpeg");
+  assert.equal(sniffAudioMime(WAV_BYTES), "audio/wav");
+  assert.equal(sniffAudioMime(SILK_BYTES), "audio/silk");
+  assert.equal(
+    sniffAudioMime(Buffer.from("#!SILK_V3", "latin1")),
+    "audio/silk",
+    "无 0x02 前缀的 silk 头同样识别",
+  );
+  assert.equal(sniffAudioMime(Buffer.from("hello, not an audio")), null);
+  assert.equal(sniffAudioMime(PNG_BYTES), null, "图片不是音频");
+});
+
+test("M10 语音资产闭环：PUT 落盘 audio/mpeg → send_media asset: 引用走语音类别，补记 ![语音]", async () => {
+  const fx = setupFx();
+  try {
+    const ticket = fx.assets.issueTicket(BOT, AGENT_TOKEN, BASE);
+    const put = await fx.app.inject({
+      method: "PUT",
+      url: `${BASE}${ticket.urlPath}`.replace(BASE, ""),
+      headers: { "content-type": "application/octet-stream" },
+      payload: MP3_BYTES,
+    });
+    assert.equal(put.statusCode, 200);
+    assert.equal(put.json().mime, "audio/mpeg", "魔数嗅探应判为音频");
+
+    // 落盘文件头可嗅探（send_media 的 file 源分类依据）
+    const onDisk = fx.assets.pathOf(ticket.assetId)!;
+    assert.equal(sniffPathMime(onDisk), "audio/mpeg");
+
+    // 窗内有消息 → 被动语音
+    fx.repo.saveGroupMessage({
+      botId: BOT,
+      scope: "group",
+      scopeId: GROUP,
+      msgId: "M_VOICE",
+      authorOpenid: "U1",
+      authorName: "小明",
+      ts: Date.now() - 60_000,
+      content: "来段语音",
+      mentions: [],
+      elements: undefined,
+      attachments: [],
+      raw: {},
+    });
+    const sender = makeSender(fx, { fileInfo: "FILEINFO_VOICE" }, "voice");
+    const r = await sender.sendMediaAuto(
+      BOT,
+      GROUP,
+      `asset:${ticket.assetId}`,
+      "听听这个",
+    );
+    assert.equal(r.channel, "passive");
+    const latest = fx.repo.browseLatest(BOT, GROUP, 1)[0]!;
+    assert.equal(latest.direction, 1);
+    assert.equal(latest.content, "![语音] 听听这个");
   } finally {
     fx.cleanup();
   }

@@ -16,6 +16,7 @@ import {
 } from "@tencent-connect/qqbot-nodejs/protocol";
 import type { BotApp } from "../config";
 import type { BotRegistry } from "../bots";
+import { sniffPathMime } from "../assets";
 import { t } from "../i18n";
 import type { Logger } from "../logger";
 import type { DB } from "../store/db";
@@ -65,6 +66,10 @@ export interface SendResult {
   detail?: string;
 }
 
+/** 富媒体类别（本项目域层词汇，生产适配映射到 SDK MediaFileType）：
+ * image=图片(file_type=1)；voice=语音(file_type=3，silk/mp3/wav，客户端展示语音条) */
+export type MediaKind = "image" | "voice";
+
 /** 发送 API 最小接口（生产=SDK MessageApi/MediaApi 适配；测试=记录调用的 mock） */
 export interface SendApi {
   sendRaw(
@@ -79,12 +84,13 @@ export interface SendApi {
     messageId: string,
     creds: { appId: string; clientSecret: string },
   ): Promise<void>;
-  /** 富媒体上传（首版仅图片 IMAGE），返回官方 file_info（TTL 24h，可复用） */
+  /** 富媒体上传，返回官方 file_info（TTL 24h，可复用）；mediaType 决定官方 file_type */
   uploadMedia(
     scope: "group" | "c2c",
     targetId: string,
     creds: { appId: string; clientSecret: string },
     src: MediaSource,
+    mediaType: MediaKind,
   ): Promise<string>;}
 
 /** 富媒体来源（传输自足：MCP 服务可能与智能体不同机，不收智能体侧本地路径；
@@ -93,6 +99,24 @@ export type MediaSource =
   | { kind: "url"; url: string }
   | { kind: "b64"; data: string }
   | { kind: "file"; path: string };
+
+/** 来源 → 富媒体类别：
+ * file 源按魔数嗅探（audio/* → 语音，图片魔数/未知 → 图片）；b64 仅 data:image/* → 图片；
+ * url 无字节可嗅，按扩展名映射（.mp3/.wav/.silk → 语音） */
+function mediaTypeOf(src: MediaSource): MediaKind {
+  if (src.kind === "file") {
+    return sniffPathMime(src.path)?.startsWith("audio/") ? "voice" : "image";
+  }
+  if (src.kind === "url" && /\.(mp3|wav|silk)([?#]|$)/i.test(src.url)) {
+    return "voice";
+  }
+  return "image";
+}
+
+/** 类别 → 补记占位符标签（与读取层附件占位符约定一致） */
+function labelOf(mediaType: MediaKind): string {
+  return mediaType === "voice" ? "语音" : "图片";
+}
 
 /** 解析 send_media 的 media 参数：http(s):// URL 或 data:image/...;base64,… 内联 */
 export function parseMediaSource(media: string): MediaSource {
@@ -210,12 +234,12 @@ export class Sender {
           messageApi.sendRaw(scope, targetId, creds, body),
         recallMessage: (scope, targetId, messageId, creds) =>
           messageApi.recallMessage(scope, targetId, messageId, creds),
-        uploadMedia: (scope, targetId, creds, src) =>
+        uploadMedia: (scope, targetId, creds, src, mediaType) =>
           mediaApi
             .uploadMedia(
               scope,
               targetId,
-              MediaFileType.IMAGE,
+              mediaType === "voice" ? MediaFileType.VOICE : MediaFileType.IMAGE,
               creds,
               src.kind === "url"
                 ? { url: src.url }
@@ -295,8 +319,9 @@ export class Sender {
     markdown = false,
     /** true=附带 message_reference 引用块（客户端展示引用样式）；false=纯被动回复（仅窗口绑定） */
     quote = false,
-    /** 富媒体（首版仅图片）：msg_type=7，text 降级为配文；file_info 由 uploadMedia 预先取得 */
-    media?: { fileInfo: string },
+    /** 富媒体（图片/语音）：msg_type=7，text 降级为配文；fileInfo 由 uploadMedia 预先取得，
+     * label 为补记占位符标签（图片/语音，与读取层附件占位符约定一致） */
+    media?: { fileInfo: string; label: string },
     /** 会话类型（缺省群聊）：决定被动窗口（群 5 分钟/5 次、单聊 60 分钟/4 次）与缓存查询表 */
     kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
@@ -418,7 +443,7 @@ export class Sender {
           targetId,
           resp.id,
           media !== undefined
-            ? `![图片]${content === "" ? "" : ` ${content}`}`
+            ? `![${media.label}]${content === "" ? "" : ` ${content}`}`
             : content,
         );
         this.log.info("passive sent", {
@@ -493,8 +518,9 @@ export class Sender {
      * 主动消息携带 message_reference 照常受理，目标超窗亦可），仅影响客户端展示。
      */
     quoteMsgId?: string,
-    /** 富媒体（首版仅图片）：msg_type=7，text 降级为配文；file_info 由 uploadMedia 预先取得 */
-    media?: { fileInfo: string },
+    /** 富媒体（图片/语音）：msg_type=7，text 降级为配文；fileInfo 由 uploadMedia 预先取得，
+     * label 为补记占位符标签（图片/语音） */
+    media?: { fileInfo: string; label: string },
     /** 会话类型（缺省群聊）；私聊主动消息额外要求用户已同意（C2C_MSG_RECEIVE） */
     kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
@@ -581,7 +607,7 @@ export class Sender {
         targetId,
         resp.id,
         media !== undefined
-          ? `![图片]${content === "" ? "" : ` ${content}`}`
+          ? `![${media.label}]${content === "" ? "" : ` ${content}`}`
           : content,
       );
       this.log.info("proactive sent", {
@@ -639,12 +665,13 @@ export class Sender {
     return this.proactive(botId, targetId, text, quoteMsgId, undefined, kind);
   }
 
-  /** send_media 工具入口：富媒体（首版仅图片），通道自动路由（与 sendAuto 同款被动优先）。
-   * 2026-10-27 真机验证：msg_type=7 被动/主动/引用块三形态官方均受理。 */
+  /** send_media 工具入口：富媒体（图片/语音），通道自动路由（与 sendAuto 同款被动优先）。
+   * 2026-10-27 真机验证：msg_type=7 被动/主动/引用块三形态官方均受理。
+   * 语音（2026-11）：file_type=3，file 源按魔数嗅探、url 源按扩展名分类。 */
   async sendMediaAuto(
     botId: string,
     targetId: string,
-    /** 图片来源：http(s):// URL 或 data:image/...;base64（传输自足，跨机安全） */
+    /** 媒体来源：http(s):// URL、data:image/...;base64 内联、或 asset:<id>（服务端资产） */
     mediaParam: string,
     /** 可选配文（msg_type=7 的 content） */
     text?: string,
@@ -670,12 +697,14 @@ export class Sender {
       targetId,
       quoteMsgId,
     );
-    // 上传转存（官方对同内容返回相同 file_info，TTL 24h；失败不消耗通道额度）
+    // 上传转存（官方对同内容返回相同 file_info，TTL 24h；失败不消耗通道额度）。
+    // 类别在来源解析后即定：file 源魔数嗅探 / url 源扩展名（audio → file_type=3 语音条）
+    const mediaType = mediaTypeOf(src);
     let fileInfo: string;
     try {
       fileInfo = await this
         .api(app)
-        .uploadMedia(scopeOf(kind), targetId, credsOf(app), src);
+        .uploadMedia(scopeOf(kind), targetId, credsOf(app), src, mediaType);
     } catch (e) {
       throw new Error(
         t("media_upload_failed", { reason: describeSendError(e) }),
@@ -684,14 +713,19 @@ export class Sender {
     this.log.info("media uploaded", {
       kind,
       target: targetId,
+      mediaType,
       file_info_len: fileInfo.length,
     });
     if (bindMsgId !== undefined) {
       return this.reply(botId, targetId, bindMsgId, text, false, quote, {
         fileInfo,
+        label: labelOf(mediaType),
       }, kind);
     }
-    return this.proactive(botId, targetId, text, quoteMsgId, { fileInfo }, kind);
+    return this.proactive(botId, targetId, text, quoteMsgId, {
+      fileInfo,
+      label: labelOf(mediaType),
+    }, kind);
   }
 
   /** 通道判定（sendAuto/sendMediaAuto 共用）：引用目标窗内→绑=引（形态A）；

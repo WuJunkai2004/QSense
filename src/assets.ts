@@ -6,7 +6,14 @@
 // 资产全局共享（人类视角"本服务的素材库"），独立于消息缓存，不参与 RETENTION 清理。
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 export const TICKET_TTL_MS = 15 * 60_000;
@@ -36,6 +43,52 @@ export function sniffImageMime(buf: Buffer): string | null {
   }
   if (buf[0] === 0x42 && buf[1] === 0x4d) return "image/bmp";
   return null;
+}
+
+/** 音频魔数嗅探 → mime（官方 file_type=3 语音支持 silk/mp3/wav，2026-11 接口文档核实）；
+ * 非音频返回 null */
+export function sniffAudioMime(buf: Buffer): string | null {
+  if (buf.length < 4) return null;
+  // MP3：ID3v2 标签头，或裸 MPEG 帧同步字（0xFF + 111 同步位）
+  if (
+    buf.subarray(0, 3).toString("latin1") === "ID3" ||
+    (buf[0] === 0xff && (buf[1]! & 0xe0) === 0xe0)
+  ) {
+    return "audio/mpeg";
+  }
+  // WAV：RIFF 容器 + WAVE 标识（8..12）
+  if (
+    buf.subarray(0, 4).toString("latin1") === "RIFF" &&
+    buf.length >= 12 &&
+    buf.subarray(8, 12).toString("latin1") === "WAVE"
+  ) {
+    return "audio/wav";
+  }
+  // SILK v3：QQ 语音原生格式，头部常带 1 字节 0x02 前缀（首字节偏移 0 或 1 均识别）
+  const silk = "#!SILK";
+  for (const off of [0, 1]) {
+    if (buf.length >= off + 6 && buf.subarray(off, off + 6).toString("latin1") === silk) {
+      return "audio/silk";
+    }
+  }
+  return null;
+}
+
+/** 资产魔数嗅探（图片 + 语音）→ mime；均不匹配返回 null */
+export function sniffAssetMime(buf: Buffer): string | null {
+  return sniffImageMime(buf) ?? sniffAudioMime(buf);
+}
+
+/** 读文件头 16 字节嗅探资产 mime（send_media 的 file 源分类用：audio/* → 语音上传） */
+export function sniffPathMime(path: string): string | null {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(16);
+    const n = readSync(fd, buf, 0, 16, 0);
+    return sniffAssetMime(buf.subarray(0, n));
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** 票据签名：密钥=该 bot 的 agent_token（轮换后旧票据自然失效） */
@@ -82,7 +135,7 @@ export class AssetStore {
       assetId,
       urlPath,
       expiresInSec: TICKET_TTL_MS / 1000,
-      curl: `curl -X PUT -H 'Content-Type: application/octet-stream' --data-binary @图片路径 "${baseUrl}${urlPath}"`,
+      curl: `curl -X PUT -H 'Content-Type: application/octet-stream' --data-binary @文件路径 "${baseUrl}${urlPath}"`,
     };
   }
 
@@ -112,10 +165,10 @@ export class AssetStore {
     return null;
   }
 
-  /** 落盘并嗅探魔数；非图片抛 RangeError（路由转 415） */
+  /** 落盘并嗅探魔数；非图片/音频抛 RangeError（路由转 415） */
   save(assetId: string, buf: Buffer): { mime: string; size: number } {
-    const mime = sniffImageMime(buf);
-    if (mime === null) throw new RangeError("not an image");
+    const mime = sniffAssetMime(buf);
+    if (mime === null) throw new RangeError("not an image or audio");
     writeFileSync(join(this.dir, assetId), buf);
     return { mime, size: buf.length };
   }

@@ -770,7 +770,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "send_media",
     description:
-      "【真实写操作·默认关闭】向会话发送图片（群聊/私聊，私聊传 type:\"chat\"；表情包/梗图等，支持 GIF 动图；视频/语音/文件暂未开放）。通道自动选择：被动窗口内走被动回复（不计额度、免审核），否则走主动消息（官方额度同 send；可能进入人工审核）。text 可选配文。quote_msg_id 可引用会话内某条消息（客户端显示引用样式）。media 三种来源：\"asset:<id>\"（推荐——本地图片先经 request_upload 上传为服务端资产，参数恒短）；http(s):// 图片 URL（须公网可访问）；data:image/...;base64 内联（仅小图兜底，大文件会撑爆模型上下文）。不支持本地路径。门禁同 send（发送总开关 + 群白名单/私聊接收条件）。请勿用相同内容重试——重复提交可能绕过幂等账本造成刷屏。",
+      "【真实写操作·默认关闭】向会话发送图片或语音（群聊/私聊，私聊传 type:\"chat\"；图片支持 GIF 动图；语音 mp3/wav/silk 展示为语音条，≤20MB；视频/文件暂未开放）。通道自动选择：被动窗口内走被动回复（不计额度、免审核），否则走主动消息（官方额度同 send；可能进入人工审核）。text 可选配文（语音配文会以同消息 content 附带）。quote_msg_id 可引用会话内某条消息（客户端显示引用样式）。media 三种来源：\"asset:<id>\"（推荐——本地图片/音频先经 request_upload 上传为服务端资产，参数恒短）；http(s):// 媒体 URL（须公网可访问，.mp3/.wav/.silk 按语音发送）；data:image/...;base64 内联（仅小图兜底，大文件会撑爆模型上下文）。不支持本地路径。门禁同 send（发送总开关 + 群白名单/私聊接收条件）。请勿用相同内容重试——重复提交可能绕过幂等账本造成刷屏。",
     inputSchema: {
       type: "object",
       required: ["group", "media"],
@@ -783,11 +783,11 @@ export const TOOLS: ToolDef[] = [
         media: {
           type: "string",
           description:
-            "图片来源：\"asset:<id>\"（推荐，request_upload 上传后的服务端资产）；http(s):// 图片 URL（须公网可访问）；data:image/png;base64,… 内联（仅小图兜底）。不支持本地路径。",
+            "媒体来源：\"asset:<id>\"（推荐，request_upload 上传后的服务端资产，图片/音频均可）；http(s):// 媒体 URL（须公网可访问，.mp3/.wav/.silk 扩展名按语音发送，其余按图片）；data:image/png;base64,… 内联（仅小图兜底，音频勿内联）。不支持本地路径。",
         },
         text: {
           type: "string",
-          description: "可选：配文（与图片一同发出，≤5000字符）",
+          description: "可选：配文（与媒体一同发出，≤5000字符）",
         },
         quote_msg_id: {
           type: "string",
@@ -814,7 +814,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "request_upload",
     description:
-      "【上传协商·控制平面】为本 bot 签发一次性图片上传票据（15 分钟有效，单次使用），用于把本地图片送入服务端资产区后再发送。三步流程：① 调本工具拿 upload_url 与可复制的 curl 命令；② 用执行环境（shell/curl）直传文件字节——字节不经过模型上下文；③ 调 send_media 且 media 填 \"asset:<asset_id>\" 发送。仅支持图片（png/jpeg/gif/webp/bmp），单文件 ≤20MB。资产全局共享、长期保留。",
+      "【上传协商·控制平面】为本 bot 签发一次性媒体上传票据（15 分钟有效，单次使用），用于把本地文件送入服务端资产区后再发送。三步流程：① 调本工具拿 upload_url 与可复制的 curl 命令；② 用执行环境（shell/curl）直传文件字节——字节不经过模型上下文；③ 调 send_media 且 media 填 \"asset:<asset_id>\" 发送。仅支持图片（png/jpeg/gif/webp/bmp）与语音（mp3/wav/silk），单文件 ≤20MB。资产全局共享、长期保留。",
     inputSchema: {
       type: "object",
       properties: {},
