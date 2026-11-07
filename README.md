@@ -1,9 +1,6 @@
-# qqbot-websocket-mcp
+# QSense
 
 QQ **官方**机器人 → MCP 网关。通过官方 WebSocket Gateway 接收群聊/单聊事件 → SQLite 缓存 → 以 MCP Server（Streamable HTTP + Bearer）暴露工具面给本地 OpenCode，作为机器人的"环境感知层"。
-
-> **合规底线**：数据源头只允许 QQ 官方机器人 API（q.qq.com / bot.q.qq.com / api.bot.qq.com）。
-> 不使用、不兼容任何注入客户端的协议端（NapCat / LLOneBot / Lagrange 等）。
 
 ```
 QQ 开放平台（官方）
@@ -19,13 +16,13 @@ QQ 开放平台（官方）
 └────────────────────────────────────────────┘
   ▲ MCP 标准接口
   │
-本地 OpenCode（MCP client）／cron 定时任务 ／人格会话
+agent with MCP client ／cron 定时任务 ／人格会话
 ```
 
-## 快速开始（本地形态 A）
+## 快速开始
 
 ```bash
-# 1. 依赖：Node.js ≥ 20
+# 1. 依赖：Node.js >= 20
 npm ci
 
 # 2. WebUI（qqbot-webui 仓库，本仓库以 junction 挂在 ./ui；clone 后需就位）
@@ -53,13 +50,13 @@ curl http://127.0.0.1:8787/healthz
 
 M9 起 env 只承担部署拓扑与运维参数；**bot 注册（appid/secret/认证等级）、admin token、发送开关、群白名单全部以 SQLite 为唯一权威**（WebUI 设置页 / `register_bot` 管理）。旧的 `QQ_APPS`/`MCP_TOKEN`/`SEND_ENABLE`/`ALLOW_GROUPS`/`QQ_AUTH_LEVEL` 不再被读取。
 
-| 变量 | 必填 | 说明 |
-|---|---|---|
-| `PORT` / `HOST` | | 默认 `8787` / `127.0.0.1` |
-| `DATA_DIR` | | SQLite 目录，默认 `./data`（bots 表 / kv / 消息缓存都在这） |
-| `RETENTION_DAYS` | | 缓存保留天数，默认 90，到期自动清理 |
-| `LOG_CONTENT` | | 日志记消息正文，**默认 false（生产禁止开启）** |
-| `LOG_LEVEL` | | debug/info/warn/error/fatal |
+| 变量             | 必填 | 说明                                                        |
+| ---------------- | ---- | ----------------------------------------------------------- |
+| `PORT` / `HOST`  |      | 默认 `8787` / `127.0.0.1`                                   |
+| `DATA_DIR`       |      | SQLite 目录，默认 `./data`（bots 表 / kv / 消息缓存都在这） |
+| `RETENTION_DAYS` |      | 缓存保留天数，默认 90，到期自动清理                         |
+| `LOG_CONTENT`    |      | 日志记消息正文，**默认 false（生产禁止开启）**              |
+| `LOG_LEVEL`      |      | debug/info/warn/error/fatal                                 |
 
 ## MCP 工具面（14 个）
 
