@@ -75,8 +75,6 @@ export class Repo {
   private readonly upsertMemberStmt: Stmt<[Record<string, unknown>]>;
   private readonly kvGetStmt: Stmt<[string]>;
   private readonly kvSetStmt: Stmt<[string, string]>;
-  private readonly purgeGroupStmt: Stmt<[number]>;
-  private readonly purgeC2cStmt: Stmt<[number]>;
   private readonly insertSendStmt: Stmt<
     [
       string,
@@ -195,8 +193,6 @@ export class Repo {
     this.kvSetStmt = db.prepare(
       "INSERT INTO kv(k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
     );
-    this.purgeGroupStmt = db.prepare("DELETE FROM messages WHERE ts < ?");
-    this.purgeC2cStmt = db.prepare("DELETE FROM c2c_messages WHERE ts < ?");
     this.insertSendStmt = db.prepare(`
       INSERT INTO sends(bot_id, target_openid, kind, reply_msg_id, msg_seq, payload_hash, status, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -365,17 +361,6 @@ export class Repo {
       { v: string } | undefined;
     if (!row) return null;
     return row.v === "1";
-  }
-
-  /** 保留策略：清理早于 keepDays 天的缓存消息（raw_json 随行删除） */
-  purgeOldMessages(keepDays: number): number {
-    const cutoff = Date.now() - keepDays * 24 * 60 * 60 * 1000;
-    const run = this.db.transaction(() => {
-      const a = this.purgeGroupStmt.run(cutoff).changes;
-      const b = this.purgeC2cStmt.run(cutoff).changes;
-      return a + b;
-    });
-    return run() as number;
   }
 
   // —— M3 只读查询（群聊为主；单聊查询 M3.5 按需加） ——
@@ -552,8 +537,8 @@ export class Repo {
    * 会话侧别自动探测（读写工具的 type 参数退役后的裁决源）：
    * openid 是权威定位标识（群 openid 与用户 openid 命名空间互斥、不可能同值），
    * 按缓存归属即可唯一裁决。group 证据=群消息缓存或群注册表；
-   * chat 证据=单聊消息缓存或 C2C 开关 kv 记录——后者不受保留期清理，且主动消息
-   * 门禁本就要求该记录存在，恰好覆盖"缓存被清后仍合法可发送"的场景；null=两侧均无。
+   * chat 证据=单聊消息缓存或 C2C 开关 kv 记录（开关事件可先行于首条缓存消息——
+   * 用户已同意接收但尚无消息时仍可裁决，主动消息门禁亦依赖该记录）；null=两侧均无。
    */
   detectSessionKind(botId: string, id: string): "group" | "chat" | null {
     const inGroup =
@@ -569,7 +554,7 @@ export class Repo {
   /**
    * 引用解析（读取时）：content 里的 `[引用 msg_idx=X]` 令牌行按 X 查缓存——官方在每条消息的
    * message_scene.ext 携带 msg_idx，引用元素（103）以此为锚指向被引消息。命中则内联被引作者与
-   * 正文（行加 "> " 前缀）；未命中（未缓存/已过保留期/历史行无令牌）原样保留。
+   * 正文（行加 "> " 前缀）；未命中（未缓存/历史行无令牌）原样保留。
    * ingest 时 103 元素会把被引原文展开成紧跟结构行的文本行（FTS 检索面不丢内容）——命中时该行
    * 与内联正文重复，逐行比对一致才吞掉（防误删用户恰好相同的正文）。MCP 与 WebUI 序列化共用。
    */

@@ -6,8 +6,6 @@ const zh = {
   // —— 配置校验 ——
   cfg_bad_bool: "配置无效：{key}={value}，只接受 true / false。",
   cfg_bad_port: "配置无效：PORT={value}，必须是 1-65535 的整数。",
-  cfg_bad_retention:
-    "配置无效：RETENTION_DAYS={value}，必须是 1-3650 的整数（缓存消息保留天数）。",
   // —— 启动 ——
   boot_db_fail:
     "数据库初始化失败：{path}（{reason}）。检查 DATA_DIR 是否存在且可写。",
@@ -24,7 +22,6 @@ const zh = {
   gw_event_dedup: "重复事件已去重丢弃：type={type}，id={id}。",
   // —— 退出 ——
   shutdown_done: "已优雅退出。",
-  retention_purged: "保留策略清理完成：删除 {removed} 条过期缓存消息。",
   // —— 发送器（M4） ——
   send_disabled:
     "发送功能未开启，已硬拒绝。写操作需要发送总开关开启（WebUI 设置页管理），且目标会话满足发送条件（群=在该 bot 白名单内；私聊=对方未拒绝消息接收）。当前开关 {enabled}，该 bot 白名单群数 {allow}。",
@@ -94,8 +91,6 @@ type Translation = Record<keyof typeof zh, string>;
 const en: Translation = {
   cfg_bad_bool: "Invalid config: {key}={value}, only true / false accepted.",
   cfg_bad_port: "Invalid config: PORT={value}, must be an integer in 1-65535.",
-  cfg_bad_retention:
-    "Invalid config: RETENTION_DAYS={value}, must be an integer in 1-3650 (cached message retention days).",
   boot_db_fail:
     "Database init failed: {path} ({reason}). Check DATA_DIR exists and is writable.",
   boot_listen_fail:
@@ -110,8 +105,6 @@ const en: Translation = {
     "Gateway disconnected and will not reconnect (code={code}, {reason}).",
   gw_event_dedup: "Duplicate event dropped: type={type}, id={id}.",
   shutdown_done: "Graceful shutdown complete.",
-  retention_purged:
-    "Retention purge done: removed {removed} expired cached messages.",
   send_disabled:
     "Sending is disabled, rejected. Writes require the master send switch enabled (managed in the WebUI settings) and the target conversation meeting send conditions (group = in the bot's allowlist; direct message = recipient has not rejected messages). Current switch {enabled}, allowlisted groups {allow}.",
   send_not_allowlisted:

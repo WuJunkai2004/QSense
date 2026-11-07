@@ -23,8 +23,6 @@ export interface Config {
   dataDir: string;
   logContent: boolean;
   logLevel: Level;
-  /** 缓存消息保留天数（DESIGN.md §3.3 保留策略），默认 90 */
-  retentionDays: number;
 }
 
 /** 读取 .env（不覆盖已存在的进程环境变量）；零依赖轻实现，仅需 KEY=VALUE 语法。 */
@@ -82,25 +80,11 @@ export function loadConfig(
     port = Number(portRaw);
   }
 
-  let retentionDays = 90;
-  const retentionRaw = env.RETENTION_DAYS;
-  if (retentionRaw !== undefined && retentionRaw !== "") {
-    if (
-      !/^\d+$/.test(retentionRaw) ||
-      Number(retentionRaw) < 1 ||
-      Number(retentionRaw) > 3650
-    ) {
-      throw new Error(t("cfg_bad_retention", { value: retentionRaw }));
-    }
-    retentionDays = Number(retentionRaw);
-  }
-
   return {
     host: env.HOST?.trim() || "127.0.0.1",
     port,
     dataDir: env.DATA_DIR?.trim() || "./data",
     logContent: parseBool(env, "LOG_CONTENT", false),
     logLevel: levelFromEnv(env.LOG_LEVEL),
-    retentionDays,
   };
 }

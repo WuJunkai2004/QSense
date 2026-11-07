@@ -126,20 +126,6 @@ async function main(): Promise<void> {
     assets,
   });
 
-  const purgeOld = (): void => {
-    try {
-      const removed = repo.purgeOldMessages(config.retentionDays);
-      if (removed > 0) log.info(t("retention_purged", { removed }));
-    } catch (e) {
-      log.error("retention purge failed", {
-        reason: e instanceof Error ? e.message : String(e),
-      });
-    }
-  };
-  purgeOld();
-  const retentionTimer = setInterval(purgeOld, 24 * 60 * 60 * 1000);
-  retentionTimer.unref();
-
   const gatewayStart = gateway.start();
 
   let closing = false;

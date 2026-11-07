@@ -248,7 +248,7 @@ function anchorOf(
       : ctx.repo.getMessageByMsgId(botId, scopeId, msgId);
   if (hit !== null) return hit;
   throw new ToolError(
-    `锚点消息不存在（或已过保留期被清理）：${msgId}。可先 search 定位。`,
+    `锚点消息不存在：${msgId}。可先 search 定位。`,
   );
 }
 

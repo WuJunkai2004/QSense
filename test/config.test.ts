@@ -12,17 +12,18 @@ test("空 env 即合法：全部缺省值就位（M9 起 bot/token 不再来自 
   assert.equal(cfg.host, "127.0.0.1");
   assert.equal(cfg.dataDir, "./data");
   assert.equal(cfg.logContent, false);
-  assert.equal(cfg.retentionDays, 90);
 });
 
-test("已退役的 env 键被忽略（QQ_APPS/MCP_TOKEN/SEND_ENABLE/ALLOW_GROUPS/QQ_AUTH_LEVEL）", () => {
-  // M9 前这些值非法会直接拒绝启动；现在一律不读取——即使内容是坏的
+test("已退役的 env 键被忽略（QQ_APPS/MCP_TOKEN/SEND_ENABLE/ALLOW_GROUPS/QQ_AUTH_LEVEL/RETENTION_DAYS）", () => {
+  // M9 前这些值非法会直接拒绝启动；现在一律不读取——即使内容是坏的。
+  // RETENTION_DAYS 于 2026-11-07 定案退役：缓存消息永不自动清理。
   const cfg = loadConfig({
     QQ_APPS: "{oops",
     MCP_TOKEN: "short",
     SEND_ENABLE: "yes",
     ALLOW_GROUPS: "abc",
     QQ_AUTH_LEVEL: "gold",
+    RETENTION_DAYS: "abc",
   });
   assert.equal(cfg.port, 8787); // 其余字段照常解析
 });
@@ -52,15 +53,6 @@ test("非法布尔值与端口拒绝", () => {
   );
 });
 
-test("LOG_CONTENT=true 生效；RETENTION_DAYS 边界校验", () => {
+test("LOG_CONTENT=true 生效", () => {
   assert.equal(loadConfig({ LOG_CONTENT: "true" }).logContent, true);
-  assert.equal(loadConfig({ RETENTION_DAYS: "30" }).retentionDays, 30);
-  assert.throws(
-    () => loadConfig({ RETENTION_DAYS: "0" }),
-    (e: Error) => e.message.includes("RETENTION_DAYS"),
-  );
-  assert.throws(
-    () => loadConfig({ RETENTION_DAYS: "9999" }),
-    (e: Error) => e.message.includes("RETENTION_DAYS"),
-  );
 });

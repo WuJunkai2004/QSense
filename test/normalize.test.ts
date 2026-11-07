@@ -350,36 +350,6 @@ test("M2-7 C2C 单聊入库 + 用户级主动消息开关（kv）", () => {
   }
 });
 
-test("M2-8 保留策略：只清理超过保留期的消息", () => {
-  const { dir, db, repo } = setupDb();
-  try {
-    const mk = (id: string, ageDays: number) => ({
-      botId: "b",
-      scope: "group" as const,
-      scopeId: "g",
-      msgId: id,
-      authorOpenid: "u",
-      ts: Date.now() - ageDays * 24 * 60 * 60 * 1000,
-      content: `msg ${id}`,
-      mentions: [],
-      elements: undefined,
-      attachments: [],
-      raw: {},
-    });
-    repo.saveGroupMessage(mk("old", 100));
-    repo.saveGroupMessage(mk("new", 1));
-    assert.equal(repo.purgeOldMessages(90), 1);
-    const ids = (
-      db.prepare("SELECT msg_id FROM messages").all() as Array<{
-        msg_id: string;
-      }>
-    ).map((r) => r.msg_id);
-    assert.deepEqual(ids.sort(), ["new"]);
-  } finally {
-    cleanup(dir, db);
-  }
-});
-
 test("M2-9 元素消息 content 合并官方 content 与展开树；畸形容器不炸", () => {
   const { dir, db, repo } = setupDb();
   try {

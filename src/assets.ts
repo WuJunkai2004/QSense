@@ -3,7 +3,7 @@
 // 15 分钟时效）→ 执行环境（curl/fetch）直传数据端点 PUT /assets/{botId}/{assetId} →
 // 字节落盘 DATA_DIR/assets/ → send_media 以 media:"asset:<id>" 引用发送。
 // 文件字节不进 MCP 消息，也不进模型上下文（ADR：票据/预签名 URL 是 2026 最佳实践）。
-// 资产全局共享（人类视角"本服务的素材库"），独立于消息缓存，不参与 RETENTION 清理。
+// 资产全局共享（人类视角"本服务的素材库"），独立于消息缓存（消息缓存永不自动清理）。
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {

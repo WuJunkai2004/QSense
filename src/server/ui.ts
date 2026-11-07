@@ -528,7 +528,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           if (row === null) {
             reply
               .code(404)
-              .send({ error: "消息不存在（或已过保留期被清理）。" });
+              .send({ error: "消息不存在。" });
             return;
           }
           return {

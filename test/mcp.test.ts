@@ -951,17 +951,20 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
       "list_members 单聊 id 应报可操作错误",
     );
 
-    // 探测耐久性：单聊缓存被保留期清空后，C2C 开关 kv 记录仍可裁决侧别
-    //（主动消息门禁本就要求该记录存在，缓存清理不影响合法发送路径）
-    repo.setC2cSwitch("10001", USER, true);
-    assert.ok(repo.purgeOldMessages(0) >= 2, "保留期清理应清掉两条单聊缓存");
-    const durable = payloadOf(
+    // 探测补充证据：C2C 开关事件可先行于首条缓存消息（用户已 opt-in 但尚无消息）
+    //——kv 记录独立裁决 chat 侧，主动消息门禁亦依赖该记录
+    repo.setC2cSwitch("10001", "C2C_OPENID_U2", true);
+    const optinOnly = payloadOf(
       (await client.callTool({
         name: "get_new",
-        arguments: { id: USER },
+        arguments: { id: "C2C_OPENID_U2" },
       })) as never,
     );
-    assert.equal(durable.count, 0, "缓存已清但探测仍路由 chat：不报错、返回空页");
+    assert.equal(
+      optinOnly.count,
+      0,
+      "无缓存但开关记录裁决 chat：不报错、返回空页",
+    );
   } finally {
     try {
       await client?.close();
