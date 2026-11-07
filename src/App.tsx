@@ -97,10 +97,10 @@ export default function App() {
     if (first !== null) setLastBot(first);
   }, [boot, currentBot]);
 
-  // 会话列表：拉取 + 10s 轮询
+  // 会话列表（群+单聊合并）：拉取 + 10s 轮询
   const loadGroups = useCallback((): void => {
     if (boot === null || currentBot === null) return;
-    get<{ groups: GroupItem[] }>(`/groups?bot=${en(currentBot)}`)
+    get<{ groups: GroupItem[] }>(`/groups?bot=${en(currentBot)}&type=all`)
       .then((r) => setGroups(r.groups))
       .catch(() => undefined);
   }, [boot, currentBot]);
@@ -126,25 +126,29 @@ export default function App() {
 
   const currentGroupItem =
     groups.find((g) => g.group_openid === currentGroup) ?? null;
+  /** 当前会话是单聊（消息读写走 c2c 镜像，group 字段=对端 user_openid） */
+  const isChat = currentGroupItem?.type === "chat";
 
-  // 消息：切群拉最新页
+  // 消息：切会话拉最新页（单聊走 type=chat 镜像）
   useEffect(() => {
     setMessages([]);
     setHasMore(false);
     if (boot === null || currentBot === null || currentGroup === null) return;
+    const chatQ = isChat ? "&type=chat" : "";
     get<{ messages: MsgItem[]; has_more: boolean }>(
-      `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}&limit=30`,
+      `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}${chatQ}&limit=30`,
     )
       .then((r) => {
         setMessages(r.messages);
         setHasMore(r.has_more);
       })
       .catch(() => undefined);
-  }, [boot, currentBot, currentGroup]);
+  }, [boot, currentBot, currentGroup, isChat]);
 
   // 消息：4s 增量轮询（after 最后一条真实 rid；乐观消息 rid 为负不参与）
   useEffect(() => {
     if (boot === null || currentBot === null || currentGroup === null) return;
+    const chatQ = isChat ? "&type=chat" : "";
     const t = setInterval(() => {
       setMessages((cur) => {
         const lastRid = cur.reduce(
@@ -153,7 +157,7 @@ export default function App() {
         );
         if (lastRid > 0) {
           get<{ messages: MsgItem[] }>(
-            `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}&after=${lastRid}&limit=100`,
+            `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}${chatQ}&after=${lastRid}&limit=100`,
           )
             .then((r) => {
               if (r.messages.length === 0) return;
@@ -176,7 +180,7 @@ export default function App() {
       });
     }, 4_000);
     return () => clearInterval(t);
-  }, [boot, currentBot, currentGroup]);
+  }, [boot, currentBot, currentGroup, isChat]);
 
   const loadOlder = async (): Promise<void> => {
     if (
@@ -190,7 +194,7 @@ export default function App() {
     try {
       const before = messages[0].rid;
       const r = await get<{ messages: MsgItem[]; has_more: boolean }>(
-        `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}&before=${before}&limit=30`,
+        `/messages?bot=${en(currentBot)}&group=${en(currentGroup)}${isChat ? "&type=chat" : ""}&before=${before}&limit=30`,
       );
       setMessages((prev) => [...r.messages, ...prev]);
       setHasMore(r.has_more);
@@ -201,21 +205,23 @@ export default function App() {
     }
   };
 
-  // 右栏：成员名册 + 发送账本（切群 + 10s 轮询）
+  // 右栏：成员名册（单聊无名册）+ 发送账本（切会话 + 10s 轮询）
   const loadSide = useCallback((): void => {
     if (boot === null || currentBot === null || currentGroup === null) {
       setMembers([]);
       setSends([]);
       return;
     }
-    const qs = `bot=${en(currentBot)}&group=${en(currentGroup)}`;
-    get<{ members: MemberItem[] }>(`/members?${qs}`)
-      .then((r) => setMembers(r.members))
-      .catch(() => undefined);
+    const qs = `bot=${en(currentBot)}&group=${en(currentGroup)}${isChat ? "&type=chat" : ""}`;
+    if (isChat) setMembers([]);
+    else
+      get<{ members: MemberItem[] }>(`/members?${qs}`)
+        .then((r) => setMembers(r.members))
+        .catch(() => undefined);
     get<{ sends: SendItem[] }>(`/sends?${qs}`)
       .then((r) => setSends(r.sends))
       .catch(() => undefined);
-  }, [boot, currentBot, currentGroup]);
+  }, [boot, currentBot, currentGroup, isChat]);
   useEffect(() => {
     loadSide();
     const t = setInterval(loadSide, 10_000);
@@ -238,9 +244,11 @@ export default function App() {
     return () => clearInterval(t);
   }, [loadQuota]);
 
-  // 整群缓存删除（原 MCP forget 迁入）：确认弹窗在 RightPanel，成功后清当前选中并刷新列表
+  // 整群缓存删除（原 MCP forget 迁入）：确认弹窗在 RightPanel，成功后清当前选中并刷新列表。
+  // 单聊会话不适用（无名册/无注册表条目），RightPanel 不出该按钮。
   const handlePurgeGroup = async (): Promise<void> => {
     if (boot === null || currentBot === null || currentGroup === null) return;
+    if (currentGroupItem?.type === "chat") return;
     await del(
       `/groups/${en(currentGroup)}?bot=${en(currentBot)}`,
     );
@@ -275,6 +283,7 @@ export default function App() {
       const r = await post<{ result: SendResult }>("/send", {
         bot: currentBot,
         group: currentGroup,
+        ...(isChat ? { type: "chat" } : {}),
         text,
         ...(replyMsgId !== null ? { reply_msg_id: replyMsgId, quote } : {}),
       });
@@ -411,6 +420,7 @@ export default function App() {
       <MessageDetailDrawer
         bot={currentBot ?? ""}
         group={currentGroup ?? ""}
+        type={isChat ? "chat" : "group"}
         msg={detail}
         onClose={() => setDetail(null)}
       />

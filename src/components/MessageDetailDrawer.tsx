@@ -6,6 +6,8 @@ import type { MessageDetail, MsgItem } from "../types";
 interface Props {
   bot: string;
   group: string;
+  /** 会话类型：chat 时走 c2c 镜像读取 */
+  type: "group" | "chat";
   msg: MsgItem | null;
   onClose: () => void;
 }
@@ -14,6 +16,7 @@ interface Props {
 export default function MessageDetailDrawer({
   bot,
   group,
+  type,
   msg,
   onClose,
 }: Props) {
@@ -26,7 +29,7 @@ export default function MessageDetailDrawer({
     if (msg === null || msg.pending === true) return;
     setLoading(true);
     get<MessageDetail>(
-      `/message?bot=${encodeURIComponent(bot)}&group=${encodeURIComponent(group)}&msg_id=${encodeURIComponent(msg.msg_id)}`,
+      `/message?bot=${encodeURIComponent(bot)}&group=${encodeURIComponent(group)}${type === "chat" ? "&type=chat" : ""}&msg_id=${encodeURIComponent(msg.msg_id)}`,
     )
       .then(setDetail)
       .catch(
@@ -34,7 +37,7 @@ export default function MessageDetailDrawer({
           void tip.error(e instanceof Error ? e.message : String(e)),
       )
       .finally(() => setLoading(false));
-  }, [bot, group, msg, tip]);
+  }, [bot, group, type, msg, tip]);
 
   return (
     <Drawer

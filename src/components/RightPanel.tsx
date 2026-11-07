@@ -50,6 +50,7 @@ export default function RightPanel({
   onPurge,
 }: Props) {
   const { message: msg, modal } = AntApp.useApp();
+  const isChat = group?.type === "chat";
   return (
     <div className="right-panel">
       <Tabs
@@ -57,12 +58,12 @@ export default function RightPanel({
         items={[
           {
             key: "info",
-            label: "群资料",
+            label: isChat ? "会话资料" : "群资料",
             children:
               group === null ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="未选择群"
+                  description="未选择会话"
                 />
               ) : (
                 <>
@@ -77,7 +78,7 @@ export default function RightPanel({
                       },
                       {
                         key: "openid",
-                        label: "群 openid",
+                        label: isChat ? "对方 openid" : "群 openid",
                         children: (
                           <Tooltip title="点击复制">
                             <a
@@ -93,93 +94,118 @@ export default function RightPanel({
                           </Tooltip>
                         ),
                       },
-                      {
-                        key: "full",
-                        label: "全量消息",
-                        children:
-                          group.full_msg_enabled === true ? (
-                            <Tag color="green">开启</Tag>
-                          ) : (
-                            <Tag color="orange">受限</Tag>
-                          ),
-                      },
-                      {
-                        key: "count",
-                        label: "成员数（自建名册）",
-                        children: group.member_count,
-                      },
+                      ...(isChat
+                        ? [
+                            {
+                              key: "kind",
+                              label: "类型",
+                              children: (
+                                <Tag color="purple">
+                                  单聊（昵称来自群聊名册映射）
+                                </Tag>
+                              ),
+                            },
+                          ]
+                        : [
+                            {
+                              key: "full",
+                              label: "全量消息",
+                              children:
+                                group.full_msg_enabled === true ? (
+                                  <Tag color="green">开启</Tag>
+                                ) : (
+                                  <Tag color="orange">受限</Tag>
+                                ),
+                            },
+                            {
+                              key: "count",
+                              label: "成员数（自建名册）",
+                              children: group.member_count,
+                            },
+                          ]),
                     ]}
                   />
-                  {/* 危险区：整群缓存删除（原 MCP forget 迁入，仅人类操作） */}
-                  <div
-                    style={{
-                      marginTop: 10,
-                      paddingTop: 8,
-                      borderTop: "1px dashed #e5e7eb",
-                    }}
-                  >
-                    <Button
-                      size="small"
-                      danger
-                      onClick={() => {
-                        modal.confirm({
-                          title: "删除本群全部缓存？",
-                          content:
-                            "将删除该群的消息（含检索索引）、成员名册、群注册表与已读水位，不可恢复；发送审计账本保留。机器人仍在群时消息会重新累积。",
-                          okText: "删除",
-                          okButtonProps: { danger: true },
-                          cancelText: "取消",
-                          onOk: () => onPurge(),
-                        });
+                  {/* 危险区：整群缓存删除（原 MCP forget 迁入，仅人类操作；单聊无注册表条目，不适用） */}
+                  {!isChat && (
+                    <div
+                      style={{
+                        marginTop: 10,
+                        paddingTop: 8,
+                        borderTop: "1px dashed #e5e7eb",
                       }}
                     >
-                      删除本群缓存…
-                    </Button>
-                  </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      margin: "10px 0 4px",
-                    }}
-                  >
-                    <b style={{ fontSize: 13 }}>成员名册</b>
-                    <Button
+                      <Button
+                        size="small"
+                        danger
+                        onClick={() => {
+                          modal.confirm({
+                            title: "删除本群全部缓存？",
+                            content:
+                              "将删除该群的消息（含检索索引）、成员名册、群注册表与已读水位，不可恢复；发送审计账本保留。机器人仍在群时消息会重新累积。",
+                            okText: "删除",
+                            okButtonProps: { danger: true },
+                            cancelText: "取消",
+                            onOk: () => onPurge(),
+                          });
+                        }}
+                      >
+                        删除本群缓存…
+                      </Button>
+                    </div>
+                  )}
+                  {!isChat && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        margin: "10px 0 4px",
+                      }}
+                    >
+                      <b style={{ fontSize: 13 }}>成员名册</b>
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<ReloadOutlined />}
+                        onClick={onRefresh}
+                      />
+                    </div>
+                  )}
+                  {!isChat && (
+                    <List
                       size="small"
-                      type="text"
-                      icon={<ReloadOutlined />}
-                      onClick={onRefresh}
-                    />
-                  </div>
-                  <List
-                    size="small"
-                    dataSource={members}
-                    locale={{ emptyText: "暂无成员（消息到达后自动积累）" }}
-                    renderItem={(m) => (
-                      <List.Item style={{ padding: "4px 0" }}>
-                        <div className="member-row" style={{ width: "100%" }}>
-                          <Avatar
-                            size={26}
-                            style={{ background: "#c9d4e0" }}
-                            src={qqAvatar(botAppid, m.member_openid)}
+                      dataSource={members}
+                      locale={{ emptyText: "暂无成员（消息到达后自动积累）" }}
+                      renderItem={(m) => (
+                        <List.Item style={{ padding: "4px 0" }}>
+                          <div
+                            className="member-row"
+                            style={{ width: "100%" }}
                           >
-                            {(m.username ?? "?").slice(0, 1)}
-                          </Avatar>
-                          <span className="m-name">
-                            {m.username ?? m.member_openid}
-                          </span>
-                          {m.member_role === "owner" && (
-                            <span className="role-tag role-owner">群主</span>
-                          )}
-                          {m.member_role === "admin" && (
-                            <span className="role-tag role-admin">管理员</span>
-                          )}
-                          <span className="m-count">{m.msg_count} 条</span>
-                        </div>
-                      </List.Item>
-                    )}
-                  />
+                            <Avatar
+                              size={26}
+                              style={{ background: "#c9d4e0" }}
+                              src={qqAvatar(botAppid, m.member_openid)}
+                            >
+                              {(m.username ?? "?").slice(0, 1)}
+                            </Avatar>
+                            <span className="m-name">
+                              {m.username ?? m.member_openid}
+                            </span>
+                            {m.member_role === "owner" && (
+                              <span className="role-tag role-owner">群主</span>
+                            )}
+                            {m.member_role === "admin" && (
+                              <span className="role-tag role-admin">
+                                管理员
+                              </span>
+                            )}
+                            <span className="m-count">{m.msg_count} 条</span>
+                          </div>
+                        </List.Item>
+                      )}
+                    />
+                  )}
                 </>
               ),
           },

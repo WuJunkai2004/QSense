@@ -55,8 +55,12 @@ export interface GroupLast {
 }
 
 export interface GroupItem {
+  /** 会话类型：group=群聊 / chat=单聊（单聊时 group_openid=对端 user_openid） */
+  type: "group" | "chat";
   group_openid: string;
-  full_msg_enabled: boolean;
+  /** 单聊恒 null（无全量消息开关概念） */
+  full_msg_enabled: boolean | null;
+  /** 单聊恒 0（无名册） */
   member_count: number;
   updated_at: string | null;
   last: GroupLast | null;
@@ -121,8 +125,8 @@ export interface QuotaInfo {
   buckets?: Record<string, unknown>;
 }
 
-/** /ui/api/message 详情（智能体视角原始载荷） */
-export interface MessageDetail extends MsgItem {
+/** /ui/api/message 详情（智能体视角原始载荷）；attachments 为原始 JSON（unknown），覆盖基类窄类型 */
+export interface MessageDetail extends Omit<MsgItem, "attachments"> {
   mentions: unknown;
   attachments: unknown;
   ark: unknown;

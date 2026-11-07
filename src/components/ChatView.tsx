@@ -17,7 +17,7 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
-import type { Bootstrap, GroupItem, MsgAttachment, MsgItem } from "../types";
+import type { Bootstrap, GroupItem, MsgItem } from "../types";
 import { getAlias, setAlias } from "../api";
 import { qqAvatar } from "../avatar";
 
@@ -46,13 +46,16 @@ function RoleTag({ role }: { role: string | null }) {
   return null;
 }
 
-/** 官方群聊被动回复窗口：消息时间起 5 分钟内可引用回复（每条消息上限 5 次） */
-const REPLY_WINDOW_MS = 5 * 60_000;
+/** 被动回复窗口（官方限制）：群聊消息 5 分钟内、每条上限 5 次；单聊 60 分钟、每条上限 4 次 */
+const REPLY_WINDOW = {
+  group: { ms: 5 * 60_000, max: 5 },
+  chat: { ms: 60 * 60_000, max: 4 },
+};
 
-/** 引用回复目标是否已出窗（缺 msg_id / 缺时间戳 / 超 5 分钟均视为不可回复） */
-function replyExpired(m: MsgItem): boolean {
+/** 引用回复目标是否已出窗（缺 msg_id / 缺时间戳 / 超窗均视为不可回复） */
+function replyExpired(m: MsgItem, windowMs: number): boolean {
   if (m.msg_id === "" || m.ts === null) return true;
-  return Date.now() - new Date(m.ts).getTime() > REPLY_WINDOW_MS;
+  return Date.now() - new Date(m.ts).getTime() > windowMs;
 }
 
 /** 本机行（乐观上屏/外发补记）不能作为被动回复目标 */
@@ -164,29 +167,35 @@ export default function ChatView(props: Props) {
   }, [hasMore, messages.length]);
 
   const groupOpenid = group?.group_openid ?? null;
+  const isChat = group?.type === "chat";
+  const win = isChat ? REPLY_WINDOW.chat : REPLY_WINDOW.group;
   const alias = groupOpenid !== null ? getAlias(groupOpenid) : "";
   const title =
     groupOpenid === null
       ? ""
       : alias !== ""
         ? alias
-        : `群 ${groupOpenid.slice(0, 12)}…`;
+        : isChat
+          ? (group?.last?.author ?? `用户 ${groupOpenid.slice(0, 12)}…`)
+          : `群 ${groupOpenid.slice(0, 12)}…`;
   const botGroups =
     boot.bots.find((b) => b.appid === botAppid)?.allow_groups ?? [];
+  // 单聊无群白名单门禁（服务端按 opt-in 开关把关，错误文案可操作）
   const sendAllowed =
     boot.send_enabled === true &&
     groupOpenid !== null &&
-    botGroups.includes(groupOpenid);
+    (isChat || botGroups.includes(groupOpenid));
 
   // 智能默认：无显式引用目标时，自动引用回复窗口内最新一条入站消息（被动，不耗主动额度）。
-  // 官方每条群消息最多被动回复 5 次：本地计数防止自动回复把同一目标的槽位耗尽，超额自动降级主动发送。
+  // 官方每条消息被动回复次数有限（群 5 次/单聊 4 次）：本地计数防止把同一目标槽位耗尽，
+  // 超额自动降级主动发送。
   const replyCountRef = useRef(new Map<string, number>());
   const autoTarget = ((): MsgItem | null => {
     const latest = [...messages].reverse().find((m) => !isSelfRow(m));
     if (
       latest === undefined ||
-      replyExpired(latest) ||
-      (replyCountRef.current.get(latest.msg_id) ?? 0) >= 5
+      replyExpired(latest, win.ms) ||
+      (replyCountRef.current.get(latest.msg_id) ?? 0) >= win.max
     ) {
       return null;
     }
@@ -197,9 +206,9 @@ export default function ChatView(props: Props) {
     const t = text.trim();
     if (t === "" || groupOpenid === null || sending) return;
     // 兜底校验：显式引用目标出窗时不打服务端（渲染间隙内过期的行按钮仍是可点状态）
-    if (replyTo !== null && replyExpired(replyTo)) {
+    if (replyTo !== null && replyExpired(replyTo, win.ms)) {
       void msg.warning(
-        "引用的消息已超过 5 分钟被动回复窗口（官方限制），无法被动回复；可取消引用后直接作为主动消息发送。",
+        `引用的消息已超过 ${isChat ? "60 分钟（单聊）" : "5 分钟"}被动回复窗口（官方限制），无法被动回复；可取消引用后直接作为主动消息发送。`,
       );
       return;
     }
@@ -228,12 +237,13 @@ export default function ChatView(props: Props) {
     <div className="chat-pane">
       <div className="chat-header">
         <span className="g-name">{title}</span>
-        {group !== null && (
+        {group !== null && isChat && <Tag color="purple">单聊</Tag>}
+        {group !== null && !isChat && (
           <span style={{ color: "#9aa0a8", fontSize: 12 }}>
             {group.member_count} 位成员
           </span>
         )}
-        {group !== null && group.full_msg_enabled === false && (
+        {group !== null && !isChat && group.full_msg_enabled === false && (
           <Tag color="orange">全量消息受限</Tag>
         )}
         <span className="spacer" style={{ flex: 1 }} />
@@ -262,7 +272,7 @@ export default function ChatView(props: Props) {
         }}
       >
         {groupOpenid === null ? (
-          <div className="empty-hint">← 从会话列表选择一个群</div>
+          <div className="empty-hint">← 从会话列表选择一个会话</div>
         ) : (
           <>
             {hasMore && (
@@ -285,7 +295,7 @@ export default function ChatView(props: Props) {
             )}
             {messages.map((m) => {
               const self = m.pending === true || m.out === true;
-              const expired = self ? false : replyExpired(m);
+              const expired = self ? false : replyExpired(m, win.ms);
               return (
                 <div
                   key={m.msg_id !== "" ? m.msg_id : `pending-${m.rid}`}
@@ -336,8 +346,8 @@ export default function ChatView(props: Props) {
                         <Tooltip
                           title={
                             expired
-                              ? "该消息已超过 5 分钟被动回复窗口（官方限制），不能引用回复"
-                              : "以此消息为被动回复目标（5 分钟窗口）"
+                              ? `该消息已超过 ${isChat ? "60 分钟（单聊）" : "5 分钟"}被动回复窗口（官方限制），不能引用回复`
+                              : `以此消息为被动回复目标（${isChat ? "60 分钟" : "5 分钟"}窗口）`
                           }
                         >
                           {/* disabled Button 吞掉 hover，包一层 span 让 Tooltip 仍可提示 */}
@@ -406,8 +416,10 @@ export default function ChatView(props: Props) {
             showIcon
             message={
               boot.send_enabled
-                ? "该群不在 ALLOW_GROUPS 白名单，发送被硬拒绝（改 .env 后重启生效）"
-                : "发送开关未开启（SEND_ENABLE=false），仅浏览"
+                ? isChat
+                  ? "该用户未同意接收消息（官方 opt-in 门槛），主动发送被硬拒绝；被动窗口内回复不受限"
+                  : "该群不在白名单，发送被硬拒绝（设置页可改，即时生效）"
+                : "发送开关未开启，仅浏览（设置页可开启）"
             }
           />
         )}
@@ -417,7 +429,7 @@ export default function ChatView(props: Props) {
             onChange={(e) => setText(e.target.value)}
             placeholder={
               replyTo !== null
-                ? "引用回复（被动，不消耗主动额度，5 分钟窗口）…"
+                ? `引用回复（被动，不消耗主动额度，${isChat ? "60 分钟" : "5 分钟"}窗口）…`
                 : autoTarget !== null
                   ? `发送 = 自动回复 ${autoTarget.author.name ?? "?"} 的最新消息（被动，不消耗主动额度）…`
                   : "主动消息（消耗额度：bot 级 30/60 每分钟、单群 20 每分钟、1000/天）…"

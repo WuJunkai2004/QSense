@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Avatar, Input, Tag } from "antd";
-import { GroupOutlined } from "@ant-design/icons";
+import { GroupOutlined, UserOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import type { GroupItem } from "../types";
 import { getAlias } from "../api";
@@ -20,7 +20,7 @@ function timeText(iso: string | null): string {
   return d.format("MM/DD");
 }
 
-/** 会话列表（左二栏）：按最后消息排序的群 + 摘要 + 搜索过滤 */
+/** 会话列表（左二栏）：群+单聊按最后消息排序 + 摘要 + 搜索过滤 */
 export default function SessionList({
   groups,
   current,
@@ -43,7 +43,7 @@ export default function SessionList({
     <div className="session-pane">
       <div className="search">
         <Input
-          placeholder="搜索群 / 备注 / 消息"
+          placeholder="搜索会话 / 备注 / 消息"
           allowClear
           size="small"
           value={kw}
@@ -54,15 +54,23 @@ export default function SessionList({
         {filtered.length === 0 && (
           <div className="empty-hint" style={{ height: 80, fontSize: 12 }}>
             {groups.length === 0
-              ? "暂无群缓存（等消息到达自动建群）"
+              ? "暂无会话缓存（等消息到达自动建立）"
               : "无匹配"}
           </div>
         )}
         {filtered.map((g) => {
+          const isChat = g.type === "chat";
           const alias = getAlias(g.group_openid);
+          // 单聊展示名：备注 > 名册映射名（last.author）> openid 前缀
           const name =
-            alias !== "" ? alias : `群 ${g.group_openid.slice(0, 10)}…`;
-          const allowed = allowGroups.includes(g.group_openid);
+            alias !== ""
+              ? alias
+              : isChat && g.last?.author
+                ? g.last.author
+                : isChat
+                  ? `用户 ${g.group_openid.slice(0, 10)}…`
+                  : `群 ${g.group_openid.slice(0, 10)}…`;
+          const allowed = isChat || allowGroups.includes(g.group_openid);
           return (
             <div
               key={g.group_openid}
@@ -72,8 +80,11 @@ export default function SessionList({
               <Avatar
                 shape="square"
                 size={38}
-                style={{ borderRadius: 8, background: "#c9d4e0" }}
-                icon={<GroupOutlined />}
+                style={{
+                  borderRadius: 8,
+                  background: isChat ? "#f0d9e8" : "#c9d4e0",
+                }}
+                icon={isChat ? <UserOutlined /> : <GroupOutlined />}
               />
               <div className="s-main">
                 <div className="s-title">
@@ -83,6 +94,17 @@ export default function SessionList({
                   </span>
                 </div>
                 <div className="s-snippet">
+                  {isChat ? (
+                    <Tag
+                      style={{
+                        fontSize: 10,
+                        lineHeight: "14px",
+                        padding: "0 3px",
+                      }}
+                    >
+                      单聊
+                    </Tag>
+                  ) : null}
                   {g.full_msg_enabled === false ? (
                     <Tag
                       style={{
