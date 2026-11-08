@@ -536,7 +536,7 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
   }
 });
 
-test("M3-5 引用回溯 + 信封统一：get_new 内联被引原文；条目/信封均无会话回显", async () => {
+test("M3-5 引用结构化 + 信封统一：get_new 摘除内联引用、quote_msg 呈现；条目/信封均无会话回显", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
@@ -590,6 +590,26 @@ test("M3-5 引用回溯 + 信封统一：get_new 内联被引原文；条目/信
       ts: Date.now() + 30_000,
       content: "看看这条\n[引用 msg_idx=REFIDX_Q1]\n被引的原文内容",
     });
+    // 长被引正文（多行）：quote_msg.content 只取首行并截断到 50 字符加省略号
+    repo.saveGroupMessage({
+      ...base,
+      msgId: "Q5",
+      authorOpenid: "U_C",
+      authorName: "长文者",
+      authorRole: "member",
+      ts: Date.now() + 45_000,
+      content: `${"长".repeat(60)}\n第二行`,
+      msgIdx: "REFIDX_Q5",
+    });
+    repo.saveGroupMessage({
+      ...base,
+      msgId: "Q6",
+      authorOpenid: "U_B",
+      authorName: "引用者",
+      authorRole: "member",
+      ts: Date.now() + 50_000,
+      content: "[引用 msg_idx=REFIDX_Q5]\n引用了一条很长的消息",
+    });
 
     client = await connectClient(fx.baseUrl, fx.agentToken);
     const res = payloadOf(
@@ -603,23 +623,44 @@ test("M3-5 引用回溯 + 信封统一：get_new 内联被引原文；条目/信
     const msgs = res.messages as Array<Record<string, unknown>>;
     const q2 = msgs.find((m) => m.msg_id === "Q2")!;
     assert.ok(!("group_openid" in q2), "消息条目无会话回显字段");
-    const hit = String(q2.content);
-    assert.ok(hit.includes("[引用 @被引者]"), "命中缓存内联被引作者");
-    assert.ok(hit.includes("> 被引的原文内容"), "被引正文以 > 前缀内联");
-    assert.ok(!hit.includes("REFIDX_Q1"), "令牌不外露");
+    assert.equal(String(q2.content), "看看这条", "正文干净：令牌行与被引原文均已摘除");
+    const q2quote = q2.quote_msg as Record<string, unknown>;
+    assert.equal(q2quote.id, "U_A", "quote_msg.id=被引作者 openid");
+    assert.equal(q2quote.msg_id, "Q1", "quote_msg.msg_id=被引消息");
+    assert.equal(q2quote.content, "被引的原文内容", "被引正文（首行，≤50 字不截断）");
     const q3 = msgs.find((m) => m.msg_id === "Q3")!;
     assert.ok(
       String(q3.content).includes("REFIDX_MISSING"),
       "未命中缓存保留原令牌行",
     );
+    assert.ok(!("quote_msg" in q3), "未命中缓存不产 quote_msg 字段");
     const q4 = msgs.find((m) => m.msg_id === "Q4")!;
-    const q4content = String(q4.content);
-    assert.ok(q4content.includes("> 被引的原文内容"), "命中内联原文");
+    assert.equal(String(q4.content), "看看这条", "ingest 展开行随令牌行一并摘除");
     assert.equal(
-      q4content.split("被引的原文内容").length - 1,
-      1,
-      "ingest 展开行被吞掉，正文只出现一次",
+      (q4.quote_msg as Record<string, unknown>).msg_id,
+      "Q1",
+      "命中产 quote_msg",
     );
+    const q6 = msgs.find((m) => m.msg_id === "Q6")!;
+    const q6quote = q6.quote_msg as Record<string, unknown>;
+    assert.equal(q6quote.id, "U_C");
+    assert.equal(q6quote.msg_id, "Q5");
+    assert.equal(
+      q6quote.content,
+      `${"长".repeat(50)}…`,
+      "首行截断：50 字符 + 省略号",
+    );
+    assert.ok(
+      !String(q6.content).includes("第二行") &&
+        !String(q6.content).includes("长".repeat(50)),
+      "被引正文（含非首行）不进 content",
+    );
+    for (const m of msgs) {
+      assert.ok(
+        !String(m.content).includes("[引用 @") && !String(m.content).includes("\n> "),
+        "MCP 面正文无内联引用文字",
+      );
+    }
   } finally {
     try {
       await client?.close();
@@ -832,7 +873,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     assert.equal(chat.id, USER);
     assert.equal(chat.unread, 2);
 
-    // get_new：拉取即已读，重复调用不重拉；引用回溯内联被引原文（侧别由 id 探测）
+    // get_new：拉取即已读，重复调用不重拉；引用结构化 quote_msg（侧别由 id 探测）
     const first = payloadOf(
       (await client.callTool({
         name: "get_new",
@@ -850,8 +891,10 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     const c2 = (first.messages as Array<Record<string, unknown>>).find(
       (m) => m.msg_id === "C2",
     )!;
-    assert.ok(String(c2.content).includes("[引用 @"), "单聊引用内联被引作者");
-    assert.ok(String(c2.content).includes("> 被引的单聊原文"));
+    assert.equal(String(c2.content), "单聊里引用一下", "单聊引用同样摘除内联");
+    const c2quote = c2.quote_msg as Record<string, unknown>;
+    assert.equal(c2quote.msg_id, "C1");
+    assert.equal(c2quote.content, "被引的单聊原文");
 
     // 已读后红点消失
     const after = payloadOf(

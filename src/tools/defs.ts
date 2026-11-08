@@ -126,9 +126,9 @@ function requireSender(ctx: ToolContext): Sender {
 }
 
 // —— 行 → 输出形状：无任何会话回显（id 是 agent 刚传的参数，不再 echo）；
-// content 引用行读取时内联被引原文（群聊/私聊分别查各自缓存表）；不含 raw_json/elements_json
-//（content 已含展开文本）；bot 自发消息落库 direction=1（官方不回推，发送侧本地补记），
-// 读取层据此标 author.role="yourself" ——
+// 引用命中缓存时以 quote_msg 结构化字段呈现（content 只留本条正文，防被引原文混入）；
+// 不含 raw_json/elements_json（content 已含展开文本）；bot 自发消息落库 direction=1（官方不回推，
+// 发送侧本地补记），读取层据此标 author.role="yourself" ——
 
 function msgOut(
   repo: Repo,
@@ -137,6 +137,10 @@ function msgOut(
   scopeId: string,
   row: MsgRow,
 ): Record<string, unknown> {
+  const resolved =
+    kind === "chat"
+      ? repo.resolveQuoteMsgC2c(botId, scopeId, row.content)
+      : repo.resolveQuoteMsg(botId, scopeId, row.content);
   const out: Record<string, unknown> = {
     msg_id: row.msg_id,
     ts: row.ts !== null ? new Date(row.ts).toISOString() : null,
@@ -145,11 +149,15 @@ function msgOut(
       name: row.author_name,
       role: Number(row.direction) === 1 ? "yourself" : row.author_role,
     },
-    content:
-      kind === "chat"
-        ? repo.resolveQuotesC2c(botId, scopeId, row.content)
-        : repo.resolveQuotes(botId, scopeId, row.content),
+    content: resolved.content,
   };
+  if (resolved.quote !== null) {
+    out.quote_msg = {
+      id: resolved.quote.id,
+      msg_id: resolved.quote.msgId,
+      content: resolved.quote.body,
+    };
+  }
   if (row.mentions_json) out.mentions = JSON.parse(row.mentions_json);
   if (row.attachments_json) out.attachments = JSON.parse(row.attachments_json);
   if (row.ark_json) out.ark = JSON.parse(row.ark_json);
@@ -586,7 +594,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "context",
     description:
-      "取某消息的前后文（含合并转发/引用已展开的可读文本），radius 为前后各取条数。has_more=true 表示前后还有更多。",
+      "取某消息的前后文（含合并转发展开的可读文本；引用以 quote_msg 结构化字段呈现，不混入正文），radius 为前后各取条数。has_more=true 表示前后还有更多。",
     inputSchema: {
       type: "object",
       required: ["id", "msg_id"],

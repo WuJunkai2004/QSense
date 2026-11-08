@@ -48,7 +48,7 @@ export interface SendRow {
 export class Repo {
   private readonly insertGroupMsg: Stmt<[Record<string, unknown>]>;
   private readonly insertC2cMsg: Stmt<[Record<string, unknown>]>;
-  /** 引用回溯：msg_idx 令牌 → 被引消息行（resolveQuotes 专用） */
+  /** 引用回溯：msg_idx 令牌 → 被引消息行（resolveQuotes / resolveQuoteMsg 共用） */
   private readonly msgIdxStmt: Stmt<[string, string, string]>;
   /** 单聊镜像查询（c2c_messages，scope 列 user_openid）：与群聊读取层同形 */
   private readonly c2cAfterStmt: Stmt<[string, string, number, number]>;
@@ -116,7 +116,7 @@ export class Repo {
       )
     `);
     this.msgIdxStmt = db.prepare(
-      "SELECT author_name, content AS body FROM messages WHERE bot_id = ? AND group_openid = ? AND msg_idx = ? ORDER BY rowid DESC LIMIT 1",
+      "SELECT author_openid, msg_id, author_name, content AS body FROM messages WHERE bot_id = ? AND group_openid = ? AND msg_idx = ? ORDER BY rowid DESC LIMIT 1",
     );
     // 单聊镜像（c2c_messages）：读取层五件套与引用回溯，SQL 与群聊版同形、scope 列为 user_openid
     this.c2cAfterStmt = db.prepare(`
@@ -128,7 +128,7 @@ export class Repo {
       "SELECT rowid AS rid, * FROM c2c_messages WHERE bot_id = ? AND user_openid = ? AND msg_id = ?",
     );
     this.c2cMsgIdxStmt = db.prepare(
-      "SELECT author_name, content AS body FROM c2c_messages WHERE bot_id = ? AND user_openid = ? AND msg_idx = ? ORDER BY rowid DESC LIMIT 1",
+      "SELECT author_openid, msg_id, author_name, content AS body FROM c2c_messages WHERE bot_id = ? AND user_openid = ? AND msg_idx = ? ORDER BY rowid DESC LIMIT 1",
     );
     this.c2cBeforeStmt = db.prepare(`
       SELECT rowid AS rid, * FROM c2c_messages
@@ -556,7 +556,8 @@ export class Repo {
    * message_scene.ext 携带 msg_idx，引用元素（103）以此为锚指向被引消息。命中则内联被引作者与
    * 正文（行加 "> " 前缀）；未命中（未缓存/历史行无令牌）原样保留。
    * ingest 时 103 元素会把被引原文展开成紧跟结构行的文本行（FTS 检索面不丢内容）——命中时该行
-   * 与内联正文重复，逐行比对一致才吞掉（防误删用户恰好相同的正文）。MCP 与 WebUI 序列化共用。
+   * 与内联正文重复，逐行比对一致才吞掉（防误删用户恰好相同的正文）。WebUI 序列化专用
+   * （人类视角内联引用更易读）；MCP 读取层已改走 resolveQuoteMsg（引用结构化）。
    */
   resolveQuotes(
     botId: string,
@@ -612,6 +613,101 @@ export class Repo {
       i = j - 1;
     }
     return out.join("\n");
+  }
+
+  /**
+   * 引用结构化（MCP 读取层专用，2026-11-08 用户定案）：被引原文不再以「[引用 @名] + > 正文」
+   * 文字内联进 content——智能体易把被引原文误当本条正文。顶层 `[引用 msg_idx=X]` 令牌行与
+   * ingest 展开的被引原文行一并摘除，改为返回 quote 数据（msgOut 据此组装 quote_msg 字段：
+   * {id, msg_id, content}）；quote.body 已按「首行 + ≤50 字符（超出加 …）」截断。
+   * 未命中（未缓存/历史行无令牌）返回 quote=null 且正文原样——无法区分被引展开行与用户
+   * 正文，不做有损摘除；缩进令牌（聊天记录内部的引用）属记录转写的一部分，仍按内联渲染。
+   * WebUI 序列化沿用 resolveQuotes（人类视角内联引用更易读），两套并存互不影响。
+   */
+  resolveQuoteMsg(
+    botId: string,
+    groupOpenid: string,
+    content: string | null,
+  ): {
+    content: string;
+    quote: { id: string | null; msgId: string | null; body: string } | null;
+  } {
+    return this.resolveQuoteMsgIn(this.msgIdxStmt, botId, groupOpenid, content);
+  }
+
+  /** 单聊镜像：引用结构化查 c2c_messages */
+  resolveQuoteMsgC2c(
+    botId: string,
+    userOpenid: string,
+    content: string | null,
+  ): {
+    content: string;
+    quote: { id: string | null; msgId: string | null; body: string } | null;
+  } {
+    return this.resolveQuoteMsgIn(this.c2cMsgIdxStmt, botId, userOpenid, content);
+  }
+
+  /** resolveQuoteMsg 共干（与 resolveQuotesIn 同构：命中消费令牌行+展开行，输出不同） */
+  private resolveQuoteMsgIn(
+    stmt: Stmt<[string, string, string]>,
+    botId: string,
+    scopeId: string,
+    content: string | null,
+  ): {
+    content: string;
+    quote: { id: string | null; msgId: string | null; body: string } | null;
+  } {
+    const text = content ?? "";
+    const noQuote = { content: text, quote: null };
+    if (!text.includes("[引用 msg_idx=")) return noQuote;
+    const lines = text.split("\n");
+    const out: string[] = [];
+    let quote: { id: string | null; msgId: string | null; body: string } | null =
+      null;
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i]!;
+      const m = line.match(/^\s*\[引用 msg_idx=([^\]]+)\]\s*$/);
+      if (m === null) {
+        out.push(line);
+        continue;
+      }
+      const row = stmt.get(botId, scopeId, m[1]!) as
+        | {
+            author_openid: string | null;
+            msg_id: string | null;
+            author_name: string | null;
+            body: string | null;
+          }
+        | undefined;
+      if (row === undefined) {
+        out.push(line);
+        continue;
+      }
+      const body = (row.body ?? "").trim();
+      const bodyLines = body === "" ? [] : body.split("\n");
+      // 吞掉紧跟的 ingest 展开行：与被引正文逐行一致才消费
+      let j = i + 1;
+      for (const bl of bodyLines) {
+        if (lines[j] !== undefined && lines[j]!.trim() === bl.trim()) j += 1;
+        else break;
+      }
+      if (quote === null && !/^\s/.test(line)) {
+        // 顶层首命中 → 结构化摘除（不向正文输出任何引用文字）
+        const first = bodyLines[0] ?? "";
+        const cps = Array.from(first);
+        quote = {
+          id: row.author_openid ?? null,
+          msgId: row.msg_id ?? null,
+          body: cps.length > 50 ? `${cps.slice(0, 50).join("")}…` : first,
+        };
+      } else {
+        // 缩进令牌（记录转写）或后续顶层令牌：保持内联渲染
+        out.push(`[引用 @${row.author_name ?? "未知成员"}]`);
+        for (const bl of bodyLines) out.push(`> ${bl}`);
+      }
+      i = j - 1;
+    }
+    return { content: out.join("\n"), quote };
   }
 
   /** 时间轴翻页：锚点(含同秒)以 rowid 决胜负，保证严格有序不重不漏 */

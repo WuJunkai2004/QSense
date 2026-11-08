@@ -69,7 +69,7 @@ M9 起 env 只承担部署拓扑与运维参数；**bot 注册（appid/secret/�
 
 **合规**：整群缓存删除已**迁出 MCP 工具面**（避免 agent 被消息注入诱导删数据），收归 WebUI：`DELETE /ui/api/groups/:openid`（admin token + 前端确认弹窗），发送审计账本保留。
 
-工具面以"人类操作QQ"为隐喻组织：list 系 = 打开消息列表，get_new/browse/search/context = 点开 会话翻记录，reply/send = 说话。返回体为同构 JSON：会话条目 `{type, id, unread, last_msg_ts}`，消息条目 `{msg_id, ts, author, content, mentions?, attachments?, ark?}`（无任何会话回显；`content` 为 markdown，媒体以 `![附件n]` 占位符内联保序，引用行命中缓存时内联被引原文）；信封统一 `{messages, count, has_more}` / `{conversations, count}`，无管理面字段（全量开关/成员数只在 WebUI 可见）。
+工具面以"人类操作QQ"为隐喻组织：list 系 = 打开消息列表，get_new/browse/search/context = 点开 会话翻记录，reply/send = 说话。返回体为同构 JSON：会话条目 `{type, id, unread, last_msg_ts}`，消息条目 `{msg_id, ts, author, content, quote_msg?, mentions?, attachments?, ark?}`（无任何会话回显；`content` 为 markdown，媒体以 `![附件n]` 占位符内联保序；引用命中缓存时以 `quote_msg` 结构化字段呈现——`{id: 被引作者, msg_id: 被引消息, content: 被引正文首行 ≤50 字符}`，不内联进正文）；信封统一 `{messages, count, has_more}` / `{conversations, count}`，无管理面字段（全量开关/成员数只在 WebUI 可见）。
 
 ## WebUI（/ui）
 
