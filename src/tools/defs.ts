@@ -387,9 +387,7 @@ export const TOOLS: ToolDef[] = [
       },
     },
     handler: (args, ctx) => {
-      const botId = resolveBotId(ctx);
-      const group = scopeIdArg(args);
-      const kind = detectKind(ctx, botId, group);
+      const { botId, scopeId: group, kind } = resolveSession(ctx, args);
       if (kind === "chat") {
         throw new ToolError(
           `${group} 是单聊会话：list_members 仅群聊有成员名册（单聊无名册概念）。`,
@@ -707,7 +705,7 @@ export const TOOLS: ToolDef[] = [
       type: "object",
       properties: {},
     },
-    handler: (args, ctx) => {
+    handler: (_args, ctx) => {
       const botId = resolveBotId(ctx);
       const date = new Date().toISOString().slice(0, 10);
       return {

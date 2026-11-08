@@ -11,7 +11,7 @@ import type { Logger } from "../logger";
 import type { Sender } from "../sender";
 import type { DB } from "../store/db";
 import { Repo } from "../store/repo";
-import { bearerOk, createMcpHandler } from "../tools/mcp";
+import { createMcpHandler } from "../tools/mcp";
 import { registerUiRoutes } from "./ui";
 
 const ASSET_MAX_BYTES = 20 * 1024 * 1024;

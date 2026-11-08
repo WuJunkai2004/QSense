@@ -13,8 +13,11 @@
 // - add 必过 verify（生产=TokenService 拉真 access_token + 网关地址探测），未验证不入库。
 
 import { randomBytes } from "node:crypto";
+import type Database from "better-sqlite3";
 import type { AuthLevel, BotApp } from "./config";
 import type { DB } from "./store/db";
+
+type Stmt<P extends unknown[] = unknown[]> = Database.Statement<P>;
 
 export interface BotRegistryDeps {
   db: DB;
@@ -38,8 +41,6 @@ interface BotRow {
   allow_groups: string;
   auth_level: string;
 }
-
-const AUTH_LEVELS: readonly AuthLevel[] = ["certified", "uncertified"];
 
 /** 认证等级白名单校验：非法值报可操作错误 */
 export function parseAuthLevel(raw: unknown): AuthLevel {
@@ -69,9 +70,30 @@ function rowToApp(row: Pick<BotRow, "appid" | "name" | "secret">): BotApp {
 
 export class BotRegistry {
   private readonly verify: (app: BotApp) => Promise<void>;
+  /**
+   * 热路径读 stmt 缓存（对齐 repo.ts 的既定模式）：appIdByToken=每 MCP 请求必经；
+   * allowGroupsOf=发送门禁+侧别探测兜底；agentTokenOf=资产票据签发/校验；authLevelOf=quota。
+   * 管理面写操作（add/remove/rename/setAllowGroups/setAuthLevel/rotate）低频，保持 inline prepare。
+   */
+  private readonly appIdByTokenStmt: Stmt<[string]>;
+  private readonly allowGroupsStmt: Stmt<[string]>;
+  private readonly agentTokenStmt: Stmt<[string]>;
+  private readonly authLevelStmt: Stmt<[string]>;
 
   constructor(private readonly deps: BotRegistryDeps) {
     this.verify = deps.verify ?? (async () => {});
+    this.appIdByTokenStmt = deps.db.prepare(
+      "SELECT appid FROM bots WHERE agent_token = ?",
+    );
+    this.allowGroupsStmt = deps.db.prepare(
+      "SELECT allow_groups FROM bots WHERE appid = ?",
+    );
+    this.agentTokenStmt = deps.db.prepare(
+      "SELECT agent_token FROM bots WHERE appid = ?",
+    );
+    this.authLevelStmt = deps.db.prepare(
+      "SELECT auth_level FROM bots WHERE appid = ?",
+    );
   }
 
   // —— 运行时读写（全部走表） ——
@@ -196,9 +218,9 @@ export class BotRegistry {
 
   /** 每 bot 发送白名单（gate 的权限域） */
   allowGroupsOf(appid: string): string[] {
-    const row = this.deps.db
-      .prepare("SELECT allow_groups FROM bots WHERE appid = ?")
-      .get(appid) as { allow_groups: string } | undefined;
+    const row = this.allowGroupsStmt.get(appid) as
+      | { allow_groups: string }
+      | undefined;
     return row === undefined ? [] : parseAllowGroups(row.allow_groups);
   }
 
@@ -213,9 +235,9 @@ export class BotRegistry {
 
   /** 每 bot 认证等级（主动消息频控预算档位；缺省未认证） */
   authLevelOf(appid: string): AuthLevel {
-    const row = this.deps.db
-      .prepare("SELECT auth_level FROM bots WHERE appid = ?")
-      .get(appid) as { auth_level: string } | undefined;
+    const row = this.authLevelStmt.get(appid) as
+      | { auth_level: string }
+      | undefined;
     return row === undefined
       ? "uncertified"
       : parseAuthLevelColumn(row.auth_level);
@@ -246,17 +268,17 @@ export class BotRegistry {
 
   /** /mcp 鉴权：token → 绑定的 bot appid（未命中=null） */
   appIdByToken(token: string): string | null {
-    const row = this.deps.db
-      .prepare("SELECT appid FROM bots WHERE agent_token = ?")
-      .get(token) as { appid: string } | undefined;
+    const row = this.appIdByTokenStmt.get(token) as
+      | { appid: string }
+      | undefined;
     return row?.appid ?? null;
   }
 
   /** 资产上传票据签发/校验：appid → agent_token（bot 不存在或已轮换=null） */
   agentTokenOf(appid: string): string | null {
-    const row = this.deps.db
-      .prepare("SELECT agent_token FROM bots WHERE appid = ?")
-      .get(appid) as { agent_token: string } | undefined;
+    const row = this.agentTokenStmt.get(appid) as
+      | { agent_token: string }
+      | undefined;
     return row?.agent_token ?? null;
   }
 }

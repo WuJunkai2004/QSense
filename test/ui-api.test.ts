@@ -13,7 +13,7 @@ import type { TokenService } from "../src/gateway/token";
 import { createLogger } from "../src/logger";
 import { Sender, type SendApi } from "../src/sender";
 import { buildServer } from "../src/server/http";
-import { openDatabase, runMigrations, type DB } from "../src/store/db";
+import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
 

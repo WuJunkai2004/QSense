@@ -1,5 +1,6 @@
 // MCP Streamable HTTP 端点：Fastify 原生 req/res 直连官方 SDK transport（零适配层）。
-// - Bearer 鉴权：sha256 摘要后 timingSafeEqual（常数时间，防时序侧信道）
+// - Bearer 校验助手 bearerOk（sha256 摘要 + timingSafeEqual 常数时间，防时序侧信道）：
+//   /ui/api 的 admin token 比对在用；/mcp 的 agent_token 表反查在 server/http.ts
 // - 会话管理：POST 无 session 且为 initialize → 新建 Server+transport 对；DELETE 关闭并清理
 // - 工具执行统一走 defs.runTool（错误翻译为可操作的 isError 文本）
 
@@ -36,7 +37,7 @@ export interface McpDeps {
   maxConcurrent?: number;
   version: string;
 }
-/** sha256 摘要比较：长度差异不影响常数时间性 */
+/** sha256 摘要比较：长度差异不影响常数时间性（/ui/api admin token 在用） */
 export function bearerOk(
   header: string | undefined,
   expected: string,

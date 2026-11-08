@@ -12,7 +12,7 @@ import { BotRegistry, BotRegistryError } from "../src/bots";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
-import { runTool, ToolError, type ToolContext } from "../src/tools/defs";
+import { runTool, type ToolContext } from "../src/tools/defs";
 
 const SEED = { appid: "10001", secret: "s1", name: "主bot" };
 const GROUP_A = "GROUP_A";
