@@ -3,10 +3,10 @@ import type { ReactNode } from "react";
 import {
   App as AntApp,
   Button,
+  Checkbox,
   Input,
   Modal,
   Select,
-  Space,
   Spin,
   Switch,
   Tag,
@@ -20,7 +20,7 @@ import {
   InfoCircleOutlined,
   RobotOutlined,
 } from "@ant-design/icons";
-import { del, get, patch, post, put } from "../api";
+import { del, get, getAlias, patch, post, put } from "../api";
 import type {
   AgentTokenResult,
   AuthLevel,
@@ -59,6 +59,81 @@ const errMsg = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
 const en = encodeURIComponent;
+
+/** 群白名单：勾选式——列出该 bot 已缓存的群聊（别名优先展示），勾选即入草稿。
+ *  草稿中不在缓存列表的条目（历史残留/未缓存群）照常展示，防保存时静默丢失。 */
+function GroupWhitelist(props: {
+  appid: string;
+  draft: string[];
+  dirty: boolean;
+  saving: boolean;
+  onChange: (v: string[]) => void;
+  onSave: () => void;
+}) {
+  const { appid, draft, dirty, saving, onChange, onSave } = props;
+  const [groups, setGroups] = useState<GroupItem[]>([]);
+
+  useEffect(() => {
+    get<{ groups: GroupItem[] }>(`/groups?bot=${en(appid)}&type=all`)
+      .then((r) => setGroups(r.groups.filter((g) => g.type === "group")))
+      .catch(() => undefined);
+  }, [appid]);
+
+  const toggle = (openid: string): void => {
+    onChange(
+      draft.includes(openid)
+        ? draft.filter((g) => g !== openid)
+        : [...draft, openid],
+    );
+  };
+
+  const groupName = (openid: string): string =>
+    getAlias(openid) || `群 ${openid.slice(0, 10)}…`;
+
+  const extras = draft.filter(
+    (id) => !groups.some((g) => g.group_openid === id),
+  );
+
+  return (
+    <div style={{ minWidth: 0, width: "100%" }}>
+      <div className="label">群白名单</div>
+      <div className="desc">该 bot 的发送门禁：勾选允许发送/撤回的群</div>
+      <div className="wl-list">
+        {groups.length === 0 && extras.length === 0 && (
+          <Typography.Text type="secondary">
+            该 bot 暂无已缓存群聊可勾选
+          </Typography.Text>
+        )}
+        {groups.map((g) => (
+          <div
+            className="wl-item"
+            key={g.group_openid}
+            onClick={() => toggle(g.group_openid)}
+          >
+            <Checkbox checked={draft.includes(g.group_openid)} />
+            <span className="wl-name">{groupName(g.group_openid)}</span>
+            <span className="wl-meta">{g.member_count} 人</span>
+          </div>
+        ))}
+        {extras.map((id) => (
+          <div className="wl-item" key={id} onClick={() => toggle(id)}>
+            <Checkbox checked />
+            <span className="wl-name">{groupName(id)}（未缓存）</span>
+          </div>
+        ))}
+      </div>
+      <Button
+        type="primary"
+        disabled={!dirty}
+        loading={saving}
+        onClick={onSave}
+        style={{ marginTop: 10 }}
+      >
+        保存白名单
+      </Button>
+    </div>
+  );
+}
 
 /** 设置页（/ui/settings）：通用 / 机器人 / 数据管理 / 关于。
  *  收编原设置抽屉的全部功能，外加左栏右键「移除机器人」与右栏「删除本群缓存」，
@@ -387,30 +462,16 @@ export default function SettingsPage({ boot, onClose, onChanged }: Props) {
                       />
                     </div>
                     <div className="settings-row">
-                      <div style={{ minWidth: 0 }}>
-                        <div className="label">群白名单</div>
-                        <div className="desc">该 bot 的发送门禁，粘贴群 openid 后回车</div>
-                        <Space.Compact style={{ width: "100%", marginTop: 8 }}>
-                          <Select
-                            mode="tags"
-                            tokenSeparators={[",", " ", "\t"]}
-                            style={{ minWidth: 0, width: 420 }}
-                            value={draft}
-                            placeholder="留空 = 该 bot 无可发送群"
-                            onChange={(v) =>
-                              setDrafts((d) => ({ ...d, [b.appid]: v }))
-                            }
-                          />
-                          <Button
-                            type="primary"
-                            disabled={!dirty}
-                            loading={savingKey === b.appid}
-                            onClick={() => void saveGroups(b.appid)}
-                          >
-                            保存
-                          </Button>
-                        </Space.Compact>
-                      </div>
+                      <GroupWhitelist
+                        appid={b.appid}
+                        draft={draft}
+                        dirty={dirty}
+                        saving={savingKey === b.appid}
+                        onChange={(v) =>
+                          setDrafts((d) => ({ ...d, [b.appid]: v }))
+                        }
+                        onSave={() => void saveGroups(b.appid)}
+                      />
                     </div>
                     <div className="settings-row">
                       <div>
