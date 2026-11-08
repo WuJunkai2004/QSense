@@ -24,8 +24,6 @@ interface Props {
   sends: SendItem[];
   quota: QuotaInfo | null;
   onRefresh: () => void;
-  /** 整群缓存删除（破坏性操作，服务端 /ui/api DELETE /groups/:openid；确认弹窗在此组件内） */
-  onPurge: () => Promise<void>;
 }
 
 const SEND_STATUS: Record<string, { color: string; text: string }> = {
@@ -39,7 +37,8 @@ const SEND_STATUS: Record<string, { color: string; text: string }> = {
   reserved: { color: "default", text: "预留" },
 };
 
-/** 右栏（智能体视角）：群资料与成员名册 / 发送账本 / 额度水位 */
+/** 右栏（智能体视角）：群资料与成员名册 / 发送账本 / 额度水位。
+ *  整群缓存删除已收编进设置页「数据管理」，此处不再提供。 */
 export default function RightPanel({
   group,
   botAppid,
@@ -47,9 +46,8 @@ export default function RightPanel({
   sends,
   quota,
   onRefresh,
-  onPurge,
 }: Props) {
-  const { message: msg, modal } = AntApp.useApp();
+  const { message: msg } = AntApp.useApp();
   const isChat = group?.type === "chat";
   return (
     <div className="right-panel">
@@ -125,34 +123,7 @@ export default function RightPanel({
                           ]),
                     ]}
                   />
-                  {/* 危险区：整群缓存删除（原 MCP forget 迁入，仅人类操作；单聊无注册表条目，不适用） */}
-                  {!isChat && (
-                    <div
-                      style={{
-                        marginTop: 10,
-                        paddingTop: 8,
-                        borderTop: "1px dashed #e5e7eb",
-                      }}
-                    >
-                      <Button
-                        size="small"
-                        danger
-                        onClick={() => {
-                          modal.confirm({
-                            title: "删除本群全部缓存？",
-                            content:
-                              "将删除该群的消息（含检索索引）、成员名册、群注册表与已读水位，不可恢复；发送审计账本保留。机器人仍在群时消息会重新累积。",
-                            okText: "删除",
-                            okButtonProps: { danger: true },
-                            cancelText: "取消",
-                            onOk: () => onPurge(),
-                          });
-                        }}
-                      >
-                        删除本群缓存…
-                      </Button>
-                    </div>
-                  )}
+                  {/* 整群缓存删除已收编进设置页「数据管理」（危险操作集中管理） */}
                   {!isChat && (
                     <div
                       style={{

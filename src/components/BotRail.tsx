@@ -1,8 +1,7 @@
 import { useState } from "react";
-import { Avatar, Badge, Dropdown, Tooltip, App as AntApp } from "antd";
-import { RobotOutlined, PlusOutlined } from "@ant-design/icons";
+import { Avatar, Badge, Tooltip } from "antd";
+import { RobotOutlined, PlusOutlined, SettingOutlined } from "@ant-design/icons";
 import type { BotInfo } from "../types";
-import { del } from "../api";
 import AddBotModal from "./AddBotModal";
 
 interface Props {
@@ -10,6 +9,8 @@ interface Props {
   current: string | null;
   onSelect: (appid: string) => void;
   onRefresh: () => void;
+  /** 打开设置页（/ui/settings） */
+  onOpenSettings: () => void;
 }
 
 const STATE_COLOR: Record<string, string> = {
@@ -44,76 +45,52 @@ function gatewayText(state: string): string {
   }
 }
 
-/** 最左栏：机器人头像列（点选切换，右键管理）+ 添加入口 */
-export default function BotRail({ bots, current, onSelect, onRefresh }: Props) {
-  const { message, modal } = AntApp.useApp();
+/** 最左栏：机器人头像列（点选切换）+ 添加入口；移除机器人已收编进设置页 */
+export default function BotRail({
+  bots,
+  current,
+  onSelect,
+  onRefresh,
+  onOpenSettings,
+}: Props) {
   const [addOpen, setAddOpen] = useState(false);
-
-  const removeBot = (b: BotInfo): void => {
-    modal.confirm({
-      title: `移除机器人 ${b.name}？`,
-      content: "断开其网关连接并清除登录态；缓存数据保留，可随时重新添加。",
-      okText: "移除",
-      okButtonProps: { danger: true },
-      cancelText: "取消",
-      onOk: async () => {
-        try {
-          await del(`/bots/${b.appid}`);
-          void message.success(`已移除 ${b.name}`);
-          onRefresh();
-        } catch (e) {
-          void message.error(e instanceof Error ? e.message : String(e));
-        }
-      },
-    });
-  };
 
   return (
     <div className="bot-rail">
       {bots.map((b, i) => (
-        <Dropdown
+        <div
           key={b.appid}
-          trigger={["contextMenu"]}
-          menu={{
-            items: [{ key: "remove", label: "移除该机器人", danger: true }],
-            onClick: (info) => {
-              if (info.key === "remove") removeBot(b);
-            },
-          }}
+          className={`bot-item${b.appid === current ? " selected" : ""}`}
+          onClick={() => onSelect(b.appid)}
         >
-          <div
-            className={`bot-item${b.appid === current ? " selected" : ""}`}
-            onClick={() => onSelect(b.appid)}
+          <Tooltip
+            title={
+              <span>
+                {b.name}（{b.appid}）· {gatewayText(b.gateway)}
+              </span>
+            }
+            placement="right"
           >
-            <Tooltip
-              title={
-                <span>
-                  {b.name}（{b.appid}）· {gatewayText(b.gateway)} · 右键可移除
-                </span>
-              }
-              placement="right"
+            <Badge
+              dot
+              color={STATE_COLOR[b.gateway] ?? "#bfbfbf"}
+              offset={[-4, 30]}
             >
-              <Badge
-                dot
-                color={STATE_COLOR[b.gateway] ?? "#bfbfbf"}
-                offset={[-4, 30]}
-              >
-                <Avatar
-                  shape="square"
-                  size={40}
-                  style={{
-                    background:
-                      b.appid === current
-                        ? AVATAR_BG[i % AVATAR_BG.length]
-                        : "#c6cad2",
-                    borderRadius: 10,
-                  }}
-                  icon={<RobotOutlined />}
-                />
-              </Badge>
-            </Tooltip>
-          </div>
-        </Dropdown>
+              <Avatar
+                shape="square"
+                size={40}
+                style={{
+                  background:
+                    b.appid === current
+                      ? AVATAR_BG[i % AVATAR_BG.length]
+                      : "#c6cad2",
+                  borderRadius: 10,
+                }}
+                icon={<RobotOutlined />}
+              />
+            </Badge>
+          </Tooltip>
+        </div>
       ))}
       <Tooltip title="添加机器人（官方凭据校验后免重启接入）" placement="right">
         <Avatar
@@ -127,6 +104,25 @@ export default function BotRail({ bots, current, onSelect, onRefresh }: Props) {
           }}
           icon={<PlusOutlined />}
           onClick={() => setAddOpen(true)}
+        />
+      </Tooltip>
+      {/* 底部：设置入口（收编移除机器人等管理操作） */}
+      <Tooltip
+        title="设置（发送开关 / 白名单 / token 轮换 / 数据管理）"
+        placement="right"
+      >
+        <Avatar
+          shape="square"
+          size={40}
+          style={{
+            background: "#d5d9e0",
+            color: "#4e5969",
+            borderRadius: 10,
+            cursor: "pointer",
+            marginTop: "auto",
+          }}
+          icon={<SettingOutlined />}
+          onClick={onOpenSettings}
         />
       </Tooltip>
       <AddBotModal

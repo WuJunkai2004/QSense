@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useReducer, useState } from "react";
-import { Badge, Button, Drawer, Spin, Tag, App as AntApp } from "antd";
-import { SettingOutlined } from "@ant-design/icons";
+import { Badge, Button, Spin, Tag, App as AntApp } from "antd";
 import {
   clearToken,
-  del,
   getLastBot,
   getToken,
   setLastBot,
@@ -26,7 +24,7 @@ import SessionList from "./components/SessionList";
 import ChatView from "./components/ChatView";
 import RightPanel from "./components/RightPanel";
 import MessageDetailDrawer from "./components/MessageDetailDrawer";
-import SettingsView from "./components/SettingsView";
+import SettingsPage from "./components/SettingsPage";
 
 const en = encodeURIComponent;
 
@@ -44,8 +42,20 @@ export default function App() {
   const [sends, setSends] = useState<SendItem[]>([]);
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
   const [detail, setDetail] = useState<MsgItem | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // 极简路由：/ui/settings → 设置页；其余 → 主界面（服务端对无扩展名路径已回退 index.html）
+  const [route, setRoute] = useState(window.location.pathname);
   const [, forceRender] = useReducer((x: number) => x + 1, 0);
+
+  const navigate = useCallback((path: string): void => {
+    window.history.pushState({}, "", path);
+    setRoute(path);
+  }, []);
+
+  useEffect(() => {
+    const h = (): void => setRoute(window.location.pathname);
+    window.addEventListener("popstate", h);
+    return () => window.removeEventListener("popstate", h);
+  }, []);
 
   // 401（token 失效）广播 → 回登录页
   useEffect(() => {
@@ -237,16 +247,7 @@ export default function App() {
     return () => clearInterval(t);
   }, [loadQuota]);
 
-  // 整群缓存删除（原 MCP forget 迁入）：确认弹窗在 RightPanel，成功后清当前选中并刷新列表。
-  // 单聊会话不适用（无名册/无注册表条目），RightPanel 不出该按钮。
-  const handlePurgeGroup = async (): Promise<void> => {
-    if (boot === null || currentBot === null || currentGroup === null) return;
-    if (currentGroupItem?.type === "chat") return;
-    await del(`/groups/${en(currentGroup)}?bot=${en(currentBot)}`);
-    setCurrentGroup(null);
-    loadGroups();
-    void message.success("该群缓存已删除");
-  };
+  // 整群缓存删除已收编进设置页「数据管理」（此处不再持有该逻辑）
 
   // 发送：乐观追加（成功保留标记本机、失败移除），账本/额度即时刷新
   const handleSend = async (
@@ -311,6 +312,7 @@ export default function App() {
     setGroups([]);
     setCurrentGroup(null);
     setMessages([]);
+    navigate("/ui/");
   };
 
   if (checking) {
@@ -326,6 +328,15 @@ export default function App() {
   }
   if (boot === null) {
     return <Login version={null} onReady={(b) => setBoot(b)} />;
+  }
+  if (route.endsWith("/settings")) {
+    return (
+      <SettingsPage
+        boot={boot}
+        onClose={() => navigate("/ui/")}
+        onChanged={refreshBoot}
+      />
+    );
   }
 
   const bot = boot.bots.find((b) => b.appid === currentBot) ?? null;
@@ -361,12 +372,6 @@ export default function App() {
           运行 {Math.floor(boot.uptime_s / 60)} 分钟 · 当前 bot 白名单{" "}
           {bot?.allow_groups.length ?? 0} 群
         </span>
-        <Button
-          size="small"
-          icon={<SettingOutlined />}
-          title="设置（发送开关 / 白名单 / token 轮换）"
-          onClick={() => setSettingsOpen(true)}
-        />
         <Button size="small" onClick={logout}>
           退出
         </Button>
@@ -380,6 +385,7 @@ export default function App() {
             setLastBot(appid);
           }}
           onRefresh={refreshBoot}
+          onOpenSettings={() => navigate("/ui/settings")}
         />
         <SessionList
           groups={groups}
@@ -406,7 +412,6 @@ export default function App() {
           sends={sends}
           quota={quota}
           onRefresh={loadSide}
-          onPurge={handlePurgeGroup}
         />
       </div>
       <MessageDetailDrawer
@@ -416,16 +421,6 @@ export default function App() {
         msg={detail}
         onClose={() => setDetail(null)}
       />
-      <Drawer
-        title="设置"
-        placement="right"
-        width={560}
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        destroyOnClose
-      >
-        <SettingsView open={settingsOpen} onChanged={refreshBoot} />
-      </Drawer>
     </div>
   );
 }
