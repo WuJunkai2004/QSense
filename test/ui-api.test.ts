@@ -34,7 +34,7 @@ function makeApiMock(): MockApi & SendApi {
   return {
     calls,
     async sendRaw(
-      scope: "group" | "c2c",
+      scope: "group" | "chat",
       targetId: string,
       _creds: { appId: string; clientSecret: string },
       body: Record<string, unknown>,
@@ -65,7 +65,7 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
 
   if (seedMessages) {
     for (let i = 1; i <= 5; i += 1) {
-      repo.saveGroupMessage({
+      repo.saveMessage({
         botId: BOT,
         scope: "group",
         scopeId: GROUP,
@@ -76,7 +76,9 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
         ts: Date.now() - (6 - i) * 30_000,
         content: `消息正文${i}`,
         mentions: [],
-        elements: undefined,
+        text: `消息正文${i}`,
+        quote: null,
+        records: [],
         attachments: [],
         raw: { id: `M${i}`, echoes: true },
       });
@@ -620,46 +622,56 @@ test("M7-U10 quota：水位与令牌桶快照", async () => {
   }
 });
 
-// —— M10 单聊（C2C）：WebUI 会话合并 / 镜像读取 / 发送与补记 ——
+// —— M10 单聊（C2C）：WebUI 会话合并 / 统一消息读取 / 发送与补记 ——
 
-test("M10 UI 单聊：type=all 合并会话（名册反查昵称）+ type=chat 镜像读取 + 发送走 c2c scope", async () => {
+test("M10 UI 单聊：type=all 合并会话（名字=users 权威）+ type=chat 统一读取 + 发送走 chat scope", async () => {
   const fx = await setupServer();
   try {
     const USER = "C2C_USER_1";
-    // 名册（映射源）：该用户在本 bot 群里发过言；单聊载荷本身无昵称
+    // 身份权威：users 表（QQ 昵称）；单聊载荷本身无昵称，展示名从 users 取
     fx.db
       .prepare(
-        "INSERT INTO members(bot_id, group_openid, member_openid, username, member_role, first_seen, last_seen, msg_count) VALUES (?, ?, ?, 'Venti', 'member', ?, ?, 1)",
+        "INSERT INTO users(bot_id, openid, name, first_seen, last_seen) VALUES (?, ?, 'Venti', ?, ?)",
       )
-      .run(BOT, GROUP, USER, Date.now(), Date.now());
-    fx.repo.saveC2cMessage({
+      .run(BOT, USER, Date.now(), Date.now());
+    // 群注册表在册（会话列表群条目；setupServer 已播种，冲突则忽略）
+    fx.db
+      .prepare(
+        "INSERT OR IGNORE INTO groups(bot_id, group_openid, full_msg_enabled, added_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+      )
+      .run(BOT, GROUP, Date.now(), Date.now());
+    fx.repo.saveMessage({
       botId: BOT,
-      scope: "c2c",
+      scope: "chat",
       scopeId: USER,
       msgId: "C1",
       authorOpenid: USER,
       ts: Date.now() - 60_000,
       content: "你好",
       mentions: [],
-      elements: undefined,
+      text: "你好",
+      quote: null,
+      records: [],
       attachments: [],
       raw: {},
     });
-    fx.repo.saveC2cMessage({
+    fx.repo.saveMessage({
       botId: BOT,
-      scope: "c2c",
+      scope: "chat",
       scopeId: USER,
       msgId: "C2",
       authorOpenid: USER,
       ts: Date.now(),
       content: "nih",
       mentions: [],
-      elements: undefined,
+      text: "nih",
+      quote: null,
+      records: [],
       attachments: [],
       raw: {},
     });
 
-    // ① 会话列表（type=all 缺省）：单聊条目合并，最后消息作者=名册映射名
+    // ① 会话列表（type=all 缺省）：单聊条目合并，最后消息作者=users 最新昵称
     const sessions = (await (
       await get(fx.baseUrl, `/ui/api/groups?bot=${BOT}`, authHeaders())
     ).json()) as {
@@ -672,7 +684,7 @@ test("M10 UI 单聊：type=all 合并会话（名册反查昵称）+ type=chat �
     const chat = sessions.groups.find((g) => g.type === "chat");
     assert.ok(chat !== undefined, "type=all 应合并单聊会话");
     assert.equal(chat.group_openid, USER);
-    assert.equal(chat.last?.author, "Venti");
+    assert.equal(chat.last?.author, "Venti", "单聊作者名从 users 表取（旧名册反查已退役）");
     assert.equal(chat.last?.snippet, "nih");
     assert.equal(
       sessions.groups.find((g) => g.type === "group")?.group_openid,
@@ -680,7 +692,7 @@ test("M10 UI 单聊：type=all 合并会话（名册反查昵称）+ type=chat �
       "群聊条目不受影响",
     );
 
-    // ② 消息镜像：type=chat 读 c2c_messages（升序），作者名已映射
+    // ② 消息读取：type=chat 走合一 messages 表（升序），作者名已按 users 解析
     const msgs = (await (
       await get(
         fx.baseUrl,

@@ -20,7 +20,7 @@ export function handleGatewayEvent(repo: Repo, event: RawEvent): void {
     case "GROUP_AT_MESSAGE_CREATE": {
       const m = normalizeMessage(event);
       if (m === null) return;
-      repo.saveGroupMessage(m);
+      repo.saveMessage(m);
       repo.ensureGroup(
         event.botId,
         m.scopeId,
@@ -30,7 +30,7 @@ export function handleGatewayEvent(repo: Repo, event: RawEvent): void {
     }
     case "C2C_MESSAGE_CREATE": {
       const m = normalizeMessage(event);
-      if (m !== null) repo.saveC2cMessage(m);
+      if (m !== null) repo.saveMessage(m);
       return;
     }
     case "GROUP_ADD_ROBOT": {

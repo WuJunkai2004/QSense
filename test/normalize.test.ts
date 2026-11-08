@@ -1,11 +1,13 @@
 // M2 验收：事件规范化 + 缓存 + 名册 + 开关状态（灌官方样例形状 + 自造合并转发/语音/卡片事件，SQL 查回断言）。
+// 2026-11-08 存储重构后：text/content 分列、引用结构化（quote）、聊天记录拍平（records）、
+// 附件 kind 归一、群/私聊合一（scope 列）、users 身份权威（QQ 昵称 last-write-wins）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expandElements } from "../src/normalize/expand";
+import { decomposeElements } from "../src/normalize/expand";
 import { normalizeMessage } from "../src/normalize";
 import { handleGatewayEvent } from "../src/normalize/handler";
 import type { RawEvent } from "../src/gateway";
@@ -48,25 +50,18 @@ const groupMsgShape = {
     user_openid: "",
     member_openid: "MEMBER_OPENID_A",
     username: "小明",
-    bot: false,
     member_role: "member",
   },
-  content: "今晚一起<@MEMBER_OPENID_B>开会吗",
   group_openid: "GROUP_OPENID_G1",
+  content: "今晚一起<@MEMBER_OPENID_B>开会吗",
   timestamp: "2026-10-24T20:00:00+08:00",
   mentions: [{ id: "MEMBER_OPENID_B", username: "小红" }],
   attachments: [],
 };
 
-test("M2-1 msg_elements 递归展开：文本/卡片/并行/合并转发多层/引用", () => {
+test("M2-1 元素树分解：文本/卡片/并行/引用结构化/记录拍平（嵌套 depth）/未知兜底", () => {
   const tree = [
     { message_type: 0, content: "看这个" },
-    {
-      message_type: 103,
-      msg_idx: "3",
-      children: [{ message_type: 0, content: "被引用的原文" }],
-    },
-    // 官方真机形状（2026-10-24）：引用原文在本元素 content 字段，children 为空
     { message_type: 103, msg_idx: "REFIDX_x", content: "这是被引用的那条消息" },
     {
       message_type: 102,
@@ -84,40 +79,37 @@ test("M2-1 msg_elements 递归展开：文本/卡片/并行/合并转发多层/�
     { message_type: 3, title: "投票卡片" },
     { message_type: 999, content: "未知类型兜底文本" },
   ];
-  const lines = expandElements(tree);
-  const text = lines.join("\n");
-  assert.ok(text.includes("看这个"));
-  assert.ok(text.includes("[引用 msg_idx=3]"));
-  assert.ok(text.includes("被引用的原文"));
+  const d = decomposeElements(tree);
+  // 本条文本：官方文本行；被引原文与记录转写不进 text
+  assert.ok(d.textLines.includes("看这个"));
+  assert.ok(d.textLines.includes("并行分支"), "101 并行子文本属本条文本");
+  assert.ok(d.textLines.includes("未知类型兜底文本"));
   assert.ok(
-    text.includes("这是被引用的那条消息"),
-    "官方真机形状：引用原文取自元素 content 字段",
+    !d.textLines.some((l) => l.includes("被引用的那条消息")),
+    "被引原文不进本条文本",
   );
-  assert.ok(text.includes("[群的聊天记录]"));
-  assert.ok(text.includes("转发里的第一条"));
-  assert.ok(text.includes("[嵌套记录]"));
-  assert.ok(text.includes("二层转发"));
-  assert.ok(text.includes("[并行消息]"));
-  assert.ok(text.includes("并行分支"));
-  assert.ok(text.includes("[卡片] 投票卡片"));
-  assert.ok(text.includes("未知类型兜底文本"));
-  // 缩进体现层级：depth 缩进真实生效——一层子消息恰好 2 空格、二层 4 空格（树序本身不保证缩进）
-  const allLines = text.split("\n");
-  const firstLine = allLines.find((l) => l.includes("转发里的第一条"));
-  const nestedLine = allLines.find((l) => l.includes("二层转发"));
-  assert.ok(firstLine !== undefined, "应展开出一层转发消息");
-  assert.ok(nestedLine !== undefined, "应展开出二层转发消息");
+  assert.ok(!d.textLines.some((l) => l.includes("转发里的第一条")));
+  // 渲染行：结构标记 + 记录条数标记；无 [引用] 令牌
+  assert.ok(d.renderLines.includes("[卡片] 投票卡片"));
+  assert.ok(d.renderLines.some((l) => l === "[群的聊天记录·2条]"));
   assert.ok(
-    firstLine.startsWith("  ") && !firstLine.startsWith("    "),
-    `一层子消息应恰好 2 空格缩进：${JSON.stringify(firstLine)}`,
+    !d.renderLines.some((l) => l.includes("[引用")),
+    "渲染行无引用令牌",
   );
-  assert.ok(
-    nestedLine.startsWith("    "),
-    `二层子消息应有 4 空格缩进：${JSON.stringify(nestedLine)}`,
-  );
+  // 顶层引用结构化
+  assert.equal(d.quote?.msgIdx, "REFIDX_x");
+  assert.equal(d.quote?.body, "这是被引用的那条消息");
+  // 记录拍平：嵌套记录下钻，depth 表达层级，ord 递增
+  assert.equal(d.records.length, 2);
+  assert.equal(d.records[0].text, "转发里的第一条");
+  assert.equal(d.records[0].depth, 1);
+  assert.equal(d.records[0].ord, 0);
+  assert.equal(d.records[1].text, "二层转发");
+  assert.equal(d.records[1].depth, 2);
+  assert.equal(d.records[1].ord, 1);
 });
 
-test("M2-2 迁移 v2/v3：业务表齐全，FTS 触发器同步可检索", () => {
+test("M2-2 迁移 v8：业务表齐全（合一消息/users/records），FTS 挂 text 可检索", () => {
   const { dir, db, repo } = setupDb();
   try {
     const tables = (
@@ -131,25 +123,30 @@ test("M2-2 迁移 v2/v3：业务表齐全，FTS 触发器同步可检索", () =>
       "groups",
       "members",
       "messages",
-      "c2c_messages",
+      "users",
+      "message_records",
       "sends",
       "quota_daily",
       "kv",
     ]) {
       assert.ok(tables.includes(t), `缺表 ${t}`);
     }
-    // FTS：插入 → trigram 检索中文子串命中
-    repo.saveGroupMessage({
+    assert.ok(!tables.includes("c2c_messages"), "c2c_messages 镜像表已退役");
+    assert.ok(!tables.includes("messages_v7"), "旧表已清理");
+    // FTS：插入 → trigram 检索中文子串命中（源=text 列）
+    repo.saveMessage({
       botId: "b",
       scope: "group",
       scopeId: "g",
       msgId: "m1",
       authorOpenid: "u1",
       ts: Date.now(),
+      text: "今晚一起开会讨论项目排期",
       content: "今晚一起开会讨论项目排期",
       mentions: [],
-      elements: undefined,
       attachments: [],
+      records: [],
+      quote: null,
       raw: {},
     });
     const hits = db
@@ -164,7 +161,7 @@ test("M2-2 迁移 v2/v3：业务表齐全，FTS 触发器同步可检索", () =>
   }
 });
 
-test("M2-3 官方形状群消息：规范化入库、SQL 查回结构化、msg_id 幂等", () => {
+test("M2-3 官方形状群消息：规范化入库（scope 合一）、msg_id 幂等", () => {
   const { dir, db, repo } = setupDb();
   try {
     const m = normalizeMessage(ev("GROUP_MESSAGE_CREATE", groupMsgShape));
@@ -177,17 +174,19 @@ test("M2-3 官方形状群消息：规范化入库、SQL 查回结构化、msg_i
     assert.equal(m!.authorRole, "member");
     assert.equal(m!.ts, Date.parse("2026-10-24T20:00:00+08:00"));
     assert.deepEqual(m!.mentions, [{ id: "MEMBER_OPENID_B", name: "小红" }]);
+    assert.equal(m!.text, "今晚一起<@MEMBER_OPENID_B>开会吗");
+    assert.equal(m!.content, "今晚一起<@MEMBER_OPENID_B>开会吗");
 
-    assert.equal(repo.saveGroupMessage(m!), true, "首次入库成功");
-    assert.equal(repo.saveGroupMessage(m!), false, "重复 msg_id 幂等拒绝");
+    assert.equal(repo.saveMessage(m!), true, "首次入库成功");
+    assert.equal(repo.saveMessage(m!), false, "重复 msg_id 幂等拒绝");
 
     const row = db
       .prepare(
-        "SELECT * FROM messages WHERE bot_id='10001' AND group_openid='GROUP_OPENID_G1' AND msg_id='MSGID_1'",
+        "SELECT * FROM messages WHERE bot_id='10001' AND scope='group' AND scope_id='GROUP_OPENID_G1' AND msg_id='MSGID_1'",
       )
       .get() as Record<string, unknown>;
     assert.equal(row.author_openid, "MEMBER_OPENID_A");
-    assert.equal(row.content, "今晚一起<@MEMBER_OPENID_B>开会吗");
+    assert.equal(row.text, "今晚一起<@MEMBER_OPENID_B>开会吗");
     assert.deepEqual(JSON.parse(row.mentions_json as string), [
       { id: "MEMBER_OPENID_B", name: "小红" },
     ]);
@@ -196,12 +195,14 @@ test("M2-3 官方形状群消息：规范化入库、SQL 查回结构化、msg_i
       JSON.parse(row.raw_json as string).group_openid,
       "GROUP_OPENID_G1",
     );
+    assert.equal(row.records_count, 0);
+    assert.equal(row.quote_json, null);
   } finally {
     cleanup(dir, db);
   }
 });
 
-test("M2-4 语音附件元数据保留（voice_wav_url + asr_refer_text）", () => {
+test("M2-4 语音附件：kind 归一 voice，wav 转写地址与 ASR 文本保留", () => {
   const { dir, db, repo } = setupDb();
   try {
     const m = normalizeMessage(
@@ -222,29 +223,26 @@ test("M2-4 语音附件元数据保留（voice_wav_url + asr_refer_text）", () 
     );
     assert.ok(m !== null);
     assert.equal(m!.attachments.length, 1);
-    assert.equal(
-      m!.attachments[0].voice_wav_url,
-      "https://multimedia.qq.com/voice/x.wav",
-    );
-    assert.equal(m!.attachments[0].asr_refer_text, "明天下午三点开会");
-    repo.saveGroupMessage(m!);
+    assert.equal(m!.attachments[0].kind, "voice");
+    // ASR 是转引内容：渲染进占位符，但不进 text 检索列
+    assert.equal(m!.content, "![附件1]（转写：明天下午三点开会）");
+    assert.equal(m!.text, "");
+    repo.saveMessage(m!);
     const row = db
-      .prepare(
-        "SELECT attachments_json FROM messages WHERE msg_id='MSGID_VOICE'",
-      )
-      .get() as {
-      attachments_json: string;
-    };
+      .prepare("SELECT attachments_json FROM messages WHERE msg_id='MSGID_VOICE'")
+      .get() as { attachments_json: string };
     const saved = JSON.parse(row.attachments_json) as Array<{
+      kind?: string;
       asr_refer_text?: string;
     }>;
+    assert.equal(saved[0].kind, "voice");
     assert.equal(saved[0].asr_refer_text, "明天下午三点开会");
   } finally {
     cleanup(dir, db);
   }
 });
 
-test("M2-5 成员名册 upsert：同人两条消息 msg_count=2，昵称/角色随消息更新", () => {
+test("M2-5 成员名册 upsert（关系事实）+ users 昵称 last-write-wins", () => {
   const { dir, db, repo } = setupDb();
   try {
     handleGatewayEvent(repo, ev("GROUP_MESSAGE_CREATE", groupMsgShape));
@@ -260,15 +258,23 @@ test("M2-5 成员名册 upsert：同人两条消息 msg_count=2，昵称/角色�
         },
       }),
     );
+    // 名册：msg_count/角色随消息更新；username 列已砍（名字权威在 users）
     const row = db
       .prepare(
         "SELECT * FROM members WHERE bot_id='10001' AND group_openid='GROUP_OPENID_G1' AND member_openid='MEMBER_OPENID_A'",
       )
       .get() as Record<string, unknown>;
     assert.equal(row.msg_count, 2);
-    assert.equal(row.username, "明明");
     assert.equal(row.member_role, "admin");
-    assert.ok(Number(row.first_seen) <= Number(row.last_seen));
+    assert.ok(!("username" in row), "members 不再存名字列");
+    // users：QQ 昵称最新值
+    const u = db
+      .prepare(
+        "SELECT name FROM users WHERE bot_id='10001' AND openid='MEMBER_OPENID_A'",
+      )
+      .get() as { name: string };
+    assert.equal(u.name, "明明");
+    assert.equal(repo.userNameOf("10001", "MEMBER_OPENID_A"), "明明");
   } finally {
     cleanup(dir, db);
   }
@@ -314,7 +320,7 @@ test("M2-6 群注册表生命周期：ADD(0) → 全量消息(1) → REJECT(0) �
   }
 });
 
-test("M2-7 C2C 单聊入库 + 用户级主动消息开关（kv）", () => {
+test("M2-7 C2C 单聊入库（scope=chat 合一表）+ 用户级主动消息开关（kv）", () => {
   const { dir, db, repo } = setupDb();
   try {
     handleGatewayEvent(
@@ -329,9 +335,11 @@ test("M2-7 C2C 单聊入库 + 用户级主动消息开关（kv）", () => {
     );
     const row = db
       .prepare(
-        "SELECT content FROM c2c_messages WHERE bot_id='10001' AND user_openid='C2C_OPENID_U1' AND msg_id='C1'",
+        "SELECT scope, scope_id, content FROM messages WHERE bot_id='10001' AND msg_id='C1'",
       )
-      .get() as { content: string };
+      .get() as { scope: string; scope_id: string; content: string };
+    assert.equal(row.scope, "chat");
+    assert.equal(row.scope_id, "C2C_OPENID_U1");
     assert.equal(row.content, "私聊你好");
 
     assert.equal(repo.getC2cSwitch("10001", "C2C_OPENID_U1"), null);
@@ -350,7 +358,7 @@ test("M2-7 C2C 单聊入库 + 用户级主动消息开关（kv）", () => {
   }
 });
 
-test("M2-9 元素消息 content 合并官方 content 与展开树；畸形容器不炸", () => {
+test("M2-9 元素消息分解落库：记录标记+records；畸形容器不炸", () => {
   const { dir, db, repo } = setupDb();
   try {
     const m = normalizeMessage(
@@ -368,10 +376,11 @@ test("M2-9 元素消息 content 合并官方 content 与展开树；畸形容器
       }),
     );
     assert.ok(m !== null);
-    assert.ok(m!.content.includes("转发给你看"));
-    assert.ok(m!.content.includes("转发的正文"));
-    assert.ok(m!.content.includes("[聊天记录]"));
-    repo.saveGroupMessage(m!);
+    assert.equal(m!.content, "转发给你看\n转发的正文\n[聊天记录·1条]");
+    assert.equal(m!.text, "转发给你看\n转发的正文");
+    assert.equal(m!.records.length, 1);
+    assert.equal(m!.records[0].text, "记录内容");
+    repo.saveMessage(m!);
 
     // 畸形事件：缺 id / 缺 group_openid / data 非对象 → 安全丢弃
     handleGatewayEvent(repo, ev("GROUP_MESSAGE_CREATE", { content: "no id" }));
@@ -390,8 +399,8 @@ test("M2-9 元素消息 content 合并官方 content 与展开树；畸形容器
   }
 });
 
-test("M2-10 媒体占位符：无元素树时媒体前置；引用元素内嵌媒体原位收集；msg_idx 提取", () => {
-  // 纯图消息（无 elements，真机形状）：content = 占位符（不再是空串）
+test("M2-10 媒体占位符与引用结构化：媒体前置/103 内嵌媒体收集/msg_idx 提取", () => {
+  // 纯图消息（无 elements，真机形状）：content = 占位符
   const img = normalizeMessage(
     ev("GROUP_MESSAGE_CREATE", {
       ...groupMsgShape,
@@ -411,6 +420,7 @@ test("M2-10 媒体占位符：无元素树时媒体前置；引用元素内嵌�
   assert.ok(img !== null);
   assert.equal(img!.content, "![附件1]");
   assert.equal(img!.attachments.length, 1);
+  assert.equal(img!.attachments[0].kind, "image");
 
   // 图文消息（无 elements）：约定媒体前置，顺序可见
   const mix = normalizeMessage(
@@ -426,7 +436,7 @@ test("M2-10 媒体占位符：无元素树时媒体前置；引用元素内嵌�
   assert.ok(mix !== null);
   assert.equal(mix!.content, "![附件1]\n图片和文字");
 
-  // 引用元素内嵌媒体（真机 103 形状）：原位占位 + 收集进 attachments
+  // 引用元素（真机 103 形状）：原文结构化进 quote；被引图片照常收集占位
   const quote = normalizeMessage(
     ev("GROUP_MESSAGE_CREATE", {
       ...groupMsgShape,
@@ -445,14 +455,14 @@ test("M2-10 媒体占位符：无元素树时媒体前置；引用元素内嵌�
     }),
   );
   assert.ok(quote !== null);
-  assert.ok(quote!.content.includes("我引用了一条消息"));
-  assert.ok(quote!.content.includes("[引用 msg_idx=REFIDX_A]"));
-  assert.ok(quote!.content.includes("![附件1]"), "被引图片原位占位");
-  assert.ok(quote!.content.includes("被引的原文"));
+  assert.equal(quote!.content, "我引用了一条消息\n![附件1]");
+  assert.equal(quote!.text, "我引用了一条消息");
+  assert.equal(quote!.quote?.msgIdx, "REFIDX_A");
+  assert.equal(quote!.quote?.body, "被引的原文");
   assert.equal(quote!.attachments.length, 1);
   assert.equal(quote!.attachments[0]!.url, "https://cdn.example/q.png");
 
-  // msg_idx 从 message_scene.ext 提取
+  // msg_idx 从 message_scene.ext 提取（本条自己的锚，落 msg_idx 列）；无 103 元素不构成引用
   const idx = normalizeMessage(
     ev("GROUP_MESSAGE_CREATE", {
       ...groupMsgShape,
@@ -462,6 +472,7 @@ test("M2-10 媒体占位符：无元素树时媒体前置；引用元素内嵌�
   );
   assert.ok(idx !== null);
   assert.equal(idx!.msgIdx, "REFIDX_X9");
+  assert.equal(idx!.quote, null, "仅 scene.ext 锚不构成引用");
 
   // 顶层与树内同 URL 去重：只收一次、编号一致
   const dupe = normalizeMessage(

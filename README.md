@@ -57,19 +57,19 @@ M9 起 env 只承担部署拓扑与运维参数；**bot 注册（appid/secret/�
 | `LOG_CONTENT`    |      | 日志记消息正文，**默认 false（生产禁止开启）**              |
 | `LOG_LEVEL`      |      | debug/info/warn/error/fatal                                 |
 
-## MCP 工具面（14 个）
+## MCP 工具面（15 个）
 
 **参数命名（2026-11-07 硬切换）**：会话标识参数统一叫 **`id`**（群聊=群 openid；私聊=对方 user_openid）——与 `list_all`/`list_new` 返回的 `conversations[].id` 对齐；传旧名 `group` 报可操作更名提示。**会话侧别由服务端按 id 自动探测**（openid 是权威定位标识，群/用户 openid 命名空间互斥；群侧证据=消息缓存/注册表/白名单，单聊侧=单聊缓存或 C2C 开关记录——开关事件可先行于首条消息），读写工具无 `type` 参数（仅 `list_all` 保留 `type` 作结果过滤）。消息标识保留 `msg_id`/`quote_msg_id`；返回值成员标识统一 `id`/`member_id`（原 `openid`/`member_openid`）。
 
 **管理（自服务）**：`register_bot`（注册新 bot：官方凭据校验 → 落库 → 返回 agent_token 仅此一次；token 轮换收归 WebUI 设置页——调用即自毁凭证的操作不留给 agent）
 
-**只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数；`type` 参数过滤 group/chat——C2C 开通后即用此参数，无独立工具）· `list_new`（未读视图=红点）· `list_members`（名册）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索）· `context`（前后文）· `get_media`（点开看图：按 ![附件n] 编号拉取图像内容，多模态模型直接读图）· `quota`（额度水位）
+**只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数；`type` 参数过滤 group/chat——C2C 开通后即用此参数，无独立工具）· `list_new`（未读视图=红点）· `list_members`（名册，名字为 users 表 QQ 昵称）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索，源=本条文本列）· `context`（前后文）· `get_records`（展开聊天记录：消息条目 `records_count>0` 时拉取拍平子消息）· `get_media`（点开看图：按 ![附件n] 编号拉取图像内容，多模态模型直接读图）· `quota`（额度水位）
 
 **写（双重门禁：kv 总开关 + 该 bot 白名单，均 WebUI 设置页管理）**：`send`（统一发送：被动优先自动路由——窗内可绑走被动回复免额度免审，否则主动消息过令牌桶+每群每日 1000 条记账；`quote_msg_id` 可选引用块，与窗口解耦；返回 `channel` 标明实际通道）· `send_media`（图片/语音发送：图片支持 GIF 表情包；语音 mp3/wav/silk 官方 file_type=3，≤20MB 软限，客户端展示语音条；`media` 收 `asset:<id>`（推荐，本地图片/音频经 `request_upload` 上传）/ http(s) URL（.mp3/.wav/.silk 按语音发送）/ data: base64 小图兜底；路由/引用/额度同 send；视频/文件后续扩展）· `request_upload`（上传协商：签发一次性 PUT 票据（15 分钟），执行环境直传字节到服务端资产区（图片/音频魔数嗅探把关）——控制平面/数据平面分离，字节不进模型上下文）· `recall`（撤回）
 
 **合规**：整群缓存删除已**迁出 MCP 工具面**（避免 agent 被消息注入诱导删数据），收归 WebUI：`DELETE /ui/api/groups/:openid`（admin token + 前端确认弹窗），发送审计账本保留。
 
-工具面以"人类操作QQ"为隐喻组织：list 系 = 打开消息列表，get_new/browse/search/context = 点开 会话翻记录，reply/send = 说话。返回体为同构 JSON：会话条目 `{type, id, unread, last_msg_ts}`，消息条目 `{msg_id, ts, author, content, quote_msg?, mentions?, attachments?, ark?}`（无任何会话回显；`content` 为 markdown，媒体以 `![附件n]` 占位符内联保序；引用命中缓存时以 `quote_msg` 结构化字段呈现——`{id: 被引作者, msg_id: 被引消息, content: 被引正文首行 ≤50 字符}`，不内联进正文）；信封统一 `{messages, count, has_more}` / `{conversations, count}`，无管理面字段（全量开关/成员数只在 WebUI 可见）。
+工具面以"人类操作QQ"为隐喻组织：list 系 = 打开消息列表，get_new/browse/search/context = 点开 会话翻记录，get_records = 展开聊天记录，reply/send = 说话。返回体为同构 JSON：会话条目 `{type, id, unread, last_msg_ts}`，消息条目 `{msg_id, ts, author, content, quote_msg?, records_count?, mentions?, attachments?, ark?}`（无任何会话回显；`content` 为 markdown，媒体以 `![附件n]` 占位符内联保序；引用以 `quote_msg` 结构化字段呈现——`{id: 被引作者, msg_id: 被引消息, content: 被引正文首行 ≤50 字符}`；聊天记录只留 `[聊天记录·N条]` 标记 + `records_count`，想看内容调 `get_records`——转发内容不与当前讨论混淆）；信封统一 `{messages, count, has_more}` / `{conversations, count}`，无管理面字段（全量开关/成员数只在 WebUI 可见）。
 
 ## WebUI（/ui）
 

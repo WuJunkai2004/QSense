@@ -1,10 +1,12 @@
 // 事件规范化：官方原始事件（RawEvent）→ NormalizedMessage / 状态变更。
 // 身份全程 open_id（bot 维度隔离），禁止解析真实QQ号。
+// 2026-11-08 存储重构：text（本条纯文本）/ content（渲染 markdown）分列；顶层引用结构化
+//（quote，落 quote_json）；聊天记录拍平（records，落 message_records）；scope 统一 group|chat。
 
 import type { RawEvent } from "../gateway";
 import {
   AttachmentCollector,
-  expandElements,
+  decomposeElements,
   extractArk,
   parseAttachmentLike,
 } from "./expand";
@@ -60,7 +62,7 @@ function parseAttachments(
 
 /**
  * 官方 msg_idx 令牌提取：raw.message_scene.ext 形如 ["msg_idx=REFIDX_…", "auth_token=…"]。
- * 引用元素（103）以该令牌为锚指向被引消息——入库存列，读取时可 join 缓存内联被引原文。
+ * 引用元素（103）以该令牌为锚指向被引消息——入库存列，quote_json 的锚与读取端懒补都用它。
  */
 function extractMsgIdx(r: Record<string, unknown>): string | undefined {
   const scene = r.message_scene;
@@ -81,19 +83,18 @@ function authorField(raw: Record<string, unknown>, keys: string[]): string {
   if (author === null || typeof author !== "object") return "";
   const a = author as Record<string, unknown>;
   for (const k of keys) {
-    if (typeof a[k] === "string" && (a[k] as string) !== "")
-      return a[k] as string;
+    if (typeof a[k] === "string" && (a[k] as string) !== "") return a[k];
   }
   return "";
 }
 
-/** 消息类事件 → NormalizedMessage（含 elements 递归展开）；非消息事件返回 null */
+/** 消息类事件 → NormalizedMessage（元素树分解为语义件）；非消息事件返回 null */
 export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
   const raw = event.data;
   if (raw === null || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
 
-  let scope: "group" | "c2c";
+  let scope: "group" | "chat";
   let scopeId: string;
   if (
     event.type === "GROUP_MESSAGE_CREATE" ||
@@ -102,7 +103,7 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
     scope = "group";
     scopeId = typeof r.group_openid === "string" ? r.group_openid : "";
   } else if (event.type === "C2C_MESSAGE_CREATE") {
-    scope = "c2c";
+    scope = "chat";
     // 官方单聊事件体无顶层 user_openid：作者标识在 author 内（author.user_openid，兜底 author.id）
     scopeId = authorField(r, ["user_openid", "id"]);
   } else {
@@ -115,23 +116,35 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
 
   const baseContent = typeof r.content === "string" ? r.content : "";
   const elements = r.msg_elements ?? undefined;
+  const extMsgIdx = extractMsgIdx(r);
   const collector = new AttachmentCollector();
   const topAtts = parseAttachments(r);
-  // content = 官方 content + 元素树展开（markdown 化，媒体保序）：
-  // 媒体以 `![附件n]` 占位符内联在原位，描述符统一收集进 attachments（顶层与树内合并编号、URL 去重）。
-  let lines: string[];
+  // text = 官方 content + 元素树文本行（无标记无占位无外来内容）；content = 渲染 markdown
+  //（媒体占位原位 + 结构标记）；引用与聊天记录出列结构化，不再糅进任何文本列。
+  let textLines: string[];
+  let renderLines: string[];
+  let quote: NormalizedMessage["quote"];
+  let records: NormalizedMessage["records"];
   if (elements !== undefined) {
-    const expanded = expandElements(elements, 0, collector);
+    const d = decomposeElements(elements, collector);
+    quote = d.quote;
+    records = d.records;
     // 顶层附件里未被元素树表达的（罕见：树内已带则 URL 去重跳过）→ 追加在尾部
     const leftover = topAtts
       .filter((a) => !collector.has(a.url))
       .map((a) => collector.place(a));
-    lines = [baseContent.trim(), ...expanded, ...leftover];
+    renderLines = [baseContent.trim(), ...d.renderLines, ...leftover];
+    textLines = [baseContent.trim(), ...d.textLines];
   } else {
     // 无元素树（真机多数纯媒体消息形状）：载荷不含图文先后，约定媒体前置
-    lines = [...topAtts.map((a) => collector.place(a)), baseContent.trim()];
+    const placeholders = topAtts.map((a) => collector.place(a));
+    renderLines = [...placeholders, baseContent.trim()];
+    textLines = [baseContent.trim()];
+    quote = null;
+    records = [];
   }
-  const content = lines.filter((s) => s !== "").join("\n");
+  const text = textLines.filter((s) => s !== "").join("\n");
+  const content = renderLines.filter((s) => s !== "").join("\n");
 
   return {
     botId: event.botId,
@@ -142,12 +155,14 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
     authorName: authorField(r, ["username"]) || undefined,
     authorRole: authorField(r, ["member_role"]) || undefined,
     ts: parseTimestamp(r.timestamp),
+    text,
     content,
+    quote,
+    records,
     mentions: parseMentions(r),
-    elements,
     attachments: collector.list,
     ark: extractArk(r),
-    msgIdx: extractMsgIdx(r),
+    msgIdx: extMsgIdx,
     raw: r,
   };
 }

@@ -88,7 +88,7 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
     },
   ];
   for (const s of seed) {
-    repo.saveGroupMessage({
+    repo.saveMessage({
       botId: "10001",
       scope: "group",
       scopeId: GROUP,
@@ -97,9 +97,11 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
       authorName: s.name,
       authorRole: s.role,
       ts: Date.now() - s.ageH * 3600 * 1000,
+      text: s.content,
       content: s.content,
+      quote: null,
+      records: [],
       mentions: [],
-      elements: undefined,
       attachments: [],
       raw: { id: s.msgId },
     });
@@ -247,6 +249,7 @@ test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", a
       "context",
       "get_media",
       "get_new",
+      "get_records",
       "list_all",
       "list_members",
       "list_new",
@@ -328,9 +331,10 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
     assert.equal(news2.count, 0);
 
     // 新消息到达 → 再次未读；增量拉取只给新消息
-    new Repo(fx.db).saveOutgoingGroupMessage({
+    new Repo(fx.db).saveOutgoing({
       botId: "10001",
-      groupOpenid: GROUP,
+      scope: "group",
+      scopeId: GROUP,
       msgId: "M6",
       content: "新到的消息",
       ts: Date.now(),
@@ -536,79 +540,91 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
   }
 });
 
-test("M3-5 引用结构化 + 信封统一：get_new 摘除内联引用、quote_msg 呈现；条目/信封均无会话回显", async () => {
+test("M3-5 引用结构化（quote_json 直读）+ 信封统一：quote_msg 呈现；条目/信封均无会话回显", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
-    // 被引消息带 msg_idx（ingest 从 message_scene.ext 提取）；引用方 content 携带令牌行
+    // 被引消息带 msg_idx；引用方以结构化 quote 落库（ingest 时缓存命中即补被引身份）
     const repo = new Repo(fx.db);
     const base = {
       botId: "10001",
       scope: "group" as const,
       scopeId: GROUP,
       mentions: [],
-      elements: undefined,
       attachments: [],
+      records: [],
       raw: {},
     };
-    repo.saveGroupMessage({
+    repo.saveMessage({
       ...base,
       msgId: "Q1",
       authorOpenid: "U_A",
       authorName: "被引者",
       authorRole: "member",
       ts: Date.now() - 60_000,
+      text: "被引的原文内容",
       content: "被引的原文内容",
+      quote: null,
       msgIdx: "REFIDX_Q1",
     });
-    repo.saveGroupMessage({
+    repo.saveMessage({
       ...base,
       msgId: "Q2",
       authorOpenid: "U_B",
       authorName: "引用者",
       authorRole: "member",
       ts: Date.now() - 30_000,
-      content: "[引用 msg_idx=REFIDX_Q1]\n看看这条",
+      text: "看看这条",
+      content: "看看这条",
+      quote: { msgIdx: "REFIDX_Q1", body: "被引的原文内容" },
       msgIdx: "REFIDX_Q2",
     });
-    repo.saveGroupMessage({
+    // 被引不在缓存：body（官方 103 快照）仍在，身份留空由读取端懒补（此处永不命中）
+    repo.saveMessage({
       ...base,
       msgId: "Q3",
       authorOpenid: "U_B",
       authorName: "引用者",
       authorRole: "member",
       ts: Date.now(),
-      content: "[引用 msg_idx=REFIDX_MISSING]\n引用了一条没缓存的消息",
+      text: "引用了一条没缓存的消息",
+      content: "引用了一条没缓存的消息",
+      quote: { msgIdx: "REFIDX_MISSING", body: "一条看不到原文的引用" },
     });
-    // 真实 ingest 顺序：正文 → 引用结构行 → 103 元素展开的被引原文行（命中时应被吞掉，不重复）
-    repo.saveGroupMessage({
+    repo.saveMessage({
       ...base,
       msgId: "Q4",
       authorOpenid: "U_B",
       authorName: "引用者",
       authorRole: "member",
       ts: Date.now() + 30_000,
-      content: "看看这条\n[引用 msg_idx=REFIDX_Q1]\n被引的原文内容",
+      text: "看看这条",
+      content: "看看这条",
+      quote: { msgIdx: "REFIDX_Q1", body: "被引的原文内容" },
     });
-    // 长被引正文（多行）：quote_msg.content 只取首行并截断到 50 字符加省略号
-    repo.saveGroupMessage({
+    // 长被引正文：quote_msg.content 只取首行并截断到 50 字符加省略号
+    repo.saveMessage({
       ...base,
       msgId: "Q5",
       authorOpenid: "U_C",
       authorName: "长文者",
       authorRole: "member",
       ts: Date.now() + 45_000,
-      content: `${"长".repeat(60)}\n第二行`,
+      text: `${"长".repeat(60)}`,
+      content: `${"长".repeat(60)}`,
+      quote: null,
       msgIdx: "REFIDX_Q5",
     });
-    repo.saveGroupMessage({
+    repo.saveMessage({
       ...base,
       msgId: "Q6",
       authorOpenid: "U_B",
       authorName: "引用者",
       authorRole: "member",
       ts: Date.now() + 50_000,
-      content: "[引用 msg_idx=REFIDX_Q5]\n引用了一条很长的消息",
+      text: "引用了一条很长的消息",
+      content: "引用了一条很长的消息",
+      quote: { msgIdx: "REFIDX_Q5", body: `${"长".repeat(60)}` },
     });
 
     client = await connectClient(fx.baseUrl, fx.agentToken);
@@ -623,19 +639,23 @@ test("M3-5 引用结构化 + 信封统一：get_new 摘除内联引用、quote_m
     const msgs = res.messages as Array<Record<string, unknown>>;
     const q2 = msgs.find((m) => m.msg_id === "Q2")!;
     assert.ok(!("group_openid" in q2), "消息条目无会话回显字段");
-    assert.equal(String(q2.content), "看看这条", "正文干净：令牌行与被引原文均已摘除");
+    assert.equal(String(q2.content), "看看这条", "正文干净");
     const q2quote = q2.quote_msg as Record<string, unknown>;
-    assert.equal(q2quote.id, "U_A", "quote_msg.id=被引作者 openid");
+    assert.equal(q2quote.id, "U_A", "quote_msg.id=被引作者 openid（ingest enrich）");
     assert.equal(q2quote.msg_id, "Q1", "quote_msg.msg_id=被引消息");
     assert.equal(q2quote.content, "被引的原文内容", "被引正文（首行，≤50 字不截断）");
     const q3 = msgs.find((m) => m.msg_id === "Q3")!;
-    assert.ok(
-      String(q3.content).includes("REFIDX_MISSING"),
-      "未命中缓存保留原令牌行",
+    assert.equal(String(q3.content), "引用了一条没缓存的消息");
+    const q3quote = q3.quote_msg as Record<string, unknown>;
+    assert.equal(q3quote.id, null, "被引不在缓存：身份 null");
+    assert.equal(q3quote.msg_id, null);
+    assert.equal(
+      q3quote.content,
+      "一条看不到原文的引用",
+      "body 来自官方 103 快照，不依赖缓存",
     );
-    assert.ok(!("quote_msg" in q3), "未命中缓存不产 quote_msg 字段");
     const q4 = msgs.find((m) => m.msg_id === "Q4")!;
-    assert.equal(String(q4.content), "看看这条", "ingest 展开行随令牌行一并摘除");
+    assert.equal(String(q4.content), "看看这条");
     assert.equal(
       (q4.quote_msg as Record<string, unknown>).msg_id,
       "Q1",
@@ -651,10 +671,12 @@ test("M3-5 引用结构化 + 信封统一：get_new 摘除内联引用、quote_m
       "首行截断：50 字符 + 省略号",
     );
     assert.ok(
-      !String(q6.content).includes("第二行") &&
-        !String(q6.content).includes("长".repeat(50)),
-      "被引正文（含非首行）不进 content",
+      !String(q6.content).includes("长".repeat(50)),
+      "被引正文不进 content",
     );
+    const q1 = msgs.find((m) => m.msg_id === "Q1")!;
+    assert.ok(!("quote_msg" in q1), "无引用的消息没有 quote_msg 字段");
+    assert.ok(!("records_count" in q1), "无记录的消息没有 records_count 字段");
     for (const m of msgs) {
       assert.ok(
         !String(m.content).includes("[引用 @") && !String(m.content).includes("\n> "),
@@ -671,12 +693,102 @@ test("M3-5 引用结构化 + 信封统一：get_new 摘除内联引用、quote_m
   }
 });
 
+test("M3-5b get_records：聊天记录拍平展开（users 昵称/嵌套 depth/子行引用）；非记录可操作报错", async () => {
+  const fx = await setupServer();
+  let client: Client | null = null;
+  try {
+    const repo = new Repo(fx.db);
+    const base = {
+      botId: "10001",
+      scope: "group" as const,
+      scopeId: GROUP,
+      mentions: [],
+      attachments: [],
+      raw: {},
+    };
+    // 身份锚：USER_B 在 users 表（子行作者名以此为准）
+    repo.saveMessage({
+      ...base,
+      msgId: "R0",
+      authorOpenid: "USER_B",
+      authorName: "记录者B",
+      ts: Date.now() - 120_000,
+      text: "发言",
+      content: "发言",
+      quote: null,
+      records: [],
+      msgIdx: "REF_R0",
+    });
+    repo.saveMessage({
+      ...base,
+      msgId: "R1",
+      authorOpenid: "USER_A",
+      authorName: "转发者",
+      ts: Date.now() - 60_000,
+      text: "看这个",
+      content: "看这个\n[聊天记录·2条]",
+      quote: null,
+      records: [
+        {
+          ord: 0,
+          depth: 0,
+          authorOpenid: "USER_B",
+          authorName: "记录者B旧名",
+          ts: Date.now() - 300_000,
+          text: "记录里的发言",
+          quote: { msgIdx: "REF_R0", body: "发言" },
+          attachments: [
+            { kind: "image" as const, url: "https://cdn.example/r.png" },
+          ],
+        },
+        { ord: 1, depth: 1, text: "嵌套层", quote: null, attachments: [] },
+      ],
+    });
+
+    client = await connectClient(fx.baseUrl, fx.agentToken);
+    const ok = payloadOf(
+      (await client.callTool({
+        name: "get_records",
+        arguments: { id: GROUP, msg_id: "R1" },
+      })) as never,
+    );
+    assert.equal(ok.count, 2);
+    const r0 = ok.records[0] as Record<string, unknown>;
+    assert.equal(r0.ord, 0);
+    assert.equal(r0.depth, 0);
+    const r0author = r0.author as { id: string; name: string };
+    assert.equal(r0author.id, "USER_B");
+    assert.equal(r0author.name, "记录者B", "子行作者名以 users 最新昵称为准（非行快照）");
+    assert.equal(r0.text, "记录里的发言");
+    const r0quote = r0.quote_msg as Record<string, unknown>;
+    assert.equal(r0quote.msg_id, "R0", "子行引用锚解析为宿主 msg_id");
+    assert.ok(Array.isArray(r0.attachments) && r0.attachments.length === 1);
+    const r1 = ok.records[1] as Record<string, unknown>;
+    assert.equal(r1.depth, 1, "嵌套记录子层 depth+1");
+
+    // 非聊天记录消息 → 可操作报错
+    const nope = (await client.callTool({
+      name: "get_records",
+      arguments: { id: GROUP, msg_id: "R0" },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(nope.isError, true);
+    assert.ok(nope.content[0]!.text.includes("records_count=0"));
+  } finally {
+    try {
+      await client?.close();
+    } catch {
+      /* 已关闭则忽略 */
+    }
+    await fx.close();
+  }
+});
+
 test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消息可操作报错", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   const realFetch = globalThis.fetch;
   try {
-    new Repo(fx.db).saveGroupMessage({
+    new Repo(fx.db).saveMessage({
       botId: "10001",
       scope: "group",
       scopeId: GROUP,
@@ -685,11 +797,14 @@ test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消�
       authorName: "画师",
       authorRole: "member",
       ts: Date.now(),
+      text: "看图",
       content: "![附件1]\n看图",
+      quote: null,
+      records: [],
       mentions: [],
-      elements: undefined,
       attachments: [
         {
+          kind: "image",
           url: "https://cdn.example/a.png",
           filename: "a.png",
           content_type: "image/png",
@@ -697,6 +812,7 @@ test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消�
           height: 10,
         },
         {
+          kind: "file",
           url: "https://cdn.example/b.bin",
           filename: "b.bin",
           content_type: "file",
@@ -777,15 +893,16 @@ test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防�
   try {
     const repo = new Repo(fx.db);
     // bot 自发消息补记形态（官方不回推，发送成功后本地写入）：author 只有备注名
-    repo.saveOutgoingGroupMessage({
+    repo.saveOutgoing({
       botId: "10001",
-      groupOpenid: GROUP,
+      scope: "group",
+      scopeId: GROUP,
       msgId: "M_SELF",
       content: "我刚才说的话",
       ts: Date.now(),
       authorName: "主bot",
     });
-    repo.saveGroupMessage({
+    repo.saveMessage({
       botId: "10001",
       scope: "group",
       scopeId: GROUP,
@@ -794,9 +911,11 @@ test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防�
       authorName: "小明",
       authorRole: "member",
       ts: Date.now() + 1,
+      text: "群友说的话",
       content: "群友说的话",
+      quote: null,
+      records: [],
       mentions: [],
-      elements: undefined,
       attachments: [],
       raw: {},
     });
@@ -833,32 +952,37 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     const USER = "C2C_OPENID_U1";
     const c2cBase = {
       botId: "10001",
-      scope: "c2c" as const,
+      scope: "chat" as const,
       scopeId: USER,
       mentions: [],
-      elements: undefined,
       attachments: [],
       raw: {},
     };
-    // 被引消息 + 引用消息（引用回溯应查 c2c_messages 而非群聊表）
-    repo.saveC2cMessage({
+    // 被引消息 + 引用消息（引用回溯走合一 messages 表，scope=chat 与群侧隔离）
+    repo.saveMessage({
       ...c2cBase,
       msgId: "C1",
       authorOpenid: USER,
       authorName: undefined,
       authorRole: undefined,
       ts: Date.now() - 60_000,
+      text: "被引的单聊原文",
       content: "被引的单聊原文",
+      quote: null,
+      records: [],
       msgIdx: "REFIDX_C1",
     });
-    repo.saveC2cMessage({
+    repo.saveMessage({
       ...c2cBase,
       msgId: "C2",
       authorOpenid: USER,
       authorName: undefined,
       authorRole: undefined,
       ts: Date.now(),
-      content: "[引用 msg_idx=REFIDX_C1]\n单聊里引用一下",
+      text: "单聊里引用一下",
+      content: "单聊里引用一下",
+      quote: { msgIdx: "REFIDX_C1", body: "被引的单聊原文" },
+      records: [],
     });
 
     client = await connectClient(fx.baseUrl, fx.agentToken);

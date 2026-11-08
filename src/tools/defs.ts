@@ -130,35 +130,38 @@ function requireSender(ctx: ToolContext): Sender {
 // 不含 raw_json/elements_json（content 已含展开文本）；bot 自发消息落库 direction=1（官方不回推，
 // 发送侧本地补记），读取层据此标 author.role="yourself" ——
 
-function msgOut(
-  repo: Repo,
-  botId: string,
-  kind: "group" | "chat",
-  scopeId: string,
-  row: MsgRow,
-): Record<string, unknown> {
-  const resolved =
-    kind === "chat"
-      ? repo.resolveQuoteMsgC2c(botId, scopeId, row.content)
-      : repo.resolveQuoteMsg(botId, scopeId, row.content);
+function msgOut(repo: Repo, botId: string, row: MsgRow): Record<string, unknown> {
+  // author.name 一律 users 最新 QQ 昵称（2026-11-08 定案：改名后旧消息也跟着变）；行快照兜底
+  const authorName =
+    (row.author_openid !== null
+      ? repo.userNameOf(botId, row.author_openid)
+      : null) ?? row.author_name;
   const out: Record<string, unknown> = {
     msg_id: row.msg_id,
     ts: row.ts !== null ? new Date(row.ts).toISOString() : null,
     author: {
       id: row.author_openid,
-      name: row.author_name,
+      name: authorName,
       role: Number(row.direction) === 1 ? "yourself" : row.author_role,
     },
-    content: resolved.content,
+    content: row.content,
   };
-  if (resolved.quote !== null) {
-    out.quote_msg = {
-      id: resolved.quote.id,
-      msg_id: resolved.quote.msgId,
-      content: resolved.quote.body,
-    };
+  const quote = repo.quoteOf(row);
+  if (quote !== null) {
+    out.quote_msg = { id: quote.id, msg_id: quote.msgId, content: quote.body };
   }
-  if (row.mentions_json) out.mentions = JSON.parse(row.mentions_json);
+  if (row.records_count > 0) out.records_count = row.records_count;
+  if (row.mentions_json) {
+    const mentions = JSON.parse(row.mentions_json) as Array<{
+      id: string;
+      name?: string;
+    }>;
+    // mention 矫正：官方 username 是群昵称（一人多群昵称必混乱），一律以 users QQ 昵称为准
+    out.mentions = mentions.map((m) => {
+      const name = repo.userNameOf(botId, m.id) ?? m.name;
+      return name !== undefined ? { id: m.id, name } : { id: m.id };
+    });
+  }
   if (row.attachments_json) out.attachments = JSON.parse(row.attachments_json);
   if (row.ark_json) out.ark = JSON.parse(row.ark_json);
   return out;
@@ -167,11 +170,11 @@ function msgOut(
 function rowsOut(
   repo: Repo,
   botId: string,
-  kind: "group" | "chat",
-  scopeId: string,
+  _kind: "group" | "chat",
+  _scopeId: string,
   rows: MsgRow[],
 ): Record<string, unknown>[] {
-  return rows.map((r) => msgOut(repo, botId, kind, scopeId, r));
+  return rows.map((r) => msgOut(repo, botId, r));
 }
 
 function isoTs(ts: number | null | undefined): string | null {
@@ -250,10 +253,7 @@ function anchorOf(
   scopeId: string,
   msgId: string,
 ): MsgRow {
-  const hit =
-    kind === "chat"
-      ? ctx.repo.getC2cMessageByMsgId(botId, scopeId, msgId)
-      : ctx.repo.getMessageByMsgId(botId, scopeId, msgId);
+  const hit = ctx.repo.getMessageByMsgId(botId, kind, scopeId, msgId);
   if (hit !== null) return hit;
   throw new ToolError(
     `锚点消息不存在：${msgId}。可先 search 定位。`,
@@ -271,25 +271,14 @@ function conversationsOut(
 ): Record<string, unknown> {
   const botId = resolveBotId(ctx);
   const items: Array<Record<string, unknown>> = [];
-  if (type !== "chat") {
-    for (const g of ctx.repo.listGroupConversations(botId)) {
-      items.push({
-        type: "group",
-        id: g.group_openid,
-        unread: g.unread,
-        last_msg_ts: isoTs(g.last_ts),
-      });
-    }
-  }
-  if (type !== "group") {
-    for (const c of ctx.repo.listChatConversations(botId)) {
-      items.push({
-        type: "chat",
-        id: c.user_openid,
-        unread: c.unread,
-        last_msg_ts: isoTs(c.last_ts),
-      });
-    }
+  for (const c of ctx.repo.listConversations(botId)) {
+    if (type !== "all" && c.scope !== type) continue;
+    items.push({
+      type: c.scope,
+      id: c.scopeId,
+      unread: c.unread,
+      last_msg_ts: isoTs(c.last_ts),
+    });
   }
   const list = onlyNew ? items.filter((i) => (i.unread as number) > 0) : items;
   list.sort((a, b) =>
@@ -442,10 +431,7 @@ export const TOOLS: ToolDef[] = [
       const cursorKey = cursorKeyOf(kind, scopeId);
       const mark = ctx.repo.getCursor(botId, cursorKey);
       const after = mark === null ? 0 : Number(mark);
-      const rows =
-        kind === "chat"
-          ? ctx.repo.getC2cMessagesAfter(botId, scopeId, after, limit)
-          : ctx.repo.getMessagesAfter(botId, scopeId, after, limit);
+      const rows = ctx.repo.getMessagesAfter(botId, kind, scopeId, after, limit);
       if (rows.length > 0) {
         ctx.repo.setCursor(
           botId,
@@ -487,11 +473,9 @@ export const TOOLS: ToolDef[] = [
       const repo = ctx.repo;
       const msgId = optStr(args, "msg_id");
       if (msgId === undefined) {
-        const rows = (
-          kind === "chat"
-            ? repo.browseC2cLatest(botId, scopeId, limit)
-            : repo.browseLatest(botId, scopeId, limit)
-        ).reverse();
+        const rows = repo
+          .browseLatest(botId, kind, scopeId, limit)
+          .reverse();
         return {
           messages: rowsOut(ctx.repo, botId, kind, scopeId, rows),
           count: rows.length,
@@ -508,45 +492,26 @@ export const TOOLS: ToolDef[] = [
       let rows: MsgRow[];
       let cap = limit;
       if (mode === "before")
-        rows =
-          kind === "chat"
-            ? repo.browseC2cBefore(
-                botId,
-                scopeId,
-                anchor.ts ?? 0,
-                anchor.rid,
-                limit,
-              )
-            : repo.browseBefore(
-                botId,
-                scopeId,
-                anchor.ts ?? 0,
-                anchor.rid,
-                limit,
-              );
+        rows = repo.browseBefore(
+          botId,
+          kind,
+          scopeId,
+          anchor.ts ?? 0,
+          anchor.rid,
+          limit,
+        );
       else if (mode === "after")
-        rows =
-          kind === "chat"
-            ? repo.browseC2cAfter(
-                botId,
-                scopeId,
-                anchor.ts ?? 0,
-                anchor.rid,
-                limit,
-              )
-            : repo.browseAfter(
-                botId,
-                scopeId,
-                anchor.ts ?? 0,
-                anchor.rid,
-                limit,
-              );
+        rows = repo.browseAfter(
+          botId,
+          kind,
+          scopeId,
+          anchor.ts ?? 0,
+          anchor.rid,
+          limit,
+        );
       else {
         const half = Math.floor(limit / 2);
-        rows =
-          kind === "chat"
-            ? repo.contextC2cMessages(botId, scopeId, anchor, half)
-            : repo.contextMessages(botId, scopeId, anchor, half);
+        rows = repo.contextMessages(botId, kind, scopeId, anchor, half);
         // around 两侧各 half：两侧都满页才提示还有更多
         cap = 2 * half;
       }
@@ -560,7 +525,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "search",
     description:
-      '按关键词检索某会话历史消息（会话侧别由 id 自动探测；FTS，中文子串可命中；<3 字符自动降级子串扫描）。has_more=true 表示命中还有更多，可加大 limit。',
+      '按关键词检索某会话历史消息（会话侧别由 id 自动探测；FTS，中文子串可命中；<3 字符自动降级子串扫描）。检索源为本条消息文本——被引原文与聊天记录转写不在检索范围。has_more=true 表示命中还有更多，可加大 limit。',
     inputSchema: {
       type: "object",
       required: ["id", "query"],
@@ -580,10 +545,7 @@ export const TOOLS: ToolDef[] = [
         throw new ToolError("参数 query 超长（>100 字符）。请缩短关键词。");
       }
       const limit = optInt(args, "limit", 1, 50, 30);
-      const rows =
-        kind === "chat"
-          ? ctx.repo.searchC2cMessages(botId, scopeId, query, limit)
-          : ctx.repo.searchMessages(botId, scopeId, query, limit);
+      const rows = ctx.repo.searchMessages(botId, kind, scopeId, query, limit);
       return {
         messages: rowsOut(ctx.repo, botId, kind, scopeId, rows),
         count: rows.length,
@@ -612,14 +574,70 @@ export const TOOLS: ToolDef[] = [
       const msgId = str(args, "msg_id", "消息 id");
       const radius = optInt(args, "radius", 1, 50, 5);
       const anchor = anchorOf(ctx, botId, kind, scopeId, msgId);
-      const rows =
-        kind === "chat"
-          ? ctx.repo.contextC2cMessages(botId, scopeId, anchor, radius)
-          : ctx.repo.contextMessages(botId, scopeId, anchor, radius);
+      const rows = ctx.repo.contextMessages(botId, kind, scopeId, anchor, radius);
       return {
         messages: rowsOut(ctx.repo, botId, kind, scopeId, rows),
         count: rows.length,
         has_more: rows.length >= radius * 2,
+      };
+    },
+  },
+  {
+    name: "get_records",
+    description:
+      "展开某条聊天记录（合并转发）的子消息。消息条目 records_count>0 时用本工具拉取内容——宿主 content 只留「[聊天记录·N条]」标记，不内联转写（防止转发内容与当前讨论混淆）。返回拍平子消息列表：ord=顺序号、depth=嵌套深度（记录里还能嵌记录）、每条含作者/时间/文本，子行内引用为结构化 quote_msg。",
+    inputSchema: {
+      type: "object",
+      required: ["id", "msg_id"],
+      properties: {
+        id: {
+          type: "string",
+          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+        },
+        msg_id: { type: "string", description: "聊天记录消息 id" },
+      },
+    },
+    handler: (args, ctx) => {
+      const { botId, scopeId, kind } = resolveSession(ctx, args);
+      const msgId = str(args, "msg_id", "消息 id");
+      const anchor = anchorOf(ctx, botId, kind, scopeId, msgId);
+      if (anchor.records_count === 0) {
+        throw new ToolError(
+          `消息 ${msgId} 不是聊天记录（records_count=0），无需展开。`,
+        );
+      }
+      const rows = ctx.repo.getRecords(botId, kind, scopeId, msgId);
+      return {
+        msg_id: msgId,
+        count: rows.length,
+        records: rows.map((r) => {
+          const authorName =
+            (r.author_openid !== null
+              ? ctx.repo.userNameOf(botId, r.author_openid)
+              : null) ?? r.author_name;
+          const out: Record<string, unknown> = {
+            ord: r.ord,
+            depth: r.depth,
+            author: {
+              id: r.author_openid,
+              name: authorName,
+            },
+            ts: r.ts !== null ? new Date(r.ts).toISOString() : null,
+            text: r.text,
+          };
+          if (r.quote_json !== null) {
+            const q = JSON.parse(r.quote_json) as {
+              msgIdx?: string;
+              body?: string;
+            };
+            const ref = ctx.repo.resolveQuoteRef(botId, kind, scopeId, q);
+            out.quote_msg = { id: ref.id, msg_id: ref.msgId, content: ref.body };
+          }
+          if (r.attachments_json) {
+            out.attachments = JSON.parse(r.attachments_json);
+          }
+          return out;
+        }),
       };
     },
   },

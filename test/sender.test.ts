@@ -43,7 +43,7 @@ function makeApiMock(
   calls: Call[];
   recalls: string[];
   uploads: Array<{
-    scope: "group" | "c2c";
+    scope: "group" | "chat";
     targetId: string;
     src: import("../src/sender").MediaSource;
     mediaType: import("../src/sender").MediaKind;
@@ -52,7 +52,7 @@ function makeApiMock(
   const calls: Call[] = [];
   const recalls: string[] = [];
   const uploads: Array<{
-    scope: "group" | "c2c";
+    scope: "group" | "chat";
     targetId: string;
     src: import("../src/sender").MediaSource;
     mediaType: import("../src/sender").MediaKind;
@@ -62,7 +62,7 @@ function makeApiMock(
     recalls,
     uploads,
     async sendRaw(
-      scope: "group" | "c2c",
+      scope: "group" | "chat",
       targetId: string,
       _creds: { appId: string; clientSecret: string },
       body: Record<string, unknown>,
@@ -73,14 +73,14 @@ function makeApiMock(
       return r ?? { id: `PROVIDER_${calls.length}` };
     },
     async recallMessage(
-      _scope: "group" | "c2c",
+      _scope: "group" | "chat",
       _targetId: string,
       messageId: string,
     ) {
       recalls.push(messageId);
     },
     async uploadMedia(
-      scope: "group" | "c2c",
+      scope: "group" | "chat",
       targetId: string,
       _creds: { appId: string; clientSecret: string },
       src: import("../src/sender").MediaSource,
@@ -142,7 +142,7 @@ function setupDb(): Fixture {
 }
 
 function seedInbound(repo: Repo, msgId: string, ageMs = 0): void {
-  repo.saveGroupMessage({
+  repo.saveMessage({
     botId: BOT,
     scope: "group",
     scopeId: GROUP,
@@ -152,7 +152,9 @@ function seedInbound(repo: Repo, msgId: string, ageMs = 0): void {
     ts: Date.now() - ageMs,
     content: "收到请回复",
     mentions: [],
-    elements: undefined,
+    text: "收到请回复",
+    quote: null,
+    records: [],
     attachments: [],
     raw: {},
   });
@@ -199,7 +201,7 @@ test("M4-13 发送成功后本地补记：messages 表出现 direction=1 的自�
     const r = await sender.reply(BOT, GROUP, "M1", "你好呀");
     assert.equal(r.status, "sent");
     assert.ok(r.provider_msg_id !== undefined);
-    const row = fx.repo.getMessageByMsgId(BOT, GROUP, r.provider_msg_id!);
+    const row = fx.repo.getMessageByMsgId(BOT, "group", GROUP, r.provider_msg_id!);
     assert.ok(row !== null, "自发消息应补记进缓存");
     assert.equal(Number(row.direction), 1, "direction=1 供读取层标 yourself");
     assert.equal(row.content, "你好呀");
@@ -780,7 +782,7 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
     assert.deepEqual(m1.calls[0]!.body.media, { file_info: "FILEINFO_1" });
     assert.equal(m1.calls[0]!.body.message_reference, undefined);
     // 补记行：读取层以 ![图片] 占位（与附件占位符约定一致）
-    const latest = fx.repo.browseLatest(BOT, GROUP, 1)[0]!;
+    const latest = fx.repo.browseLatest(BOT, "group", GROUP, 1)[0]!;
     assert.equal(latest.direction, 1);
     assert.equal(latest.content, "![图片] 看看这只猫");
 
@@ -876,7 +878,7 @@ test("M10 sendMediaAuto 语音：.mp3 URL → file_type=3 类别，补记 ![语�
     );
     assert.equal(mock.calls[0]!.body.msg_type, 7);
     // 补记行：读取层以 ![语音] 占位（与 ![图片]/![附件n] 占位符约定一致）
-    const latest = fx.repo.browseLatest(BOT, GROUP, 1)[0]!;
+    const latest = fx.repo.browseLatest(BOT, "group", GROUP, 1)[0]!;
     assert.equal(latest.direction, 1);
     assert.equal(latest.content, "![语音] 听听这个");
   } finally {
@@ -889,16 +891,18 @@ test("M10 sendMediaAuto 语音：.mp3 URL → file_type=3 类别，补记 ![语�
 const C2C_USER = "C2C_USER_OPENID";
 
 function seedC2cInbound(repo: Repo, msgId: string, ageMs = 0): void {
-  repo.saveC2cMessage({
+  repo.saveMessage({
     botId: BOT,
-    scope: "c2c",
+    scope: "chat",
     scopeId: C2C_USER,
     msgId,
     authorOpenid: C2C_USER,
     ts: Date.now() - ageMs,
     content: "回复这条消息",
     mentions: [],
-    elements: undefined,
+    text: "回复这条消息",
+    quote: null,
+    records: [],
     attachments: [],
     raw: {},
   });
@@ -926,7 +930,7 @@ test("M4-18 单聊被动回复：窗内 sendAuto 绑定 msg_id（seq=1）走 c2c
     assert.equal(mock.calls[0]!.body.msg_id, "C1", "被动绑定目标消息");
     assert.equal(mock.calls[0]!.body.msg_seq, 1);
     assert.equal(mock.calls[0]!.body.msg_type, 0);
-    const row = fx.repo.getC2cMessageByMsgId(BOT, C2C_USER, r.provider_msg_id!);
+    const row = fx.repo.getMessageByMsgId(BOT, "chat", C2C_USER, r.provider_msg_id!);
     assert.ok(row !== null, "自发消息应补记进单聊缓存");
     assert.equal(Number(row.direction), 1);
   } finally {

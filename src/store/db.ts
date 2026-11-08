@@ -52,6 +52,7 @@ export function runMigrations(db: DB, list: Migration[]): void {
   for (const m of pending) {
     db.transaction(() => {
       db.exec(m.up);
+      m.run?.(db); // v8 起支持 JS 步骤（数据重演类迁移），与 DDL 同事务同成败
       insert.run(m.version, m.name, Date.now());
     })();
   }

@@ -8,7 +8,6 @@ import { join } from "node:path";
 import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
-import type { NormalizedMessage } from "../src/normalize/types";
 
 /** best-effort 清理：Windows 下新建 .db 文件可能被 AV/索引服务短暂持有句柄，删除失败留给系统回收 */
 function cleanupDir(dir: string): void {
@@ -44,7 +43,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
     // WAL 生效
     assert.equal(db.pragma("journal_mode", { simple: true }), "wal");
 
-    // 版本已记录（…/ v6 bot 认证等级 / v7 msg_idx 引用回溯列）
+    // 版本已记录（…/ v7 msg_idx / v8 存储重构：messages 合一+users+records+FTS 换源）
     const rows = db
       .prepare("SELECT version, name FROM schema_migrations")
       .all();
@@ -56,6 +55,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
       { version: 5, name: "bots-registry" },
       { version: 6, name: "bots-auth-level" },
       { version: 7, name: "msg-idx-column" },
+      { version: 8, name: "storage-refactor" },
     ]);
     // 幂等：重跑不报错、不重复记录
     runMigrations(db, migrations);
@@ -65,7 +65,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
           n: number;
         }
       ).n,
-      7,
+      8,
     );
 
     db.close();
@@ -100,6 +100,7 @@ test("追加迁移只执行增量", () => {
       { version: 5 },
       { version: 6 },
       { version: 7 },
+      { version: 8 },
       { version: 99 },
     ]);
     // 新表可用
@@ -122,64 +123,130 @@ test("openDatabase 自动创建数据目录", () => {
   }
 });
 
-test("单聊作者名映射：入站单聊从本 bot 群聊名册反查昵称；openid 按 bot 隔离不串名", () => {
+test("users 身份权威：QQ 昵称 last-write-wins；群/私聊消息合一入库；records 拍平落库", () => {
   const dir = tempDbDir();
   try {
     const db = openDatabase(dir);
     runMigrations(db, migrations);
     const repo = new Repo(db);
 
-    const base: NormalizedMessage = {
-      botId: "",
-      scope: "c2c",
-      scopeId: "",
-      msgId: "",
-      authorOpenid: "",
-      ts: Date.now(),
-      content: "你好",
+    const base = {
       mentions: [],
-      elements: undefined,
       attachments: [],
+      records: [],
+      quote: null,
       raw: {},
+      ts: Date.now(),
     };
 
-    // bot A 名册里有 USER_A（群聊消息积累；单聊载荷本身无昵称）
-    db.prepare(
-      "INSERT INTO members(bot_id, group_openid, member_openid, username, member_role, first_seen, last_seen, msg_count) VALUES ('BOT_A','G_A','USER_A','小肥鱼','member',?, ?, 1)",
-    ).run(Date.now(), Date.now());
-
-    // bot A 收到 USER_A 单聊 → 反查补名
-    repo.saveC2cMessage({
+    // 群消息：作者入库 users（QQ 昵称）
+    repo.saveMessage({
       ...base,
       botId: "BOT_A",
-      scopeId: "USER_A",
-      authorOpenid: "USER_A",
+      scope: "group",
+      scopeId: "G_A",
       msgId: "M1",
-    });
-    const m1 = repo.getC2cMessageByMsgId("BOT_A", "USER_A", "M1");
-    assert.equal(m1?.author_name, "小肥鱼");
-
-    // openid 按 bot 维度隔离：同一 openid 字面量在 bot B 名册无记录 → 不串名
-    repo.saveC2cMessage({
-      ...base,
-      botId: "BOT_B",
-      scopeId: "USER_A",
       authorOpenid: "USER_A",
-      msgId: "M2",
+      authorName: "小肥鱼",
+      authorRole: "member",
+      text: "你好",
+      content: "你好",
     });
-    const m2 = repo.getC2cMessageByMsgId("BOT_B", "USER_A", "M2");
-    assert.equal(m2?.author_name, null);
+    assert.equal(repo.userNameOf("BOT_A", "USER_A"), "小肥鱼");
 
-    // 名册未命中（对方未与 bot 在任何群互动过）→ 保持 null，展示层回落 openid
-    repo.saveC2cMessage({
+    // 昵称变更 → last-write-wins（群昵称不落任何表，QQ 昵称是唯一身份名）
+    repo.saveMessage({
       ...base,
       botId: "BOT_A",
-      scopeId: "USER_X",
-      authorOpenid: "USER_X",
-      msgId: "M3",
+      scope: "group",
+      scopeId: "G_A",
+      msgId: "M2",
+      authorOpenid: "USER_A",
+      authorName: "新名字",
+      text: "改名了",
+      content: "改名了",
     });
-    const m3 = repo.getC2cMessageByMsgId("BOT_A", "USER_X", "M3");
-    assert.equal(m3?.author_name, null);
+    assert.equal(repo.userNameOf("BOT_A", "USER_A"), "新名字");
+
+    // 单聊消息同表（scope=chat）；载荷无名字 → users 保留旧值
+    repo.saveMessage({
+      ...base,
+      botId: "BOT_A",
+      scope: "chat",
+      scopeId: "USER_A",
+      msgId: "M3",
+      authorOpenid: "USER_A",
+      text: "单聊你好",
+      content: "单聊你好",
+    });
+    assert.equal(repo.userNameOf("BOT_A", "USER_A"), "新名字");
+    const m3 = repo.getMessageByMsgId("BOT_A", "chat", "USER_A", "M3");
+    assert.equal(m3?.scope, "chat");
+    assert.equal(m3?.scope_id, "USER_A");
+
+    // openid 按 bot 维度隔离：bot B 的 users 无此人
+    assert.equal(repo.userNameOf("BOT_B", "USER_A"), null);
+
+    // 聊天记录拍平：宿主 records_count=2，子行落 message_records
+    repo.saveMessage({
+      ...base,
+      botId: "BOT_A",
+      scope: "group",
+      scopeId: "G_A",
+      msgId: "M4",
+      authorOpenid: "USER_A",
+      authorName: "新名字",
+      text: "看这个",
+      content: "看这个\n[聊天记录·2条]",
+      msgIdx: "REFIDX_M4",
+      records: [
+        {
+          ord: 0,
+          depth: 0,
+          authorOpenid: "USER_B",
+          authorName: "别人",
+          ts: null,
+          text: "子消息一",
+          quote: null,
+          attachments: [],
+        },
+        {
+          ord: 1,
+          depth: 1,
+          text: "嵌套层子消息",
+          quote: { msgIdx: "REF_X", body: "子引用" },
+          attachments: [],
+        },
+      ],
+    });
+    const host = repo.getMessageByMsgId("BOT_A", "group", "G_A", "M4");
+    assert.equal(host?.records_count, 2);
+    const recs = repo.getRecords("BOT_A", "group", "G_A", "M4");
+    assert.equal(recs.length, 2);
+    assert.equal(recs[0]?.text, "子消息一");
+    assert.equal(recs[1]?.depth, 1);
+    assert.ok(recs[1]?.quote_json?.includes("REF_X"));
+
+    // 引用落库：quote_json 结构化 + 懒补被引身份（M2 在 M5 之后到，读取时补齐）
+    repo.saveMessage({
+      ...base,
+      botId: "BOT_A",
+      scope: "group",
+      scopeId: "G_A",
+      msgId: "M5",
+      authorOpenid: "USER_B",
+      authorName: "别人",
+      text: "回复你",
+      content: "回复你",
+      quote: { msgIdx: "REFIDX_M4", body: "看这个" },
+    });
+    const q1 = repo.quoteOf(
+      repo.getMessageByMsgId("BOT_A", "group", "G_A", "M5")!,
+    );
+    assert.equal(q1?.body, "看这个");
+    // 被引消息 M4 已在库且带 msg_idx → 懒补出 msg_id/作者
+    assert.equal(q1?.msgId, "M4");
+    assert.equal(q1?.id, "USER_A");
   } finally {
     cleanupDir(dir);
   }

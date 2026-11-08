@@ -142,7 +142,7 @@ test("M4-17 资产闭环：签票→PUT 落盘→send_media asset: 引用（file
     assert.equal(put.statusCode, 200);
 
     // 窗内有消息 → 被动图
-    fx.repo.saveGroupMessage({
+    fx.repo.saveMessage({
       botId: BOT,
       scope: "group",
       scopeId: GROUP,
@@ -152,7 +152,9 @@ test("M4-17 资产闭环：签票→PUT 落盘→send_media asset: 引用（file
       ts: Date.now() - 60_000,
       content: "发张图",
       mentions: [],
-      elements: undefined,
+      text: "发张图",
+      quote: null,
+      records: [],
       attachments: [],
       raw: {},
     });
@@ -313,7 +315,7 @@ test("M10 语音资产闭环：PUT 落盘 audio/mpeg → send_media asset: 引�
     assert.equal(sniffPathMime(onDisk), "audio/mpeg");
 
     // 窗内有消息 → 被动语音
-    fx.repo.saveGroupMessage({
+    fx.repo.saveMessage({
       botId: BOT,
       scope: "group",
       scopeId: GROUP,
@@ -323,7 +325,9 @@ test("M10 语音资产闭环：PUT 落盘 audio/mpeg → send_media asset: 引�
       ts: Date.now() - 60_000,
       content: "来段语音",
       mentions: [],
-      elements: undefined,
+      text: "来段语音",
+      quote: null,
+      records: [],
       attachments: [],
       raw: {},
     });
@@ -335,7 +339,7 @@ test("M10 语音资产闭环：PUT 落盘 audio/mpeg → send_media asset: 引�
       "听听这个",
     );
     assert.equal(r.channel, "passive");
-    const latest = fx.repo.browseLatest(BOT, GROUP, 1)[0]!;
+    const latest = fx.repo.browseLatest(BOT, "group", GROUP, 1)[0]!;
     assert.equal(latest.direction, 1);
     assert.equal(latest.content, "![语音] 听听这个");
   } finally {

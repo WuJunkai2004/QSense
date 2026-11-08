@@ -461,51 +461,68 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const limit = intParam(q.limit, 1, 200, 50);
           // type=chat 读 c2c_messages 镜像（group 参数此时为对端 user_openid，读取层同形）
           const isChat = q.type === "chat";
+          const scope = isChat ? ("chat" as const) : ("group" as const);
           const out = (rows: MsgRow[]) =>
-            rows.map((r) => ({
-              rid: r.rid,
-              msg_id: r.msg_id,
-              ts: r.ts !== null ? new Date(r.ts).toISOString() : null,
-              author: {
-                openid: r.author_openid,
-                name: r.author_name,
-                role: r.author_role,
-              },
-              content: isChat
-                ? repo.resolveQuotesC2c(botId, group, r.content)
-                : repo.resolveQuotes(botId, group, r.content),
-              has_attachments: r.attachments_json !== null,
-              attachments: r.attachments_json
-                ? JSON.parse(r.attachments_json)
-                : null,
-              has_ark: r.ark_json !== null,
-              has_elements: r.elements_json !== null,
-              /** 本机外发（发送成功后补记） */
-              out: r.direction === 1,
-            }));
-          if (q.after !== undefined && q.after !== "") {
-            // 轮询模式：rowid > after 的增量（升序）
-            const after = intParam(q.after, 0, Number.MAX_SAFE_INTEGER, 0);
-            const rows = isChat
-              ? repo.getC2cMessagesAfter(botId, group, after, limit)
-              : repo.getMessagesAfter(botId, group, after, limit);
-            return { bot: botId, group, mode: "after", messages: out(rows) };
-          }
-          const before =
-            q.before !== undefined && q.before !== ""
-              ? intParam(q.before, 0, Number.MAX_SAFE_INTEGER, 0)
-              : null;
-          const rows = isChat
-            ? repo.c2cMessagesPageBefore(botId, group, before, limit)
-            : repo.messagesPageBefore(botId, group, before, limit);
-          return {
-            bot: botId,
-            group,
-            mode: "page",
-            messages: out(rows),
-            has_more: rows.length === limit,
-            next_before: rows.length > 0 ? rows[0].rid : null,
-          };
+            rows.map((r) => {
+              const q = repo.quoteOf(r);
+              return {
+                rid: r.rid,
+                msg_id: r.msg_id,
+                ts: r.ts !== null ? new Date(r.ts).toISOString() : null,
+                author: {
+                  openid: r.author_openid,
+                  name:
+                    (r.author_openid !== null
+                      ? repo.userNameOf(botId, r.author_openid)
+                      : null) ?? r.author_name,
+                  role: r.author_role,
+                },
+                content: r.content,
+                quote_msg:
+                  q !== null
+                    ? { id: q.id, msg_id: q.msgId, content: q.body }
+                    : null,
+                records_count: r.records_count,
+                has_attachments: r.attachments_json !== null,
+                attachments: r.attachments_json
+                  ? JSON.parse(r.attachments_json)
+                  : null,
+                has_ark: r.ark_json !== null,
+                /** 本机外发（发送成功后补记） */
+                out: r.direction === 1,
+              };
+            });
+            if (q.after !== undefined && q.after !== "") {
+              // 轮询模式：rowid > after 的增量（升序）
+              const after = intParam(q.after, 0, Number.MAX_SAFE_INTEGER, 0);
+              const rows = repo.getMessagesAfter(
+                botId,
+                scope,
+                group,
+                after,
+                limit,
+              );
+              return { bot: botId, group, mode: "after", messages: out(rows) };
+            }
+            const before =
+              q.before !== undefined && q.before !== ""
+                ? intParam(q.before, 0, Number.MAX_SAFE_INTEGER, 0)
+                : null;
+            const rows = repo.messagesPageBefore(
+              botId,
+              scope,
+              group,
+              before,
+              limit,
+            );
+            return {
+              bot: botId,
+              group,
+              mode: "page",
+              messages: out(rows),
+              has_more: rows.length === limit,
+              next_before: rows.length > 0 ? rows[0].rid : null,
+            };
         } catch (e) {
           const m = mapError(uiLog, e);
           reply.code(m.status).send({ error: m.message });
@@ -522,34 +539,59 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             throw new BotRegistryError("缺少 msg_id 参数。");
           }
           const isChat = q.type === "chat";
-          const row = isChat
-            ? repo.getC2cMessageByMsgId(botId, group, msgId)
-            : repo.getMessageByMsgId(botId, group, msgId);
+          const scope = isChat ? ("chat" as const) : ("group" as const);
+          const row = repo.getMessageByMsgId(botId, scope, group, msgId);
           if (row === null) {
             reply
               .code(404)
               .send({ error: "消息不存在。" });
             return;
           }
+          const quote = repo.quoteOf(row);
           return {
             rid: row.rid,
             msg_id: row.msg_id,
             ts: row.ts !== null ? new Date(row.ts).toISOString() : null,
             author: {
               openid: row.author_openid,
-              name: row.author_name,
+              name:
+                (row.author_openid !== null
+                  ? repo.userNameOf(botId, row.author_openid)
+                  : null) ?? row.author_name,
               role: row.author_role,
             },
-            content: isChat
-              ? repo.resolveQuotesC2c(botId, group, row.content)
-              : repo.resolveQuotes(botId, group, row.content),
+            content: row.content,
+            quote_msg:
+              quote !== null
+                ? { id: quote.id, msg_id: quote.msgId, content: quote.body }
+                : null,
+            records_count: row.records_count,
+            records:
+              row.records_count > 0
+                ? repo
+                    .getRecords(botId, scope, group, msgId)
+                    .map((rec) => ({
+                      ord: rec.ord,
+                      depth: rec.depth,
+                      openid: rec.author_openid,
+                      name:
+                        (rec.author_openid !== null
+                          ? repo.userNameOf(botId, rec.author_openid)
+                          : null) ?? rec.author_name,
+                      ts: rec.ts !== null ? new Date(rec.ts).toISOString() : null,
+                      text: rec.text,
+                      quote: rec.quote_json ? JSON.parse(rec.quote_json) : null,
+                      attachments: rec.attachments_json
+                        ? JSON.parse(rec.attachments_json)
+                        : null,
+                    }))
+                : null,
             out: row.direction === 1,
             mentions: row.mentions_json ? JSON.parse(row.mentions_json) : null,
             attachments: row.attachments_json
               ? JSON.parse(row.attachments_json)
               : null,
             ark: row.ark_json ? JSON.parse(row.ark_json) : null,
-            elements: row.elements_json ? JSON.parse(row.elements_json) : null,
             raw: row.raw_json ? JSON.parse(row.raw_json) : null,
           };
         } catch (e) {
@@ -668,31 +710,18 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           // 官方不回推 bot 自发消息：发送成功后本地补记，WebUI 刷新后仍可见。
           // 落库失败不影响发送结果（消息已出账，只记日志）。
           try {
-            if (kind === "chat") {
-              repo.saveOutgoingC2cMessage({
-                botId,
-                userOpenid: group,
-                msgId:
-                  result.provider_msg_id ??
-                  `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                content: text,
-                ts: Date.now(),
-                authorName:
-                  registry.list().find((b) => b.appid === botId)?.name ?? null,
-              });
-            } else {
-              repo.saveOutgoingGroupMessage({
-                botId,
-                groupOpenid: group,
-                msgId:
-                  result.provider_msg_id ??
-                  `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                content: text,
-                ts: Date.now(),
-                authorName:
-                  registry.list().find((b) => b.appid === botId)?.name ?? null,
-              });
-            }
+            repo.saveOutgoing({
+              botId,
+              scope: kind,
+              scopeId: group,
+              msgId:
+                result.provider_msg_id ??
+                `ui-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              content: text,
+              ts: Date.now(),
+              authorName:
+                registry.list().find((b) => b.appid === botId)?.name ?? null,
+            });
           } catch (pe) {
             const pm = pe instanceof Error ? pe.message : String(pe);
             uiLog.error("outgoing message persist failed", {

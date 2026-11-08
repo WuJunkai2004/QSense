@@ -357,10 +357,12 @@ export class Sender {
     }
 
     // 窗口与次数（官方限制：群 5 分钟/5 次、单聊 60 分钟/4 次）
-    const inbound =
-      kind === "chat"
-        ? this.deps.repo.getC2cMessageByMsgId(botId, targetId, replyMsgId)
-        : this.deps.repo.getMessageByMsgId(botId, targetId, replyMsgId);
+    const inbound = this.deps.repo.getMessageByMsgId(
+      botId,
+      kind,
+      targetId,
+      replyMsgId,
+    );
     if (inbound === null || inbound.ts === null)
       throw new Error(t("send_window_no_msg", { msg_id: replyMsgId }));
     const win = PASSIVE_WINDOW[scopeOf(kind)];
@@ -774,10 +776,12 @@ export class Sender {
     quoteMsgId?: string,
   ): { bindMsgId?: string; quote: boolean } {
     if (quoteMsgId !== undefined) {
-      const q =
-        kind === "chat"
-          ? this.deps.repo.getC2cMessageByMsgId(botId, targetId, quoteMsgId)
-          : this.deps.repo.getMessageByMsgId(botId, targetId, quoteMsgId);
+      const q = this.deps.repo.getMessageByMsgId(
+        botId,
+        kind,
+        targetId,
+        quoteMsgId,
+      );
       if (q === null || q.ts === null) {
         throw new Error(t("send_quote_not_found", { msg_id: quoteMsgId }));
       }
@@ -804,10 +808,7 @@ export class Sender {
     targetId: string,
     msgId: string,
   ): boolean {
-    const row =
-      kind === "chat"
-        ? this.deps.repo.getC2cMessageByMsgId(botId, targetId, msgId)
-        : this.deps.repo.getMessageByMsgId(botId, targetId, msgId);
+    const row = this.deps.repo.getMessageByMsgId(botId, kind, targetId, msgId);
     if (row === null || row.ts === null) return false;
     if (Date.now() - row.ts > PASSIVE_WINDOW[scopeOf(kind)].ms) return false;
     return (
@@ -823,10 +824,7 @@ export class Sender {
     kind: "group" | "chat",
     targetId: string,
   ): string | undefined {
-    const rows =
-      kind === "chat"
-        ? this.deps.repo.browseC2cLatest(botId, targetId, 10)
-        : this.deps.repo.browseLatest(botId, targetId, 10);
+    const rows = this.deps.repo.browseLatest(botId, kind, targetId, 10);
     for (const row of rows) {
       if (row.direction === 1) continue;
       if (
@@ -856,25 +854,15 @@ export class Sender {
     try {
       const authorName =
         this.deps.bots?.list().find((b) => b.appid === botId)?.name ?? null;
-      if (kind === "chat") {
-        this.deps.repo.saveOutgoingC2cMessage({
-          botId,
-          userOpenid: targetId,
-          msgId: providerMsgId,
-          content,
-          ts: Date.now(),
-          authorName,
-        });
-      } else {
-        this.deps.repo.saveOutgoingGroupMessage({
-          botId,
-          groupOpenid: targetId,
-          msgId: providerMsgId,
-          content,
-          ts: Date.now(),
-          authorName,
-        });
-      }
+      this.deps.repo.saveOutgoing({
+        botId,
+        scope: kind,
+        scopeId: targetId,
+        msgId: providerMsgId,
+        content,
+        ts: Date.now(),
+        authorName,
+      });
     } catch (e) {
       this.log.warn("outgoing message persist failed", {
         reason: e instanceof Error ? e.message : String(e),

@@ -1,11 +1,17 @@
-// 迁移定义：version 递增，up 为 DDL（exec 可执行多语句）。
+// 迁移定义：version 递增，up 为 DDL（exec 可执行多语句）；run 为可选 JS 步骤（数据重演，
+// v8 起支持——纯 SQL 表达不了的 normalize 重演走这里），与 up 同事务同成败。
 // 新结构一律追加新版本，禁止修改历史迁移（已应用的版本按 version 跳过）。
 // M2 的业务表（groups/members/messages/messages_fts/c2c/sends/quota_daily）作为 version 2 追加。
+
+import { normalizeMessage } from "../normalize";
+import type { MsgScope } from "../normalize/types";
+import type { DB } from "./db";
 
 export interface Migration {
   version: number;
   name: string;
   up: string;
+  run?: (db: DB) => void;
 }
 
 export const migrations: Migration[] = [
@@ -186,5 +192,313 @@ export const migrations: Migration[] = [
       ALTER TABLE c2c_messages ADD COLUMN msg_idx TEXT;
       CREATE INDEX idx_c2c_msg_idx ON c2c_messages(bot_id, user_openid, msg_idx);
     `,
+  },
+  {
+    version: 8,
+    name: "storage-refactor",
+    // 2026-11-08 存储重构（用户定案「存语义，渲染留派生；身份归身份，内容归内容」）：
+    // - messages 群/私聊合一（scope 列），c2c_messages 退役；content 不再糅引用与记录转写，
+    //   新增 text（本条纯文本，FTS 唯一检索源）/ quote_json（结构化引用）/ records_count
+    // - users 表：QQ 昵称唯一权威（openid 不变、昵称 last-write-wins）；members 砍 username 列
+    //   （群昵称只在 mention 里出现且一人多昵称，当身份名必然混乱）
+    // - message_records：聊天记录（102）拍平子消息出列，宿主 content 只留条数标记
+    // - FTS 换源 text 列；elements_json 废弃（raw_json 有完整元素树，不再存派生副本）
+    // - 历史 raw_json 全量重演（normalize 新管线），outgoing 补记行（无 raw）直接平移
+    up: `
+      DROP TRIGGER IF EXISTS messages_fts_ai;
+      DROP TRIGGER IF EXISTS messages_fts_ad;
+      DROP TRIGGER IF EXISTS messages_fts_au;
+      DROP TRIGGER IF EXISTS c2c_messages_fts_ai;
+      DROP TRIGGER IF EXISTS c2c_messages_fts_ad;
+      DROP TRIGGER IF EXISTS c2c_messages_fts_au;
+      DROP TABLE IF EXISTS messages_fts;
+      DROP TABLE IF EXISTS c2c_messages_fts;
+      DROP INDEX IF EXISTS idx_msg_ts;
+      DROP INDEX IF EXISTS idx_msg_msg_idx;
+      DROP INDEX IF EXISTS idx_c2c_ts;
+      DROP INDEX IF EXISTS idx_c2c_msg_idx;
+      ALTER TABLE messages RENAME TO messages_v7;
+      ALTER TABLE c2c_messages RENAME TO c2c_messages_v7;
+
+      CREATE TABLE messages(
+        bot_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        msg_id TEXT NOT NULL,
+        author_openid TEXT,
+        author_name TEXT,
+        author_role TEXT,
+        ts INTEGER,
+        text TEXT,
+        content TEXT,
+        quote_json TEXT,
+        records_count INTEGER NOT NULL DEFAULT 0,
+        mentions_json TEXT,
+        attachments_json TEXT,
+        ark_json TEXT,
+        raw_json TEXT,
+        direction INTEGER NOT NULL DEFAULT 0,
+        msg_idx TEXT,
+        PRIMARY KEY(bot_id, scope, scope_id, msg_id)
+      );
+      CREATE INDEX idx_msg_ts ON messages(bot_id, scope, scope_id, ts);
+      CREATE INDEX idx_msg_msg_idx ON messages(bot_id, scope, scope_id, msg_idx);
+      CREATE VIRTUAL TABLE messages_fts USING fts5(
+        text, content='messages', content_rowid='rowid', tokenize='trigram'
+      );
+      CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, text) VALUES (new.rowid, new.text);
+      END;
+      CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+      END;
+      CREATE TRIGGER messages_fts_au AFTER UPDATE OF text ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
+        INSERT INTO messages_fts(rowid, text) VALUES (new.rowid, new.text);
+      END;
+
+      CREATE TABLE users(
+        bot_id TEXT NOT NULL,
+        openid TEXT NOT NULL,
+        name TEXT,
+        first_seen INTEGER NOT NULL,
+        last_seen INTEGER NOT NULL,
+        PRIMARY KEY(bot_id, openid)
+      );
+
+      CREATE TABLE message_records(
+        bot_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
+        msg_id TEXT NOT NULL,
+        ord INTEGER NOT NULL,
+        depth INTEGER NOT NULL,
+        author_openid TEXT,
+        author_name TEXT,
+        ts INTEGER,
+        text TEXT,
+        quote_json TEXT,
+        attachments_json TEXT,
+        PRIMARY KEY(bot_id, scope, scope_id, msg_id, ord)
+      );
+
+      ALTER TABLE members RENAME TO members_v7;
+      CREATE TABLE members(
+        bot_id TEXT NOT NULL,
+        group_openid TEXT NOT NULL,
+        member_openid TEXT NOT NULL,
+        member_role TEXT,
+        first_seen INTEGER,
+        last_seen INTEGER,
+        msg_count INTEGER DEFAULT 0,
+        PRIMARY KEY(bot_id, group_openid, member_openid)
+      );
+      INSERT INTO members(bot_id, group_openid, member_openid, member_role, first_seen, last_seen, msg_count)
+        SELECT bot_id, group_openid, member_openid, member_role, first_seen, last_seen, msg_count
+        FROM members_v7;
+      DROP TABLE members_v7;
+    `,
+    run: (db: DB): void => {
+      const insertMsg = db.prepare(`
+        INSERT OR IGNORE INTO messages(
+          bot_id, scope, scope_id, msg_id, author_openid, author_name, author_role,
+          ts, text, content, quote_json, records_count, mentions_json,
+          attachments_json, ark_json, raw_json, direction, msg_idx
+        ) VALUES (
+          @bot_id, @scope, @scope_id, @msg_id, @author_openid, @author_name, @author_role,
+          @ts, @text, @content, @quote_json, @records_count, @mentions_json,
+          @attachments_json, @ark_json, @raw_json, @direction, @msg_idx
+        )
+      `);
+      const insertRecord = db.prepare(`
+        INSERT OR IGNORE INTO message_records(
+          bot_id, scope, scope_id, msg_id, ord, depth,
+          author_openid, author_name, ts, text, quote_json, attachments_json
+        ) VALUES (
+          @bot_id, @scope, @scope_id, @msg_id, @ord, @depth,
+          @author_openid, @author_name, @ts, @text, @quote_json, @attachments_json
+        )
+      `);
+      const upsertUser = db.prepare(`
+        INSERT INTO users(bot_id, openid, name, first_seen, last_seen)
+        VALUES (@bot_id, @openid, @name, @now, @now)
+        ON CONFLICT(bot_id, openid) DO UPDATE SET
+          name = COALESCE(excluded.name, users.name),
+          last_seen = MAX(users.last_seen, excluded.last_seen)
+      `);
+
+      interface V7Row {
+        bot_id: string;
+        group_openid?: string;
+        user_openid?: string;
+        msg_id: string;
+        author_openid: string | null;
+        author_name: string | null;
+        author_role: string | null;
+        ts: number | null;
+        content: string | null;
+        mentions_json: string | null;
+        attachments_json: string | null;
+        ark_json: string | null;
+        raw_json: string | null;
+        direction: number;
+        msg_idx: string | null;
+      }
+
+      const migrateRow = (row: V7Row, scope: MsgScope, scopeId: string): void => {
+        const base = {
+          bot_id: row.bot_id,
+          scope,
+          scope_id: scopeId,
+          msg_id: row.msg_id,
+          ts: row.ts,
+          mentions_json: row.mentions_json,
+          attachments_json: row.attachments_json,
+          ark_json: row.ark_json,
+          raw_json: row.raw_json,
+          direction: row.direction,
+        };
+        // outgoing 补记行（无 raw_json，官方不回推）：content 即发送文本，直接平移
+        if (row.raw_json === null) {
+          insertMsg.run({
+            ...base,
+            author_openid: row.author_openid,
+            author_name: row.author_name,
+            author_role: row.author_role,
+            text: row.content,
+            content: row.content,
+            quote_json: null,
+            records_count: 0,
+            msg_idx: row.msg_idx,
+          });
+          return;
+        }
+        // 正常行：从 raw_json 全量重演（normalize 新管线产出 text/quote/records/干净 content）
+        let m = null;
+        try {
+          m = normalizeMessage({
+            type: scope === "group" ? "GROUP_MESSAGE_CREATE" : "C2C_MESSAGE_CREATE",
+            botId: row.bot_id,
+            data: JSON.parse(row.raw_json) as Record<string, unknown>,
+          });
+        } catch {
+          m = null; // 坏 raw 不炸迁移：退化为直接平移旧行
+        }
+        if (m === null) {
+          insertMsg.run({
+            ...base,
+            author_openid: row.author_openid,
+            author_name: row.author_name,
+            author_role: row.author_role,
+            text: row.content,
+            content: row.content,
+            quote_json: null,
+            records_count: 0,
+            msg_idx: row.msg_idx,
+          });
+          return;
+        }
+        const quote = m.quote ?? null;
+        insertMsg.run({
+          ...base,
+          author_openid: row.author_openid ?? (m.authorOpenid !== "" ? m.authorOpenid : null),
+          author_name: row.author_name ?? m.authorName ?? null,
+          author_role: row.author_role ?? m.authorRole ?? null,
+          text: m.text !== "" ? m.text : row.content,
+          content: m.content !== "" ? m.content : row.content,
+          quote_json: quote !== null ? JSON.stringify(quote) : null,
+          records_count: m.records.length,
+          msg_idx: m.msgIdx ?? row.msg_idx,
+        });
+        for (const rec of m.records) {
+          insertRecord.run({
+            bot_id: row.bot_id,
+            scope,
+            scope_id: scopeId,
+            msg_id: row.msg_id,
+            ord: rec.ord,
+            depth: rec.depth,
+            author_openid: rec.authorOpenid ?? null,
+            author_name: rec.authorName ?? null,
+            ts: rec.ts ?? null,
+            text: rec.text,
+            quote_json:
+              rec.quote !== undefined && rec.quote !== null
+                ? JSON.stringify(rec.quote)
+                : null,
+            attachments_json:
+              rec.attachments.length > 0 ? JSON.stringify(rec.attachments) : null,
+          });
+        }
+        const openid =
+          row.author_openid ?? (m.authorOpenid !== "" ? m.authorOpenid : null);
+        if (openid !== null) {
+          upsertUser.run({
+            bot_id: row.bot_id,
+            openid,
+            name: row.author_name ?? m.authorName ?? null,
+            now: Date.now(),
+          });
+        }
+      };
+
+      const groupRows = db.prepare(
+        "SELECT rowid AS rid, * FROM messages_v7",
+      ).all() as unknown as V7Row[];
+      for (const row of groupRows) {
+        migrateRow(row, "group", row.group_openid ?? "");
+      }
+      const chatRows = db.prepare(
+        "SELECT rowid AS rid, * FROM c2c_messages_v7",
+      ).all() as unknown as V7Row[];
+      for (const row of chatRows) {
+        migrateRow(row, "chat", row.user_openid ?? "");
+      }
+
+      // quote enrich 二遍扫：被引晚到（quote 只有 msg_idx/body）→ 查缓存补作者与 msg_id
+      const enrichSel = db.prepare(
+        "SELECT rowid, bot_id, scope, scope_id, quote_json FROM messages WHERE quote_json IS NOT NULL",
+      ).all() as Array<{
+        rowid: number;
+        bot_id: string;
+        scope: MsgScope;
+        scope_id: string;
+        quote_json: string;
+      }>;
+      const idxLookup = db.prepare(
+        "SELECT author_openid, msg_id, author_name FROM messages WHERE bot_id = ? AND scope = ? AND scope_id = ? AND msg_idx = ? ORDER BY rowid DESC LIMIT 1",
+      );
+      const quoteUpdate = db.prepare(
+        "UPDATE messages SET quote_json = ? WHERE rowid = ?",
+      );
+      for (const row of enrichSel) {
+        let q: { msgIdx?: string; body?: string; authorOpenid?: string | null; authorName?: string | null; msgId?: string | null };
+        try {
+          q = JSON.parse(row.quote_json) as typeof q;
+        } catch {
+          continue;
+        }
+        if (q.msgIdx === undefined || (q.authorOpenid ?? null) !== null) continue;
+        const hit = idxLookup.get(
+          row.bot_id,
+          row.scope,
+          row.scope_id,
+          q.msgIdx,
+        ) as
+          | { author_openid: string | null; msg_id: string; author_name: string | null }
+          | undefined;
+        if (hit === undefined) continue;
+        q.authorOpenid = hit.author_openid;
+        q.msgId = hit.msg_id;
+        q.authorName = hit.author_name;
+        quoteUpdate.run(JSON.stringify(q), row.rowid);
+      }
+
+      // external-content FTS 已由触发器随 INSERT 同步；rebuild 兜底可能的索引漂移
+      db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");
+
+      db.exec("DROP TABLE messages_v7");
+      db.exec("DROP TABLE c2c_messages_v7");
+    },
   },
 ];
