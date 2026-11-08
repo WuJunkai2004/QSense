@@ -661,3 +661,95 @@ body,
   color: #9aa0a8;
   flex: none;
 }
+
+/* —— 添加机器人弹窗（QQ 登录窗式双栏）—— */
+.addbot {
+  display: flex;
+  gap: 0;
+  min-height: 380px;
+}
+.addbot-left {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 24px 4px 4px;
+}
+.addbot-col-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1f2329;
+  margin-bottom: 16px;
+}
+.addbot-divider {
+  width: 1px;
+  flex: none;
+  background: #e5e6eb;
+}
+.addbot-right {
+  width: 280px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px 4px 4px 24px;
+}
+.addbot-right .addbot-col-title {
+  align-self: flex-start;
+}
+.qr-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.qr-penguin {
+  font-size: 44px;
+  line-height: 1;
+}
+.qr-shell {
+  position: relative;
+  width: 174px;
+  height: 174px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  border: 1px solid #e5e6eb;
+  border-radius: 10px;
+  padding: 10px;
+}
+.qr-shell.refreshable {
+  cursor: pointer;
+}
+.qr-loading {
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+.qr-mask {
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.94);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 13px;
+  color: #1f2329;
+  line-height: 1.7;
+}
+.qr-hint {
+  font-size: 13px;
+  color: #4e5969;
+  text-align: center;
+  line-height: 1.6;
+}
+.qr-status {
+  font-size: 12px;
+  color: #9aa0a8;
+  text-align: center;
+  min-height: 18px;
+  max-width: 240px;
+  word-break: break-all;
+}

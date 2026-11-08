@@ -48,6 +48,25 @@ export interface AddBotResult {
   note: string;
 }
 
+/** POST /ui/api/qr-bind/create 载荷：连接页 URL 由前端本地画成二维码 */
+export interface QrBindCreate {
+  task_id: string;
+  connect_url: string;
+  interval_s: number;
+}
+
+/** POST /ui/api/qr-bind/poll 载荷：created 时 AppSecret 已在服务端解密注册，
+ *  返回形状与 AddBotResult 对齐（agent_token 仅此一次，任务即焚） */
+export type QrBindPoll =
+  | { status: "pending" }
+  | { status: "expired" }
+  | {
+      status: "created";
+      bot: { appid: string; name: string };
+      agent_token: string;
+      note: string;
+    };
+
 export interface GroupLast {
   ts: string;
   author: string | null;
