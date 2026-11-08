@@ -56,6 +56,35 @@ export const patch = <T>(path: string, body: unknown): Promise<T> =>
 export const del = <T>(path: string): Promise<T> =>
   api<T>(path, { method: "DELETE" });
 
+/** 二进制响应版（/tts/test 试听返回 audio/mpeg）：错误语义与 api() 一致 */
+export async function apiBlob(path: string, init?: RequestInit): Promise<Blob> {
+  const token = getToken();
+  const res = await fetch(`/ui/api${path}`, {
+    ...init,
+    headers: {
+      ...(init?.body !== undefined
+        ? { "Content-Type": "application/json" }
+        : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...init?.headers,
+    },
+  });
+  if (res.status === 401) {
+    clearToken();
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    throw new ApiError(401, "登录已失效，请重新输入 token。");
+  }
+  if (!res.ok) {
+    const body: unknown = await res.json().catch(() => null);
+    const msg =
+      body !== null && typeof body === "object" && "error" in body
+        ? String((body as { error: unknown }).error)
+        : `HTTP ${res.status}`;
+    throw new ApiError(res.status, msg);
+  }
+  return res.blob();
+}
+
 // —— 本地偏好（群备注名 / 记住的 bot） ——
 
 export const getAlias = (groupOpenid: string): string =>

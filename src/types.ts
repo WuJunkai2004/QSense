@@ -9,6 +9,8 @@ export interface BotInfo {
   allow_groups: string[];
   /** M9：认证等级按 bot 落库（主动消息频控预算 certified=60qpm / uncertified=30qpm） */
   auth_level: AuthLevel;
+  /** TTS 语音发送开关（kv tts:<appid>，缺省关）；send_media "tts:" 来源的使用闸门之一 */
+  tts_enabled: boolean;
   gateway: "ready" | "resumed" | "disconnected" | "fatal" | "unknown";
   detail?: string;
 }
@@ -28,8 +30,27 @@ export interface SettingsInfo {
     name: string;
     allow_groups: string[];
     auth_level: AuthLevel;
+    tts_enabled: boolean;
     gateway: string;
   }>;
+}
+
+/** GET /ui/api/tts/config：api_key 只回显打码，绝不回原文 */
+export type TtsConfigGet =
+  | { configured: false }
+  | {
+      configured: true;
+      base_url: string;
+      model: string;
+      voice: string;
+      api_key_masked: string;
+    };
+
+/** PUT /ui/api/tts/config 响应 */
+export interface TtsConfigPut {
+  ok: true;
+  configured: true;
+  api_key_masked: string;
 }
 
 /** POST /bots/:appid/agent-token（轮换）：新 token 仅本次返回 */

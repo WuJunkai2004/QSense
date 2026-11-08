@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   App as AntApp,
@@ -14,19 +14,23 @@ import {
 } from "antd";
 import {
   AppstoreOutlined,
+  AudioOutlined,
   CloseOutlined,
   DatabaseOutlined,
   EditOutlined,
   InfoCircleOutlined,
   RobotOutlined,
+  SoundOutlined,
 } from "@ant-design/icons";
-import { del, get, getAlias, patch, post, put } from "../api";
+import { apiBlob, del, get, getAlias, patch, post, put } from "../api";
 import type {
   AgentTokenResult,
   AuthLevel,
   Bootstrap,
   GroupItem,
   SettingsInfo,
+  TtsConfigGet,
+  TtsConfigPut,
 } from "../types";
 import AddBotModal from "./AddBotModal";
 
@@ -38,10 +42,11 @@ interface Props {
   onChanged: () => void;
 }
 
-type Section = "general" | "bots" | "data" | "about";
+type Section = "general" | "tts" | "bots" | "data" | "about";
 
 const NAV: Array<{ key: Section; label: string; icon: ReactNode }> = [
   { key: "general", label: "通用", icon: <AppstoreOutlined /> },
+  { key: "tts", label: "TTS 语音", icon: <AudioOutlined /> },
   { key: "bots", label: "机器人", icon: <RobotOutlined /> },
   { key: "data", label: "数据管理", icon: <DatabaseOutlined /> },
   { key: "about", label: "关于", icon: <InfoCircleOutlined /> },
@@ -135,6 +140,183 @@ function GroupWhitelist(props: {
   );
 }
 
+/** TTS 语音栏：OpenAI 兼容 /audio/speech 全局配置（kv）+ 试听。
+ *  api_key 永不回显原文（打码占位符）；留空保存 = 保持已存值。
+ *  试听草稿优先——未保存的表单值直接合成 "hi" 播放，先验证再落库。 */
+function TtsSection() {
+  const { message } = AntApp.useApp();
+  const [cfg, setCfg] = useState<TtsConfigGet | null>(null);
+  const [base, setBase] = useState("");
+  const [key, setKey] = useState("");
+  const [model, setModel] = useState("");
+  const [voice, setVoice] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    get<TtsConfigGet>("/tts/config")
+      .then((r) => {
+        setCfg(r);
+        if (r.configured) {
+          setBase(r.base_url);
+          setModel(r.model);
+          setVoice(r.voice);
+        }
+      })
+      .catch((e) => void message.error(errMsg(e)));
+  }, [message]);
+
+  // 卸载时停播 + 释放 blob URL
+  useEffect(
+    () => () => {
+      audioRef.current?.pause();
+      const src = audioRef.current?.src;
+      if (src !== undefined && src.startsWith("blob:")) URL.revokeObjectURL(src);
+    },
+    [],
+  );
+
+  const save = async (): Promise<void> => {
+    setSaving(true);
+    try {
+      const r = await put<TtsConfigPut>("/tts/config", {
+        base_url: base,
+        api_key: key,
+        model,
+        voice,
+      });
+      setCfg({
+        configured: true,
+        base_url: base.trim(),
+        model: model.trim(),
+        voice: voice.trim(),
+        api_key_masked: r.api_key_masked,
+      });
+      setKey("");
+      void message.success("TTS 配置已保存");
+    } catch (e) {
+      void message.error(errMsg(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const test = async (): Promise<void> => {
+    setTesting(true);
+    try {
+      const blob = await apiBlob("/tts/test", {
+        method: "POST",
+        body: JSON.stringify({ base_url: base, api_key: key, model, voice }),
+      });
+      audioRef.current?.pause();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => URL.revokeObjectURL(url);
+      await audio.play();
+      void message.success("合成成功，正在试听「hi」");
+    } catch (e) {
+      void message.error(errMsg(e));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const configured = cfg?.configured === true;
+
+  return (
+    <>
+      <div className="settings-section-title">TTS 语音</div>
+      <div className="settings-card">
+        <div className="settings-row">
+          <div style={{ minWidth: 0, width: "100%" }}>
+            <div className="label">服务地址 base_url</div>
+            <div className="desc">
+              OpenAI 兼容接口根（到 /v1 这一级，不带 /v1 也可自动补）
+            </div>
+            <Input
+              value={base}
+              placeholder="如 https://api.openai.com/v1"
+              onChange={(e) => setBase(e.target.value)}
+              style={{ marginTop: 6 }}
+            />
+          </div>
+        </div>
+        <div className="settings-row">
+          <div style={{ minWidth: 0, width: "100%" }}>
+            <div className="label">API Key</div>
+            <div className="desc">
+              {configured
+                ? `已配置（${cfg.api_key_masked}）：留空保持不变，输入新值即覆盖`
+                : "服务无鉴权可留空；保存后仅打码显示"}
+            </div>
+            <Input.Password
+              value={key}
+              placeholder={configured ? "留空 = 保持已存值" : "sk-…"}
+              onChange={(e) => setKey(e.target.value)}
+              style={{ marginTop: 6 }}
+            />
+          </div>
+        </div>
+        <div className="settings-row">
+          <div style={{ minWidth: 0, width: "100%" }}>
+            <div className="label">模型 model</div>
+            <div className="desc">如 tts-1 / fish-speech-1.5 / cosyvoice-…（视服务商）</div>
+            <Input
+              value={model}
+              placeholder="tts-1"
+              onChange={(e) => setModel(e.target.value)}
+              style={{ marginTop: 6 }}
+            />
+          </div>
+        </div>
+        <div className="settings-row">
+          <div style={{ minWidth: 0, width: "100%" }}>
+            <div className="label">音色 voice</div>
+            <div className="desc">如 alloy / wanwan（视服务商）</div>
+            <Input
+              value={voice}
+              placeholder="alloy"
+              onChange={(e) => setVoice(e.target.value)}
+              style={{ marginTop: 6 }}
+            />
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <Button
+            type="primary"
+            loading={saving}
+            disabled={base.trim() === "" || model.trim() === "" || voice.trim() === ""}
+            onClick={() => void save()}
+          >
+            保存配置
+          </Button>
+          <Button
+            icon={<SoundOutlined />}
+            loading={testing}
+            disabled={base.trim() === "" || model.trim() === "" || voice.trim() === ""}
+            onClick={() => void test()}
+          >
+            试听（合成 hi）
+          </Button>
+        </div>
+      </div>
+      <div className="settings-card">
+        <div className="settings-row">
+          <div className="desc" style={{ maxWidth: 640, lineHeight: 1.8 }}>
+            保存后，智能体在 send_media 的 media 参数填{" "}
+            <Typography.Text code>&quot;tts:要说的文本&quot;</Typography.Text>{" "}
+            即可发送语音条（≤1000 字符，服务端合成、mp3 直发官方）。
+            每个 bot 还需在「机器人」栏单独打开其「语音发送」开关（缺省关）。
+            试听不发消息、不落库草稿，用于先验证配置再保存。
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 /** 设置页（/ui/settings）：通用 / 机器人 / 数据管理 / 关于。
  *  收编原设置抽屉的全部功能，外加左栏右键「移除机器人」与右栏「删除本群缓存」，
  *  危险操作集中于此，聊天三栏只留只读 + 发送。 */
@@ -218,6 +400,21 @@ export default function SettingsPage({ boot, onClose, onChanged }: Props) {
           : "已标记为未认证 bot：主动消息预算 30 条/分钟",
       );
       onChanged();
+    } catch (e) {
+      void message.error(errMsg(e));
+    }
+  };
+
+  // 每 bot 语音发送开关（kv tts:<appid>）：send_media "tts:" 来源的闸门之一，即时生效
+  const toggleTts = async (appid: string, enabled: boolean): Promise<void> => {
+    try {
+      const r = await put<SettingsInfo>("/settings", {
+        tts_enabled: [{ appid, enabled }],
+      });
+      applyInfo(r);
+      void message.success(
+        enabled ? "语音发送已开启（该 bot）" : "语音发送已关闭（该 bot）",
+      );
     } catch (e) {
       void message.error(errMsg(e));
     }
@@ -393,6 +590,8 @@ export default function SettingsPage({ boot, onClose, onChanged }: Props) {
           </>
         )}
 
+        {section === "tts" && <TtsSection />}
+
         {section === "bots" && (
           <>
             <div
@@ -439,6 +638,19 @@ export default function SettingsPage({ boot, onClose, onChanged }: Props) {
                           {b.gateway}
                         </Tag>
                       </div>
+                    </div>
+                    <div className="settings-row">
+                      <div>
+                        <div className="label">语音发送（TTS）</div>
+                        <div className="desc">
+                          允许 send_media 的 &quot;tts:&quot; 合成语音；需先在「TTS
+                          语音」栏完成全局配置
+                        </div>
+                      </div>
+                      <Switch
+                        checked={b.tts_enabled}
+                        onChange={(v) => void toggleTts(b.appid, v)}
+                      />
                     </div>
                     <div className="settings-row">
                       <div>
