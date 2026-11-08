@@ -99,9 +99,11 @@ export function parseAttachmentLike(a: unknown): NormalizedAttachment | null {
 }
 
 /**
- * 附件收集器：占位符 `![附件n]` 的 n 与 list 下标一一对应（n = 下标 + 1）。
- * 同 URL 去重（返回已有编号，不重复入库）；语音带官方 ASR 转写时内联进占位符
- * （转写的语义价值就在渲染文本，但**不进 text 检索列**——那是别人的话）。
+ * 附件收集器：占位符编号与 list 下标一一对应（n = 下标 + 1）。
+ * 同 URL 去重（返回已有编号，不重复入库）。
+ * 渲染分型（2026-11-08 真机核验）：图片/视频 `![附件n]`；语音带 ASR 内联 `![附件n]（转写：…）`
+ * （转写的语义价值就在渲染文本，但**不进 text 检索列**——那是别人的话）；
+ * 文件 `[附件n 文件名 (大小)]`（图片式占位符对 PDF 无意义）。
  */
 export class AttachmentCollector {
   readonly list: NormalizedAttachment[] = [];
@@ -117,6 +119,10 @@ export class AttachmentCollector {
     if (att.kind === "voice" && att.asr_refer_text !== undefined) {
       return `![附件${n}]（转写：${att.asr_refer_text}）`;
     }
+    if (att.kind === "file" && att.filename !== undefined) {
+      const size = att.size !== undefined ? ` (${humanSize(att.size)})` : "";
+      return `[附件${n} ${att.filename}${size}]`;
+    }
     return `![附件${n}]`;
   }
 
@@ -124,6 +130,12 @@ export class AttachmentCollector {
   has(url: string): boolean {
     return this.numByUrl.has(url);
   }
+}
+
+function humanSize(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)}KB`;
+  return `${n}B`;
 }
 
 /** 元素携带的媒体：el.attachments 数组（真机 103 引用形状）或元素自身即媒体（带 url 字段，容错） */
@@ -182,6 +194,64 @@ function recordTs(el: ElementLike): number | null {
   if (typeof el.timestamp !== "string" || el.timestamp === "") return null;
   const ms = Date.parse(el.timestamp);
   return Number.isNaN(ms) ? null : ms;
+}
+
+export interface ParsedTranscript {
+  title: string;
+  records: Array<{ authorName?: string; text: string }>;
+}
+
+/**
+ * 官方合并转发**无元素树形状**（真机 2026-11-08 核实：消息级 message_type=102，
+ * content 直带全文转写）解析器。格式：
+ *   [群聊的聊天记录]
+ *   === 消息 1 ===
+ *   [消息内容]  正文…
+ *   [发送者] 名字
+ * 非此形状返回 null（不误伤普通文本）。
+ */
+export function parseRecordTranscript(content: string): ParsedTranscript | null {
+  const lines = content.split("\n");
+  if (lines.length < 4) return null;
+  const head = lines[0]!.trim();
+  const m = head.match(/^\[(.+?聊天记录)\]$/);
+  if (m === null) return null;
+  const title = m[1]!;
+  const records: Array<{ authorName?: string; text: string }> = [];
+  let textLines: string[] | null = null;
+  let sender: string | undefined;
+  const flush = (): void => {
+    if (textLines !== null) {
+      const text = textLines.join("\n").trim();
+      records.push({ authorName: sender, text });
+      textLines = null;
+      sender = undefined;
+    }
+  };
+  for (let i = 1; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (/^=== 消息 \d+ ===$/.test(line.trim())) {
+      flush();
+      textLines = [];
+      continue;
+    }
+    if (textLines === null) continue;
+    const senderMatch = line.match(/^\[发送者\]\s*(.*)$/);
+    if (senderMatch !== null) {
+      sender = senderMatch[1]!.trim();
+      continue;
+    }
+    const bodyMatch = line.match(/^\[消息内容\]\s?(.*)$/);
+    if (bodyMatch !== null) {
+      textLines.push(bodyMatch[1]!);
+      continue;
+    }
+    if (line.trim() === "") continue;
+    textLines.push(line); // 多行正文容错
+  }
+  flush();
+  if (records.length === 0) return null;
+  return { title, records };
 }
 
 export interface Decomposed {

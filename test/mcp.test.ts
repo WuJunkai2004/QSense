@@ -753,7 +753,8 @@ test("M3-5b get_records：聊天记录拍平展开（users 昵称/嵌套 depth/�
       })) as never,
     );
     assert.equal(ok.count, 2);
-    const r0 = ok.records[0] as Record<string, unknown>;
+    const recs = ok.records as Array<Record<string, unknown>>;
+    const r0 = recs[0]!;
     assert.equal(r0.ord, 0);
     assert.equal(r0.depth, 0);
     const r0author = r0.author as { id: string; name: string };
@@ -763,7 +764,7 @@ test("M3-5b get_records：聊天记录拍平展开（users 昵称/嵌套 depth/�
     const r0quote = r0.quote_msg as Record<string, unknown>;
     assert.equal(r0quote.msg_id, "R0", "子行引用锚解析为宿主 msg_id");
     assert.ok(Array.isArray(r0.attachments) && r0.attachments.length === 1);
-    const r1 = ok.records[1] as Record<string, unknown>;
+    const r1 = recs[1]!;
     assert.equal(r1.depth, 1, "嵌套记录子层 depth+1");
 
     // 非聊天记录消息 → 可操作报错

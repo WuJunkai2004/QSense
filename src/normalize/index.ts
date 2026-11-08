@@ -9,6 +9,7 @@ import {
   decomposeElements,
   extractArk,
   parseAttachmentLike,
+  parseRecordTranscript,
 } from "./expand";
 import type {
   NormalizedAttachment,
@@ -115,6 +116,7 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
   if (msgId === "") return null;
 
   const baseContent = typeof r.content === "string" ? r.content : "";
+  const rawType = typeof r.message_type === "number" ? r.message_type : undefined;
   const elements = r.msg_elements ?? undefined;
   const extMsgIdx = extractMsgIdx(r);
   const collector = new AttachmentCollector();
@@ -125,7 +127,26 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
   let renderLines: string[];
   let quote: NormalizedMessage["quote"];
   let records: NormalizedMessage["records"];
-  if (elements !== undefined) {
+  // 官方合并转发无元素树形状（真机 2026-11-08：消息级 message_type=102 + content 直带
+  // 「=== 消息 N ===」转写）：解析进 records，宿主只留条数标记——外来转写不进任何文本列。
+  // 元素树若有 102 则走 decompose 拍平（带 openid，信息更全），树优先。
+  const transcript =
+    elements === undefined && rawType === 102
+      ? parseRecordTranscript(baseContent)
+      : null;
+  if (transcript !== null) {
+    renderLines = [`[${transcript.title}·${transcript.records.length}条]`];
+    textLines = [];
+    quote = null;
+    records = transcript.records.map((rec, i) => ({
+      ord: i,
+      depth: 0,
+      authorName: rec.authorName,
+      text: rec.text,
+      quote: null,
+      attachments: [],
+    }));
+  } else if (elements !== undefined) {
     const d = decomposeElements(elements, collector);
     quote = d.quote;
     records = d.records;
@@ -143,6 +164,15 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
     quote = null;
     records = [];
   }
+  // 文件名属本条内容（用户主动发的文件）：进 text 供检索（渲染占位符已带名字）
+  const fileNames = [
+    ...new Set(
+      topAtts
+        .filter((a) => a.kind === "file" && a.filename !== undefined)
+        .map((a) => a.filename as string),
+    ),
+  ];
+  textLines.push(...fileNames);
   const text = textLines.filter((s) => s !== "").join("\n");
   const content = renderLines.filter((s) => s !== "").join("\n");
 

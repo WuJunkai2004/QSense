@@ -495,3 +495,58 @@ test("M2-10 媒体占位符与引用结构化：媒体前置/103 内嵌媒体收
   assert.equal(dupe!.attachments.length, 1, "同 URL 只收一次");
   assert.ok(dupe!.content.includes("![附件1]"));
 });
+
+test("M2-11 文件附件：kind=file，占位符带文件名/大小，文件名进 text 可检索", () => {
+  const m = normalizeMessage(
+    ev("GROUP_MESSAGE_CREATE", {
+      ...groupMsgShape,
+      id: "MSGID_FILE",
+      content: "",
+      attachments: [
+        {
+          url: "https://njc-download.ftn.qq.com/x.pdf",
+          filename: "数学建模省一.pdf",
+          size: 724084,
+          content_type: "file",
+        },
+      ],
+    }),
+  );
+  assert.ok(m !== null);
+  assert.equal(m!.attachments[0].kind, "file");
+  assert.equal(m!.content, "[附件1 数学建模省一.pdf (707KB)]");
+  assert.equal(m!.text, "数学建模省一.pdf", "文件名属本条内容，进检索列");
+});
+
+test("M2-12 官方合并转发无元素树形状（message_type=102）：转写解析进 records，宿主只留标记", () => {
+  // 真机 2026-11-08 形状：消息级 message_type=102，content 直带全文转写，无 msg_elements
+  const m = normalizeMessage(
+    ev("GROUP_MESSAGE_CREATE", {
+      ...groupMsgShape,
+      id: "MSGID_REC",
+      message_type: 102,
+      content:
+        "[群聊的聊天记录]\n=== 消息 1 ===\n[消息内容]  你人呢，怎么不活跃了\n[发送者] Venti\n\n=== 消息 2 ===\n[消息内容] 在呢在呢 刚睡醒 你们聊到哪了\n[发送者] 小肥鱼",
+    }),
+  );
+  assert.ok(m !== null);
+  assert.equal(m!.content, "[群聊的聊天记录·2条]", "宿主只留条数标记");
+  assert.equal(m!.text, "", "转写是转引内容，不进检索列");
+  assert.equal(m!.records.length, 2);
+  assert.equal(m!.records[0].ord, 0);
+  assert.equal(m!.records[0].depth, 0);
+  assert.equal(m!.records[0].authorName, "Venti");
+  assert.equal(m!.records[0].text, "你人呢，怎么不活跃了");
+  assert.equal(m!.records[1].authorName, "小肥鱼");
+  // 非记录消息不受影响：普通 content 开头相同词不误伤
+  const plain = normalizeMessage(
+    ev("GROUP_MESSAGE_CREATE", {
+      ...groupMsgShape,
+      id: "MSGID_PLAIN",
+      content: "[群聊的聊天记录] 其实我在聊这个话题",
+    }),
+  );
+  assert.ok(plain !== null);
+  assert.equal(plain!.records.length, 0, "无消息块结构不误判");
+  assert.equal(plain!.text, "[群聊的聊天记录] 其实我在聊这个话题");
+});
