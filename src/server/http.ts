@@ -13,6 +13,7 @@ import type { DB } from "../store/db";
 import { Repo } from "../store/repo";
 import { createMcpHandler } from "../tools/mcp";
 import { registerUiRoutes } from "./ui";
+import type { QrBindDeps } from "../qrbind";
 
 const ASSET_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -32,6 +33,8 @@ export interface ServerDeps {
   maxConcurrent?: number;
   /** 资产存储（request_upload 票据 + PUT /assets 数据端点 + asset: 引用）；缺省=未装配 */
   assets?: AssetStore;
+  /** 扫码绑定上游依赖（透传 UiDeps.qrBind；缺省=直连 q.qq.com），测试注入假端点 */
+  qrBind?: QrBindDeps;
 }
 
 /** Authorization: Bearer <token> 提取；无效返回 null */
@@ -192,6 +195,7 @@ export function buildServer(deps: ServerDeps) {
       tokens: deps.tokens,
       botStatuses: deps.botStatuses,
       sender: deps.sender,
+      qrBind: deps.qrBind,
     });
   }
 

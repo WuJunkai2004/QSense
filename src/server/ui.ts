@@ -14,6 +14,7 @@ import type { GatewayStatus, GatewaySupervisor } from "../gateway";
 import { kvSessionPort } from "../gateway/session-store";
 import type { TokenService } from "../gateway/token";
 import type { Logger } from "../logger";
+import { QrBindError, createQrBindTask, pollQrBind, type QrBindDeps } from "../qrbind";
 import type { Sender } from "../sender";
 import type { DB } from "../store/db";
 import type { MsgRow, Repo } from "../store/repo";
@@ -31,6 +32,8 @@ export interface UiDeps {
   botStatuses: () => GatewayStatus[];
   /** 发送器：POST /send 用；缺省=发送端点硬拒绝（与 MCP requireSender 同语义） */
   sender?: Sender;
+  /** 扫码绑定上游依赖（fetch/host 注入；缺省=直连 q.qq.com），测试注入假端点 */
+  qrBind?: QrBindDeps;
 }
 
 const MIME: Record<string, string> = {
@@ -48,12 +51,13 @@ const MIME: Record<string, string> = {
 
 const distDir = (): string => process.env.UI_DIST_DIR?.trim() || "./ui/dist";
 
-/** 统一错误映射：BotRegistryError（含参数类错误）→ 400，其余 → 500（记日志） */
+/** 统一错误映射：BotRegistryError（含参数类错误）→ 400，QrBindError（上游扫码接口）→ 502，其余 → 500（记日志） */
 function mapError(
   log: Logger,
   e: unknown,
 ): { status: number; message: string } {
   if (e instanceof BotRegistryError) return { status: 400, message: e.message };
+  if (e instanceof QrBindError) return { status: 502, message: e.message };
   const message = e instanceof Error ? e.message : String(e);
   log.error("ui api error", { reason: message.slice(0, 300) });
   return { status: 500, message: "内部错误，请查看服务日志。" };
@@ -238,6 +242,69 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           // M8：agent_token 仅此一次返回——WebUI 弹窗提示"立即保存"，服务端不留展示通道
           return {
             ok: true,
+            bot: { appid: registered.app.appid, name: registered.app.name },
+            agent_token: registered.agentToken,
+            note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换。",
+          };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      // —— 扫码绑定（q.qq.com lite）：bind_key 只在本进程，浏览器只见 task_id ——
+      // 内存态任务表：task_id → 密钥 + 时间戳（TTL 10 分钟；进程重启即失效，前端重开任务即可）
+      const qrTasks = new Map<string, { bindKey: string; createdAt: number }>();
+      const QR_TASK_TTL_MS = 10 * 60_000;
+
+      plugin.post("/qr-bind/create", async (_req, reply) => {
+        try {
+          const now = Date.now();
+          for (const [k, v] of qrTasks) {
+            if (now - v.createdAt > QR_TASK_TTL_MS) qrTasks.delete(k);
+          }
+          const task = await createQrBindTask(deps.qrBind);
+          qrTasks.set(task.taskId, { bindKey: task.bindKey, createdAt: now });
+          uiLog.info("qr bind task created", { taskId: task.taskId });
+          return {
+            task_id: task.taskId,
+            connect_url: task.connectUrl,
+            interval_s: 2,
+          };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      plugin.post("/qr-bind/poll", async (req, reply) => {
+        try {
+          const body = (req.body ?? {}) as Record<string, unknown>;
+          const taskId =
+            typeof body.task_id === "string" ? body.task_id.trim() : "";
+          const task = qrTasks.get(taskId);
+          if (task === undefined) {
+            // 任务不存在 / 已过期清理 / 进程重启：前端据此重开任务
+            return { status: "expired" };
+          }
+          const r = await pollQrBind(
+            { taskId, bindKey: task.bindKey },
+            deps.qrBind,
+          );
+          if (r.status !== "pending") qrTasks.delete(taskId);
+          if (r.status !== "completed") return r;
+          // 完成 → 直接走既有注册管线（官方两级凭据校验 + 落库 + 拉起网关），
+          // AppSecret 全程不出本进程；agent_token 与手动添加同样仅此一次返回
+          const registered = await registry.add({
+            appid: r.appid,
+            secret: r.secret,
+          });
+          supervisor.addBot(registered.app);
+          uiLog.info("bot added via qr bind", {
+            appid: registered.app.appid,
+          });
+          return {
+            status: "created",
             bot: { appid: registered.app.appid, name: registered.app.name },
             agent_token: registered.agentToken,
             note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换。",
