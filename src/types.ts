@@ -72,13 +72,31 @@ export interface MsgAuthor {
   role: string | null;
 }
 
+/** 附件分型（2026-11-08 存储重构 v8：服务端按 content_type 归一；新消息类型只扩此枚举） */
+export type AttKind = "image" | "voice" | "video" | "file";
+
 export interface MsgAttachment {
+  kind: AttKind;
   url: string;
   filename?: string;
   width?: number;
   height?: number;
   size?: number;
+  duration?: number;
   content_type?: string;
+  /** 语音：官方 ASR 转写（服务端已内联进 content 占位符后的「（转写：…）」） */
+  voice_wav_url?: string;
+  asr_refer_text?: string;
+}
+
+/** 结构化引用（v8：quote_json 直读，被引原文不再糅进 content） */
+export interface QuoteMsg {
+  /** 被引作者 openid（被引晚到且缓存未命中时 null） */
+  id: string | null;
+  /** 被引消息 id（同上） */
+  msg_id: string | null;
+  /** 被引正文摘要（首行，≤50 字符，超出带省略号） */
+  content: string;
 }
 
 export interface MsgItem {
@@ -87,11 +105,14 @@ export interface MsgItem {
   ts: string | null;
   author: MsgAuthor;
   content: string | null;
+  /** 结构化引用：null = 本条无引用 */
+  quote_msg: QuoteMsg | null;
+  /** 聊天记录子消息数（>0 时 /message 详情内联 records） */
+  records_count: number;
   has_attachments: boolean;
-  /** 附件描述符（与 content 内 `![附件n]` 占位符编号对应：n = 下标 + 1）；旧消息可能为 null */
+  /** 附件描述符（与 content 内 `![附件n]` / `[附件n 文件名]` 占位符编号对应：n = 下标 + 1）；旧消息可能为 null */
   attachments: MsgAttachment[] | null;
   has_ark: boolean;
-  has_elements: boolean;
   /** 本机乐观追加的发送消息（仅存在于前端会话内） */
   pending?: boolean;
   /** 本机外发消息（服务端发送成功后已落库，刷新后仍在） */
@@ -125,12 +146,25 @@ export interface QuotaInfo {
   buckets?: Record<string, unknown>;
 }
 
+/** /message 详情内联的聊天记录子消息（v8 拍平行；depth=嵌套层级） */
+export interface RecordItem {
+  ord: number;
+  depth: number;
+  openid: string | null;
+  name: string | null;
+  ts: string | null;
+  text: string | null;
+  /** 子行内引用（{msg_idx?, body?}，原始形状） */
+  quote: unknown;
+  attachments: unknown;
+}
+
 /** /ui/api/message 详情（智能体视角原始载荷）；attachments 为原始 JSON（unknown），覆盖基类窄类型 */
 export interface MessageDetail extends Omit<MsgItem, "attachments"> {
+  records: RecordItem[] | null;
   mentions: unknown;
   attachments: unknown;
   ark: unknown;
-  elements: unknown;
   raw: unknown;
 }
 

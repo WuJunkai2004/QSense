@@ -263,10 +263,11 @@ export default function App() {
       ts: new Date().toISOString(),
       author: { openid: null, name: botName, role: null },
       content: text,
+      quote_msg: null,
+      records_count: 0,
       has_attachments: false,
       attachments: null,
       has_ark: false,
-      has_elements: false,
       pending: true,
     };
     setMessages((prev) => [...prev, pending]);

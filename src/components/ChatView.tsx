@@ -1,5 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Avatar,
@@ -17,9 +16,10 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import dayjs from "dayjs";
-import type { Bootstrap, GroupItem, MsgItem } from "../types";
+import type { Bootstrap, GroupItem, MsgItem, QuoteMsg } from "../types";
 import { getAlias, setAlias } from "../api";
 import { qqAvatar } from "../avatar";
+import { BubbleContent, QuoteBlock } from "./bubble";
 
 interface Props {
   boot: Bootstrap;
@@ -63,42 +63,8 @@ function isSelfRow(m: MsgItem): boolean {
   return m.pending === true || m.out === true;
 }
 
-// `![附件n]` 占位符（n 与 attachments 下标对应：n = 下标 + 1）；只做存在性判断，不带 g 标志
+// `![附件n]` 占位符存在性判断（不带 g 标志）
 const ATT_MARK = /!\[附件(\d+)\]/;
-
-/** 气泡正文渲染：占位符内联为图片（按编号取附件），其余文本原样（pre-wrap 由 .bubble 负责） */
-function renderContent(m: MsgItem): ReactNode {
-  const text = m.content ?? "";
-  if (!ATT_MARK.test(text)) return text !== "" ? text : "（无文本内容）";
-  const nodes: ReactNode[] = [];
-  text.split(/!\[附件(\d+)\]/g).forEach((part, i) => {
-    if (i % 2 === 0) {
-      if (part !== "") nodes.push(<span key={`t${i}`}>{part}</span>);
-      return;
-    }
-    const a = m.attachments?.[Number(part) - 1];
-    nodes.push(
-      a !== undefined && (a.content_type ?? "").startsWith("image/") ? (
-        <img
-          key={`a${i}`}
-          src={a.url}
-          alt={a.filename ?? `附件${part}`}
-          loading="lazy"
-          style={{
-            display: "block",
-            maxWidth: 180,
-            maxHeight: 180,
-            borderRadius: 6,
-            margin: "4px 0",
-          }}
-        />
-      ) : (
-        <span key={`a${i}`}>{`[附件${part}]`}</span>
-      ),
-    );
-  });
-  return nodes;
-}
 
 /** 聊天主区：群头 + 消息流（QQ 风格气泡）+ 发送框（被动回复 / 主动消息） */
 export default function ChatView(props: Props) {
@@ -201,6 +167,36 @@ export default function ChatView(props: Props) {
     }
     return latest;
   })();
+
+  // 引用块作者名解析：从当前已加载消息查 openid → 最新昵称（服务端 users 表已解析过 author.name）
+  const nameByOpenid = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const m of messages) {
+      if (m.author.openid !== null && m.author.name !== null) {
+        map.set(m.author.openid, m.author.name);
+      }
+    }
+    return map;
+  }, [messages]);
+  const nameOf = (openid: string | null): string | null =>
+    openid !== null ? (nameByOpenid.get(openid) ?? null) : null;
+
+  // 引用块点击：跳看被引消息详情（抽屉按 msg_id 独立拉取，行不必在当前列表）
+  const openQuote = (q: QuoteMsg): void => {
+    if (q.msg_id === null) return;
+    onShowDetail({
+      rid: 0,
+      msg_id: q.msg_id,
+      ts: null,
+      author: { openid: q.id, name: nameOf(q.id), role: null },
+      content: q.content,
+      quote_msg: null,
+      records_count: 0,
+      has_attachments: false,
+      attachments: null,
+      has_ark: false,
+    });
+  };
 
   const doSend = async (): Promise<void> => {
     const t = text.trim();
@@ -334,9 +330,23 @@ export default function ChatView(props: Props) {
                       </span>
                     </div>
                     <div className="bubble" onClick={() => onShowDetail(m)}>
-                      {renderContent(m)}
+                      {(() => {
+                        const q = m.quote_msg;
+                        return q !== null ? (
+                          <QuoteBlock
+                            quote={q}
+                            nameOf={nameOf}
+                            onOpen={() => openQuote(q)}
+                          />
+                        ) : null;
+                      })()}
+                      <BubbleContent
+                        m={m}
+                        onOpenRecords={() => onShowDetail(m)}
+                      />
                       {m.has_attachments &&
-                        !/!\[附件\d+\]/.test(m.content ?? "") && (
+                        m.attachments === null &&
+                        !ATT_MARK.test(m.content ?? "") && (
                           <span className="attach-tag">[图片/文件]</span>
                         )}
                       {m.has_ark && <span className="attach-tag">[卡片]</span>}

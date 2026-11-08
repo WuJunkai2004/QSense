@@ -239,6 +239,218 @@ body,
   font-size: 11px;
   opacity: 0.75;
 }
+.bubble .bubble-empty {
+  color: #b0b6bf;
+}
+
+/* 引用块（v8 quote_msg 结构化字段）：QQ 风格灰底引用卡，嵌在气泡正文上方 */
+.quote-block {
+  background: rgba(0, 0, 0, 0.045);
+  border-left: 3px solid #c9d4e0;
+  border-radius: 4px;
+  padding: 5px 8px;
+  margin-bottom: 5px;
+  font-size: 12px;
+  line-height: 1.45;
+  cursor: default;
+  max-width: 420px;
+}
+.quote-block.clickable {
+  cursor: pointer;
+}
+.quote-block.clickable:hover {
+  background: rgba(0, 0, 0, 0.075);
+}
+.quote-block .quote-name {
+  color: #4e5969;
+  font-weight: 500;
+  margin-bottom: 1px;
+}
+.quote-block .quote-text {
+  color: #86909c;
+  white-space: pre-wrap;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.msg-row.self .quote-block {
+  background: rgba(255, 255, 255, 0.22);
+  border-left-color: rgba(255, 255, 255, 0.5);
+}
+.msg-row.self .quote-block .quote-name {
+  color: rgba(255, 255, 255, 0.92);
+}
+.msg-row.self .quote-block .quote-text {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+/* 聊天记录转发卡片：整行标记升级为可点击卡片 */
+.records-card {
+  display: inline-block;
+  min-width: 180px;
+  max-width: 320px;
+  background: #f4f5f7;
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  margin: 2px 0;
+}
+.records-card:hover {
+  background: #ececf1;
+}
+.records-card .records-title {
+  font-size: 13px;
+  color: #1f2329;
+}
+.records-card .records-meta {
+  font-size: 11px;
+  color: #9aa0a8;
+  margin-top: 3px;
+}
+.msg-row.self .records-card {
+  background: rgba(255, 255, 255, 0.22);
+}
+.msg-row.self .records-card .records-title {
+  color: #fff;
+}
+.msg-row.self .records-card .records-meta {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* 文件 chip（`[附件n 名字 (大小)]`）：可下载 */
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #f4f5f7;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 12px;
+  color: #1f2329;
+  text-decoration: none;
+  margin: 1px 0;
+}
+.file-chip:hover {
+  background: #ececf1;
+  color: #0099ff;
+}
+.file-chip.static {
+  cursor: default;
+}
+.file-chip .file-name {
+  word-break: break-all;
+}
+
+/* 语音 chip（`![附件n]` kind=voice） */
+.voice-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #f4f5f7;
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: #1f2329;
+  text-decoration: none;
+  margin: 1px 0;
+}
+.voice-chip:hover {
+  background: #ececf1;
+  color: #0099ff;
+}
+
+/* 详情抽屉结构化段式 */
+.detail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.detail-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: #86909c;
+}
+.detail-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4e5969;
+  margin-bottom: 6px;
+}
+.detail-pre {
+  background: #f7f8fa;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: inherit;
+  line-height: 1.55;
+}
+.detail-atts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.detail-att {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.detail-att .att-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-att .att-size {
+  color: #9aa0a8;
+  font-size: 12px;
+}
+.detail-mentions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* 聊天记录子消息列表（详情抽屉） */
+.records-list {
+  background: #f7f8fa;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.record-item {
+  font-size: 13px;
+}
+.record-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.record-name {
+  font-weight: 500;
+  color: #4e5969;
+}
+.record-ts {
+  font-size: 11px;
+  color: #b0b6bf;
+}
+.record-text {
+  color: #1f2329;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 1px;
+}
 .role-tag {
   font-size: 10px;
   line-height: 16px;
