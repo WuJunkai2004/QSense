@@ -229,7 +229,9 @@ test("M2-4 语音附件：kind 归一 voice，wav 转写地址与 ASR 文本保�
     assert.equal(m!.text, "");
     repo.saveMessage(m!);
     const row = db
-      .prepare("SELECT attachments_json FROM messages WHERE msg_id='MSGID_VOICE'")
+      .prepare(
+        "SELECT attachments_json FROM messages WHERE msg_id='MSGID_VOICE'",
+      )
       .get() as { attachments_json: string };
     const saved = JSON.parse(row.attachments_json) as Array<{
       kind?: string;

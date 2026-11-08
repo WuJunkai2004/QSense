@@ -345,7 +345,11 @@ export const migrations: Migration[] = [
         msg_idx: string | null;
       }
 
-      const migrateRow = (row: V7Row, scope: MsgScope, scopeId: string): void => {
+      const migrateRow = (
+        row: V7Row,
+        scope: MsgScope,
+        scopeId: string,
+      ): void => {
         const base = {
           bot_id: row.bot_id,
           scope,
@@ -377,7 +381,8 @@ export const migrations: Migration[] = [
         let m = null;
         try {
           m = normalizeMessage({
-            type: scope === "group" ? "GROUP_MESSAGE_CREATE" : "C2C_MESSAGE_CREATE",
+            type:
+              scope === "group" ? "GROUP_MESSAGE_CREATE" : "C2C_MESSAGE_CREATE",
             botId: row.bot_id,
             data: JSON.parse(row.raw_json) as Record<string, unknown>,
           });
@@ -401,7 +406,9 @@ export const migrations: Migration[] = [
         const quote = m.quote ?? null;
         insertMsg.run({
           ...base,
-          author_openid: row.author_openid ?? (m.authorOpenid !== "" ? m.authorOpenid : null),
+          author_openid:
+            row.author_openid ??
+            (m.authorOpenid !== "" ? m.authorOpenid : null),
           author_name: row.author_name ?? m.authorName ?? null,
           author_role: row.author_role ?? m.authorRole ?? null,
           text: m.text !== "" ? m.text : row.content,
@@ -427,7 +434,9 @@ export const migrations: Migration[] = [
                 ? JSON.stringify(rec.quote)
                 : null,
             attachments_json:
-              rec.attachments.length > 0 ? JSON.stringify(rec.attachments) : null,
+              rec.attachments.length > 0
+                ? JSON.stringify(rec.attachments)
+                : null,
           });
         }
         const openid =
@@ -442,23 +451,25 @@ export const migrations: Migration[] = [
         }
       };
 
-      const groupRows = db.prepare(
-        "SELECT rowid AS rid, * FROM messages_v7",
-      ).all() as unknown as V7Row[];
+      const groupRows = db
+        .prepare("SELECT rowid AS rid, * FROM messages_v7")
+        .all() as unknown as V7Row[];
       for (const row of groupRows) {
         migrateRow(row, "group", row.group_openid ?? "");
       }
-      const chatRows = db.prepare(
-        "SELECT rowid AS rid, * FROM c2c_messages_v7",
-      ).all() as unknown as V7Row[];
+      const chatRows = db
+        .prepare("SELECT rowid AS rid, * FROM c2c_messages_v7")
+        .all() as unknown as V7Row[];
       for (const row of chatRows) {
         migrateRow(row, "chat", row.user_openid ?? "");
       }
 
       // quote enrich 二遍扫：被引晚到（quote 只有 msg_idx/body）→ 查缓存补作者与 msg_id
-      const enrichSel = db.prepare(
-        "SELECT rowid, bot_id, scope, scope_id, quote_json FROM messages WHERE quote_json IS NOT NULL",
-      ).all() as Array<{
+      const enrichSel = db
+        .prepare(
+          "SELECT rowid, bot_id, scope, scope_id, quote_json FROM messages WHERE quote_json IS NOT NULL",
+        )
+        .all() as Array<{
         rowid: number;
         bot_id: string;
         scope: MsgScope;
@@ -472,20 +483,31 @@ export const migrations: Migration[] = [
         "UPDATE messages SET quote_json = ? WHERE rowid = ?",
       );
       for (const row of enrichSel) {
-        let q: { msgIdx?: string; body?: string; authorOpenid?: string | null; authorName?: string | null; msgId?: string | null };
+        let q: {
+          msgIdx?: string;
+          body?: string;
+          authorOpenid?: string | null;
+          authorName?: string | null;
+          msgId?: string | null;
+        };
         try {
           q = JSON.parse(row.quote_json) as typeof q;
         } catch {
           continue;
         }
-        if (q.msgIdx === undefined || (q.authorOpenid ?? null) !== null) continue;
+        if (q.msgIdx === undefined || (q.authorOpenid ?? null) !== null)
+          continue;
         const hit = idxLookup.get(
           row.bot_id,
           row.scope,
           row.scope_id,
           q.msgIdx,
         ) as
-          | { author_openid: string | null; msg_id: string; author_name: string | null }
+          | {
+              author_openid: string | null;
+              msg_id: string;
+              author_name: string | null;
+            }
           | undefined;
         if (hit === undefined) continue;
         q.authorOpenid = hit.author_openid;

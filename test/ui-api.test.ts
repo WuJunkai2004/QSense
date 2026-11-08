@@ -684,7 +684,11 @@ test("M10 UI 单聊：type=all 合并会话（名字=users 权威）+ type=chat 
     const chat = sessions.groups.find((g) => g.type === "chat");
     assert.ok(chat !== undefined, "type=all 应合并单聊会话");
     assert.equal(chat.group_openid, USER);
-    assert.equal(chat.last?.author, "Venti", "单聊作者名从 users 表取（旧名册反查已退役）");
+    assert.equal(
+      chat.last?.author,
+      "Venti",
+      "单聊作者名从 users 表取（旧名册反查已退役）",
+    );
     assert.equal(chat.last?.snippet, "nih");
     assert.equal(
       sessions.groups.find((g) => g.type === "group")?.group_openid,

@@ -116,7 +116,8 @@ export function normalizeMessage(event: RawEvent): NormalizedMessage | null {
   if (msgId === "") return null;
 
   const baseContent = typeof r.content === "string" ? r.content : "";
-  const rawType = typeof r.message_type === "number" ? r.message_type : undefined;
+  const rawType =
+    typeof r.message_type === "number" ? r.message_type : undefined;
   const elements = r.msg_elements ?? undefined;
   const extMsgIdx = extractMsgIdx(r);
   const collector = new AttachmentCollector();

@@ -201,7 +201,12 @@ test("M4-13 发送成功后本地补记：messages 表出现 direction=1 的自�
     const r = await sender.reply(BOT, GROUP, "M1", "你好呀");
     assert.equal(r.status, "sent");
     assert.ok(r.provider_msg_id !== undefined);
-    const row = fx.repo.getMessageByMsgId(BOT, "group", GROUP, r.provider_msg_id!);
+    const row = fx.repo.getMessageByMsgId(
+      BOT,
+      "group",
+      GROUP,
+      r.provider_msg_id!,
+    );
     assert.ok(row !== null, "自发消息应补记进缓存");
     assert.equal(Number(row.direction), 1, "direction=1 供读取层标 yourself");
     assert.equal(row.content, "你好呀");
@@ -648,11 +653,7 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
     const ok = await runTool("send", { id: GROUP, text: "首条" }, ctx);
     assert.ok(!ok.isError);
 
-    const exceeded = await runTool(
-      "send",
-      { id: GROUP, text: "第二条" },
-      ctx,
-    );
+    const exceeded = await runTool("send", { id: GROUP, text: "第二条" }, ctx);
     assert.equal(exceeded.isError, true);
     assert.ok(exceeded.text.includes("日额度不足"));
 
@@ -930,7 +931,12 @@ test("M4-18 单聊被动回复：窗内 sendAuto 绑定 msg_id（seq=1）走 c2c
     assert.equal(mock.calls[0]!.body.msg_id, "C1", "被动绑定目标消息");
     assert.equal(mock.calls[0]!.body.msg_seq, 1);
     assert.equal(mock.calls[0]!.body.msg_type, 0);
-    const row = fx.repo.getMessageByMsgId(BOT, "chat", C2C_USER, r.provider_msg_id!);
+    const row = fx.repo.getMessageByMsgId(
+      BOT,
+      "chat",
+      C2C_USER,
+      r.provider_msg_id!,
+    );
     assert.ok(row !== null, "自发消息应补记进单聊缓存");
     assert.equal(Number(row.direction), 1);
   } finally {

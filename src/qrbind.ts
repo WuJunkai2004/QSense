@@ -58,7 +58,10 @@ async function postLite(
   try {
     res = await doFetch(`https://${host}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
       body: JSON.stringify(payload),
     });
   } catch (e) {
@@ -68,8 +71,7 @@ async function postLite(
     );
   }
   const body = (await res.json().catch(() => null)) as
-    | (Record<string, unknown> & { retcode?: unknown; msg?: unknown })
-    | null;
+    (Record<string, unknown> & { retcode?: unknown; msg?: unknown }) | null;
   if (!res.ok || body === null) {
     throw new QrBindError(
       `扫码绑定接口异常（HTTP ${res.status}）。可改用手动方式添加。`,
@@ -87,9 +89,7 @@ async function postLite(
 }
 
 /** 创建绑定任务：本地出密钥，官方发 task_id */
-export async function createQrBindTask(
-  deps: QrBindDeps = {},
-): Promise<QrTask> {
+export async function createQrBindTask(deps: QrBindDeps = {}): Promise<QrTask> {
   const bindKey = randomBytes(32).toString("base64");
   const body = await postLite(deps, "/lite/create_bind_task", { key: bindKey });
   const data = body.data as Record<string, unknown> | undefined;
@@ -118,7 +118,8 @@ export async function pollQrBind(
   const data = body.data as Record<string, unknown> | undefined;
   const status = Number(data?.status ?? 0);
   if (status === 2) {
-    const appid = typeof data?.bot_appid === "string" ? data.bot_appid.trim() : "";
+    const appid =
+      typeof data?.bot_appid === "string" ? data.bot_appid.trim() : "";
     const enc =
       typeof data?.bot_encrypt_secret === "string"
         ? data.bot_encrypt_secret.trim()
@@ -132,8 +133,7 @@ export async function pollQrBind(
       status: "completed",
       appid,
       secret: decryptBindSecret(enc, task.bindKey),
-      userOpenid:
-        typeof data?.user_openid === "string" ? data.user_openid : "",
+      userOpenid: typeof data?.user_openid === "string" ? data.user_openid : "",
     };
   }
   if (status === 3) return { status: "expired" };

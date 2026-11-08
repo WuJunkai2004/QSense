@@ -219,8 +219,7 @@ export class BotRegistry {
   /** 每 bot 发送白名单（gate 的权限域） */
   allowGroupsOf(appid: string): string[] {
     const row = this.allowGroupsStmt.get(appid) as
-      | { allow_groups: string }
-      | undefined;
+      { allow_groups: string } | undefined;
     return row === undefined ? [] : parseAllowGroups(row.allow_groups);
   }
 
@@ -236,8 +235,7 @@ export class BotRegistry {
   /** 每 bot 认证等级（主动消息频控预算档位；缺省未认证） */
   authLevelOf(appid: string): AuthLevel {
     const row = this.authLevelStmt.get(appid) as
-      | { auth_level: string }
-      | undefined;
+      { auth_level: string } | undefined;
     return row === undefined
       ? "uncertified"
       : parseAuthLevelColumn(row.auth_level);
@@ -269,16 +267,14 @@ export class BotRegistry {
   /** /mcp 鉴权：token → 绑定的 bot appid（未命中=null） */
   appIdByToken(token: string): string | null {
     const row = this.appIdByTokenStmt.get(token) as
-      | { appid: string }
-      | undefined;
+      { appid: string } | undefined;
     return row?.appid ?? null;
   }
 
   /** 资产上传票据签发/校验：appid → agent_token（bot 不存在或已轮换=null） */
   agentTokenOf(appid: string): string | null {
     const row = this.agentTokenStmt.get(appid) as
-      | { agent_token: string }
-      | undefined;
+      { agent_token: string } | undefined;
     return row?.agent_token ?? null;
   }
 }

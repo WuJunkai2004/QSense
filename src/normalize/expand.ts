@@ -63,10 +63,7 @@ function kindOf(att: {
 }): AttachmentKind {
   const ct = att.content_type ?? "";
   if (ct === "voice" || ct.startsWith("voice/")) return "voice";
-  if (
-    att.voice_wav_url !== undefined ||
-    att.asr_refer_text !== undefined
-  ) {
+  if (att.voice_wav_url !== undefined || att.asr_refer_text !== undefined) {
     return "voice";
   }
   if (ct === "image" || ct.startsWith("image/")) return "image";
@@ -210,7 +207,9 @@ export interface ParsedTranscript {
  *   [发送者] 名字
  * 非此形状返回 null（不误伤普通文本）。
  */
-export function parseRecordTranscript(content: string): ParsedTranscript | null {
+export function parseRecordTranscript(
+  content: string,
+): ParsedTranscript | null {
   const lines = content.split("\n");
   if (lines.length < 4) return null;
   const head = lines[0]!.trim();
@@ -353,7 +352,9 @@ export function decomposeElements(
         flattenRecords(childrenOf(el), depth + 1);
         const n = out.records.length - before;
         const title =
-          typeof el.title === "string" && el.title !== "" ? el.title : "聊天记录";
+          typeof el.title === "string" && el.title !== ""
+            ? el.title
+            : "聊天记录";
         out.renderLines.push(`[${title}·${n}条]`);
         pushMedia(el);
         // 官方 102：content 可能带摘要文本（title 之外的正文补充）→ 属本条文本

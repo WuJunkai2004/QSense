@@ -82,7 +82,9 @@ export class Repo {
   private readonly beforeTsStmt: Stmt<
     [string, string, string, number, number, number, number]
   >;
-  private afterTsStmt: Stmt<[string, string, string, number, number, number, number]>;
+  private afterTsStmt: Stmt<
+    [string, string, string, number, number, number, number]
+  >;
   private pageBeforeStmt: Stmt<
     [string, string, string, number | null, number, number]
   >;
@@ -286,7 +288,11 @@ export class Repo {
           m.scopeId,
           quote.msgIdx,
         ) as
-          | { author_openid: string | null; msg_id: string; author_name: string | null }
+          | {
+              author_openid: string | null;
+              msg_id: string;
+              author_name: string | null;
+            }
           | undefined;
         if (hit !== undefined) {
           quote = {
@@ -310,7 +316,8 @@ export class Repo {
         content: m.content,
         quote_json: quote !== null ? JSON.stringify(quote) : null,
         records_count: m.records.length,
-        mentions_json: m.mentions.length > 0 ? JSON.stringify(m.mentions) : null,
+        mentions_json:
+          m.mentions.length > 0 ? JSON.stringify(m.mentions) : null,
         attachments_json:
           m.attachments.length > 0 ? JSON.stringify(m.attachments) : null,
         ark_json: m.ark !== undefined ? JSON.stringify(m.ark) : null,
@@ -422,7 +429,11 @@ export class Repo {
         row.scope_id,
         q.msgIdx,
       ) as
-        | { author_openid: string | null; msg_id: string; author_name: string | null }
+        | {
+            author_openid: string | null;
+            msg_id: string;
+            author_name: string | null;
+          }
         | undefined;
       if (hit !== undefined) {
         authorOpenid = hit.author_openid;
@@ -448,8 +459,7 @@ export class Repo {
   /** 最新 QQ 昵称；users 未收录返回 null（读取端回落行快照 author_name） */
   userNameOf(botId: string, openid: string): string | null {
     const row = this.userNameStmt.get(botId, openid) as
-      | { name: string | null }
-      | undefined;
+      { name: string | null } | undefined;
     return row?.name ?? null;
   }
 
@@ -503,8 +513,7 @@ export class Repo {
 
   getC2cSwitch(botId: string, userOpenid: string): boolean | null {
     const row = this.kvGetStmt.get(`c2c:switch:${botId}:${userOpenid}`) as
-      | { v: string }
-      | undefined;
+      { v: string } | undefined;
     if (!row) return null;
     return row.v === "1";
   }
@@ -590,7 +599,12 @@ export class Repo {
    */
   listConversations(
     botId: string,
-  ): Array<{ scope: MsgScope; scopeId: string; unread: number; last_ts: number | null }> {
+  ): Array<{
+    scope: MsgScope;
+    scopeId: string;
+    unread: number;
+    last_ts: number | null;
+  }> {
     const out: Array<{
       scope: MsgScope;
       scopeId: string;
@@ -606,7 +620,12 @@ export class Repo {
         "group",
         gid,
       ) as { unread: number; last_ts: number | null };
-      out.push({ scope: "group", scopeId: gid, unread: row.unread, last_ts: row.last_ts });
+      out.push({
+        scope: "group",
+        scopeId: gid,
+        unread: row.unread,
+        last_ts: row.last_ts,
+      });
     }
     const chats = this.listChatsStmt.all(botId) as Array<{
       user_openid: string;
@@ -620,7 +639,12 @@ export class Repo {
         "chat",
         c.user_openid,
       ) as { unread: number; last_ts: number | null };
-      out.push({ scope: "chat", scopeId: c.user_openid, unread: row.unread, last_ts: row.last_ts });
+      out.push({
+        scope: "chat",
+        scopeId: c.user_openid,
+        unread: row.unread,
+        last_ts: row.last_ts,
+      });
     }
     return out;
   }
@@ -652,8 +676,7 @@ export class Repo {
     msgId: string,
   ): MsgRow | null {
     const row = this.byMsgIdStmt.get(botId, scope, scopeId, msgId) as
-      | MsgRow
-      | undefined;
+      MsgRow | undefined;
     return row ?? null;
   }
 
@@ -714,7 +737,12 @@ export class Repo {
     ) as MsgRow[];
   }
 
-  browseLatest(botId: string, scope: MsgScope, scopeId: string, limit: number): MsgRow[] {
+  browseLatest(
+    botId: string,
+    scope: MsgScope,
+    scopeId: string,
+    limit: number,
+  ): MsgRow[] {
     return this.latestStmt.all(botId, scope, scopeId, limit) as MsgRow[];
   }
 
@@ -753,7 +781,13 @@ export class Repo {
     if ([...q].length >= 3) {
       try {
         const phrase = `"${q.replace(/"/g, '""')}"`;
-        return this.ftsStmt.all(phrase, botId, scope, scopeId, limit) as MsgRow[];
+        return this.ftsStmt.all(
+          phrase,
+          botId,
+          scope,
+          scopeId,
+          limit,
+        ) as MsgRow[];
       } catch {
         // FTS 语法问题 → LIKE 兜底
       }
@@ -816,13 +850,22 @@ export class Repo {
     botId: string,
     scope: MsgScope,
     scopeId: string,
-    q: { msgIdx?: string; body?: string; authorOpenid?: string | null; msgId?: string | null },
+    q: {
+      msgIdx?: string;
+      body?: string;
+      authorOpenid?: string | null;
+      msgId?: string | null;
+    },
   ): QuoteMsgData {
     let authorOpenid = q.authorOpenid ?? null;
     let msgId = q.msgId ?? null;
     if (q.msgIdx !== undefined && authorOpenid === null) {
       const hit = this.msgIdxStmt.get(botId, scope, scopeId, q.msgIdx) as
-        | { author_openid: string | null; msg_id: string; author_name: string | null }
+        | {
+            author_openid: string | null;
+            msg_id: string;
+            author_name: string | null;
+          }
         | undefined;
       if (hit !== undefined) {
         authorOpenid = hit.author_openid;
@@ -847,8 +890,7 @@ export class Repo {
    */
   getCursor(botId: string, key: string): string | null {
     const row = this.kvGetStmt.get(`cursor:${botId}:${key}`) as
-      | { v: string }
-      | undefined;
+      { v: string } | undefined;
     return row ? row.v : null;
   }
 
@@ -896,7 +938,12 @@ export class Repo {
       groups: number;
       cursors: number;
     };
-    return { messages: r.messages, members: r.members, groups: r.groups, cursors: r.cursors };
+    return {
+      messages: r.messages,
+      members: r.members,
+      groups: r.groups,
+      cursors: r.cursors,
+    };
   }
 
   // —— 发送账本（sends 表）与主动额度（quota_daily 表） ——
@@ -1059,8 +1106,7 @@ export class Repo {
     );
     insert.run(SETTINGS_KEY, JSON.stringify({ sendEnable: false }));
     const existing = this.kvGetStmt.get(ADMIN_TOKEN_KEY) as
-      | { v: string }
-      | undefined;
+      { v: string } | undefined;
     if (existing !== undefined) {
       return { adminToken: existing.v, adminCreated: false };
     }
@@ -1072,8 +1118,7 @@ export class Repo {
   /** admin token（kv admin:token:v1）：WebUI/设置页管理凭证。null=尚未播种 */
   getAdminToken(): string | null {
     const row = this.kvGetStmt.get(ADMIN_TOKEN_KEY) as
-      | { v: string }
-      | undefined;
+      { v: string } | undefined;
     return row?.v ?? null;
   }
 

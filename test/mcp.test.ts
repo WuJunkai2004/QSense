@@ -641,9 +641,17 @@ test("M3-5 引用结构化（quote_json 直读）+ 信封统一：quote_msg 呈�
     assert.ok(!("group_openid" in q2), "消息条目无会话回显字段");
     assert.equal(String(q2.content), "看看这条", "正文干净");
     const q2quote = q2.quote_msg as Record<string, unknown>;
-    assert.equal(q2quote.id, "U_A", "quote_msg.id=被引作者 openid（ingest enrich）");
+    assert.equal(
+      q2quote.id,
+      "U_A",
+      "quote_msg.id=被引作者 openid（ingest enrich）",
+    );
     assert.equal(q2quote.msg_id, "Q1", "quote_msg.msg_id=被引消息");
-    assert.equal(q2quote.content, "被引的原文内容", "被引正文（首行，≤50 字不截断）");
+    assert.equal(
+      q2quote.content,
+      "被引的原文内容",
+      "被引正文（首行，≤50 字不截断）",
+    );
     const q3 = msgs.find((m) => m.msg_id === "Q3")!;
     assert.equal(String(q3.content), "引用了一条没缓存的消息");
     const q3quote = q3.quote_msg as Record<string, unknown>;
@@ -679,7 +687,8 @@ test("M3-5 引用结构化（quote_json 直读）+ 信封统一：quote_msg 呈�
     assert.ok(!("records_count" in q1), "无记录的消息没有 records_count 字段");
     for (const m of msgs) {
       assert.ok(
-        !String(m.content).includes("[引用 @") && !String(m.content).includes("\n> "),
+        !String(m.content).includes("[引用 @") &&
+          !String(m.content).includes("\n> "),
         "MCP 面正文无内联引用文字",
       );
     }
@@ -759,7 +768,11 @@ test("M3-5b get_records：聊天记录拍平展开（users 昵称/嵌套 depth/�
     assert.equal(r0.depth, 0);
     const r0author = r0.author as { id: string; name: string };
     assert.equal(r0author.id, "USER_B");
-    assert.equal(r0author.name, "记录者B", "子行作者名以 users 最新昵称为准（非行快照）");
+    assert.equal(
+      r0author.name,
+      "记录者B",
+      "子行作者名以 users 最新昵称为准（非行快照）",
+    );
     assert.equal(r0.text, "记录里的发言");
     const r0quote = r0.quote_msg as Record<string, unknown>;
     assert.equal(r0quote.msg_id, "R0", "子行引用锚解析为宿主 msg_id");
@@ -1084,10 +1097,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
       arguments: { id: GROUP, msg_id: "C1" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(wrongSide2.isError, true);
-    assert.ok(
-      wrongSide2.content[0]!.text.includes("search"),
-      "反向同理",
-    );
+    assert.ok(wrongSide2.content[0]!.text.includes("search"), "反向同理");
 
     // 真不存在的消息 → 仍走"可先 search"路径
     const miss = (await client.callTool({

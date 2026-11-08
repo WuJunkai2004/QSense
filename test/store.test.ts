@@ -128,9 +128,39 @@ test("v9 游标重定基：指向已不存在 rowid 空间的旧水位收敛到�
       ts: Date.now(),
     };
     // 造三个会话：群 A（max=101）、群 B（max=202）、单聊（max=303）
-    repo.saveMessage({ ...base, botId: "B", scope: "group", scopeId: "GA", msgId: "a1", authorOpenid: "u1", text: "x", content: "x", ts: 1 });
-    repo.saveMessage({ ...base, botId: "B", scope: "group", scopeId: "GB", msgId: "b1", authorOpenid: "u1", text: "x", content: "x", ts: 1 });
-    repo.saveMessage({ ...base, botId: "B", scope: "chat", scopeId: "UC", msgId: "c1", authorOpenid: "u1", text: "x", content: "x", ts: 1 });
+    repo.saveMessage({
+      ...base,
+      botId: "B",
+      scope: "group",
+      scopeId: "GA",
+      msgId: "a1",
+      authorOpenid: "u1",
+      text: "x",
+      content: "x",
+      ts: 1,
+    });
+    repo.saveMessage({
+      ...base,
+      botId: "B",
+      scope: "group",
+      scopeId: "GB",
+      msgId: "b1",
+      authorOpenid: "u1",
+      text: "x",
+      content: "x",
+      ts: 1,
+    });
+    repo.saveMessage({
+      ...base,
+      botId: "B",
+      scope: "chat",
+      scopeId: "UC",
+      msgId: "c1",
+      authorOpenid: "u1",
+      text: "x",
+      content: "x",
+      ts: 1,
+    });
 
     // 模拟 v7 时代残留游标：群 A 游标(99000) > 其 max(rowid)（坏——get_new 永远查空）；
     // 群 B 游标在合理区间（1，落后于 max，正常未读语义）；单聊带 c2c: 前缀且超界
@@ -146,7 +176,12 @@ test("v9 游标重定基：指向已不存在 rowid 空间的旧水位收敛到�
     try {
       const db2 = openDatabase(dir2);
       // 只建 kv 与 schema_migrations 骨架，手工灌入「v8 已应用但 v9 未应用」的状态
-      db2.exec(migrations.slice(0, 8).map((m) => m.up).join("\n"));
+      db2.exec(
+        migrations
+          .slice(0, 8)
+          .map((m) => m.up)
+          .join("\n"),
+      );
       db2.exec(
         `CREATE TABLE schema_migrations(
            version INTEGER PRIMARY KEY,
@@ -172,20 +207,22 @@ test("v9 游标重定基：指向已不存在 rowid 空间的旧水位收敛到�
       const cur = db2
         .prepare("SELECT k, v FROM kv WHERE k LIKE 'cursor:%' ORDER BY k")
         .all() as Array<{ k: string; v: string }>;
-      const maxGA = (
-        db2
-          .prepare(
-            "SELECT MAX(rowid) AS m FROM messages WHERE bot_id='B2' AND scope='group' AND scope_id='GA'",
-          )
-          .get() as { m: number | null }
-      ).m ?? 0;
-      const maxUC = (
-        db2
-          .prepare(
-            "SELECT MAX(rowid) AS m FROM messages WHERE bot_id='B2' AND scope='chat' AND scope_id='UC'",
-          )
-          .get() as { m: number | null }
-      ).m ?? 0;
+      const maxGA =
+        (
+          db2
+            .prepare(
+              "SELECT MAX(rowid) AS m FROM messages WHERE bot_id='B2' AND scope='group' AND scope_id='GA'",
+            )
+            .get() as { m: number | null }
+        ).m ?? 0;
+      const maxUC =
+        (
+          db2
+            .prepare(
+              "SELECT MAX(rowid) AS m FROM messages WHERE bot_id='B2' AND scope='chat' AND scope_id='UC'",
+            )
+            .get() as { m: number | null }
+        ).m ?? 0;
       assert.deepEqual(cur, [
         { k: "cursor:B2:GA", v: String(maxGA) },
         { k: "cursor:B2:c2c:UC", v: String(maxUC) },

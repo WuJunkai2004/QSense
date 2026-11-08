@@ -160,7 +160,11 @@ async function setupQrServer(seedAppid?: string): Promise<QrFixture> {
     },
   });
   if (seedAppid !== undefined) {
-    await registry.add({ appid: seedAppid, secret: "already-there", name: "已有" });
+    await registry.add({
+      appid: seedAppid,
+      secret: "already-there",
+      name: "已有",
+    });
   }
   const added: string[] = [];
   const supervisor = {
@@ -195,7 +199,10 @@ async function setupQrServer(seedAppid?: string): Promise<QrFixture> {
 
   const uiDir = join(dir, "fake-ui");
   mkdirSync(join(uiDir, "assets"), { recursive: true });
-  writeFileSync(join(uiDir, "index.html"), "<!doctype html><title>qr-ui</title>");
+  writeFileSync(
+    join(uiDir, "index.html"),
+    "<!doctype html><title>qr-ui</title>",
+  );
   process.env.UI_DIST_DIR = uiDir;
 
   const app = buildServer({
@@ -222,7 +229,12 @@ async function setupQrServer(seedAppid?: string): Promise<QrFixture> {
       await app.close();
       db.close();
       try {
-        rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        rmSync(dir, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
       } catch {
         /* best-effort */
       }
@@ -359,11 +371,14 @@ test("qrbind 集成：上游不可达 → 502 且提示可手动添加", async (
     const addr = app.server.address();
     const port = typeof addr === "object" && addr !== null ? addr.port : 0;
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/ui/api/qr-bind/create`, {
-        method: "POST",
-        headers: auth(),
-        body: "{}",
-      });
+      const res = await fetch(
+        `http://127.0.0.1:${port}/ui/api/qr-bind/create`,
+        {
+          method: "POST",
+          headers: auth(),
+          body: "{}",
+        },
+      );
       assert.equal(res.status, 502);
       const body = (await res.json()) as { error: string };
       assert.match(body.error, /手动方式添加/);
@@ -373,7 +388,12 @@ test("qrbind 集成：上游不可达 → 502 且提示可手动添加", async (
     }
   } finally {
     try {
-      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      rmSync(dir, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 100,
+      });
     } catch {
       /* best-effort */
     }
