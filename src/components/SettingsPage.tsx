@@ -31,6 +31,7 @@ import type {
   SettingsInfo,
   TtsConfigGet,
   TtsConfigPut,
+  TtsFormat,
 } from "../types";
 import AddBotModal from "./AddBotModal";
 
@@ -150,6 +151,7 @@ function TtsSection() {
   const [key, setKey] = useState("");
   const [model, setModel] = useState("");
   const [voice, setVoice] = useState("");
+  const [format, setFormat] = useState<TtsFormat>("wav");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -162,6 +164,7 @@ function TtsSection() {
           setBase(r.base_url);
           setModel(r.model);
           setVoice(r.voice);
+          setFormat(r.format);
         }
       })
       .catch((e) => void message.error(errMsg(e)));
@@ -185,12 +188,14 @@ function TtsSection() {
         api_key: key,
         model,
         voice,
+        format,
       });
       setCfg({
         configured: true,
         base_url: base.trim(),
         model: model.trim(),
         voice: voice.trim(),
+        format,
         api_key_masked: r.api_key_masked,
       });
       setKey("");
@@ -207,7 +212,13 @@ function TtsSection() {
     try {
       const blob = await apiBlob("/tts/test", {
         method: "POST",
-        body: JSON.stringify({ base_url: base, api_key: key, model, voice }),
+        body: JSON.stringify({
+          base_url: base,
+          api_key: key,
+          model,
+          voice,
+          format,
+        }),
       });
       audioRef.current?.pause();
       const url = URL.createObjectURL(blob);
@@ -282,6 +293,23 @@ function TtsSection() {
               style={{ marginTop: 6 }}
             />
           </div>
+        </div>
+        <div className="settings-row">
+          <div>
+            <div className="label">响应格式</div>
+            <div className="desc">
+              视服务商支持情况选择；两者 QQ 语音条均直接受理
+            </div>
+          </div>
+          <Select<TtsFormat>
+            value={format}
+            style={{ width: 200 }}
+            onChange={setFormat}
+            options={[
+              { value: "wav", label: "wav（缺省，兼容面最广）" },
+              { value: "mp3", label: "mp3（体积更小）" },
+            ]}
+          />
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <Button

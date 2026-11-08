@@ -36,6 +36,8 @@ export interface SettingsInfo {
 }
 
 /** GET /ui/api/tts/config：api_key 只回显打码，绝不回原文 */
+export type TtsFormat = "mp3" | "wav";
+
 export type TtsConfigGet =
   | { configured: false }
   | {
@@ -43,6 +45,7 @@ export type TtsConfigGet =
       base_url: string;
       model: string;
       voice: string;
+      format: TtsFormat;
       api_key_masked: string;
     };
 
