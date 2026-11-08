@@ -10,6 +10,8 @@
 // - 输入限长 1000 字符（防 agent 把整篇文章塞进来烧钱），超长可操作拒绝；
 // - 上游不可达/非音频响应 → TtsError（可操作文案，agent 可转述给用户）。
 
+export type TtsFormat = "mp3" | "wav";
+
 export interface TtsConfig {
   /** OpenAI 兼容服务根（到 /v1 这一级，如 https://api.openai.com/v1；不带 /v1 也可，自动补） */
   base_url: string;
@@ -19,6 +21,8 @@ export interface TtsConfig {
   model: string;
   /** 音色名（alloy / … 视服务商） */
   voice: string;
+  /** 响应格式（response_format）：缺省 wav——兼容生态保底格式（真实服务实测存在仅支持 wav 的） */
+  format?: TtsFormat;
 }
 
 export interface TtsDeps {
@@ -42,15 +46,15 @@ export function ttsEndpoint(baseUrl: string): string {
 }
 
 /**
- * 合成语音：POST {base}/audio/speech（OpenAI 兼容），response_format 固定 mp3
- * （官方语音接口支持 mp3，不暴露配置——KISS）。
- * 返回 mp3 字节（已按魔数粗校验：ID3 头或 MPEG 帧同步字）。
+ * 合成语音：POST {base}/audio/speech（OpenAI 兼容），response_format 由配置选择
+ * （wav 缺省——兼容生态保底格式；mp3 体积小）。两者官方语音接口 file_type=3 均直接
+ * 受理（silk/mp3/wav），无需转码。返回音频字节（按所选格式魔数校验）。
  */
 export async function synthesizeSpeech(
   cfg: TtsConfig,
   text: string,
   deps: TtsDeps = {},
-): Promise<{ buf: Buffer; mime: "audio/mpeg" }> {
+): Promise<{ buf: Buffer; mime: "audio/wav" | "audio/mpeg" }> {
   const input = text.trim();
   if (input === "") {
     throw new TtsError("tts: 后没有内容——请提供要合成的话语。");
@@ -60,10 +64,11 @@ export async function synthesizeSpeech(
       `tts: 文本过长（${input.length} > ${TTS_MAX_INPUT} 字符）。请精简或分段合成发送。`,
     );
   }
+  const format: TtsFormat = cfg.format ?? "wav";
   const doFetch = deps.fetchImpl ?? fetch;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    Accept: "audio/mpeg",
+    Accept: format === "wav" ? "audio/wav" : "audio/mpeg",
   };
   if (cfg.api_key !== "") headers.Authorization = `Bearer ${cfg.api_key}`;
   let res: Response;
@@ -75,7 +80,7 @@ export async function synthesizeSpeech(
         model: cfg.model,
         input,
         voice: cfg.voice,
-        response_format: "mp3",
+        response_format: format,
       }),
       signal: AbortSignal.timeout(deps.timeoutMs ?? 30_000),
     });
@@ -89,18 +94,24 @@ export async function synthesizeSpeech(
     const detail = (await res.text().catch(() => "")).slice(0, 200);
     throw new TtsError(
       `TTS 合成失败（HTTP ${res.status}）${detail !== "" ? `：${detail}` : "。"}。` +
-        "请检查 WebUI 设置页的 TTS 配置（model/voice 是否为该服务所支持）。",
+        "请检查 WebUI 设置页的 TTS 配置（model/voice/格式 是否为该服务所支持）。",
     );
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  // 魔数粗校验：ID3v2 头或 MPEG 帧同步字（0xFF Ex）——防上游把 HTML 错误页当音频吐回来
-  const isMp3 =
-    (buf.length >= 3 && buf.subarray(0, 3).toString("latin1") === "ID3") ||
-    (buf.length >= 2 && buf[0] === 0xff && (buf[1]! & 0xe0) === 0xe0);
-  if (!isMp3) {
+  // 魔数校验（按所选格式）——防上游把 JSON/HTML 错误体当音频吐回来：
+  // wav = RIFF…WAVE 头；mp3 = ID3v2 头或 MPEG 帧同步字
+  const latin = (a: number, b: number): string =>
+    buf.subarray(a, b).toString("latin1");
+  const ok =
+    format === "wav"
+      ? buf.length >= 12 && latin(0, 4) === "RIFF" && latin(8, 12) === "WAVE"
+      : buf.length >= 3 &&
+        (latin(0, 3) === "ID3" ||
+          (buf.length >= 2 && buf[0] === 0xff && (buf[1]! & 0xe0) === 0xe0));
+  if (!ok) {
     throw new TtsError(
       "TTS 服务返回的不是音频数据（魔数校验失败）。请检查 base_url 是否指向 OpenAI 兼容接口。",
     );
   }
-  return { buf, mime: "audio/mpeg" };
+  return { buf, mime: format === "wav" ? "audio/wav" : "audio/mpeg" };
 }

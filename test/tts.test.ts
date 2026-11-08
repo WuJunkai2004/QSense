@@ -20,7 +20,7 @@ import { buildServer } from "../src/server/http";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
-import { TtsError, synthesizeSpeech, ttsEndpoint, type TtsDeps } from "../src/tts";
+import { TtsError, synthesizeSpeech, ttsEndpoint } from "../src/tts";
 import { runTool } from "../src/tools/defs";
 
 const BOT = "10001";
@@ -28,6 +28,13 @@ const GROUP = "G1";
 
 /** ID3 头的最小 mp3 假体（魔数校验通过即可） */
 const MP3 = Buffer.concat([Buffer.from("ID3"), Buffer.alloc(16)]);
+/** RIFF/WAVE 头的最小 wav 假体 */
+const WAV = Buffer.concat([
+  Buffer.from("RIFF"),
+  Buffer.alloc(4),
+  Buffer.from("WAVE"),
+  Buffer.alloc(8),
+]);
 
 function fakeTts(
   handler: (url: string, body: Record<string, unknown>, headers: Record<string, string>) => Response,
@@ -46,6 +53,10 @@ function fakeTts(
 
 function okMp3(): Response {
   return new Response(MP3, { status: 200, headers: { "Content-Type": "audio/mpeg" } });
+}
+
+function okWav(): Response {
+  return new Response(WAV, { status: 200, headers: { "Content-Type": "audio/wav" } });
 }
 
 test("tts 单元：endpoint 拼接（补 /v1、不重复、尾斜杠）", () => {
@@ -67,43 +78,63 @@ test("tts 单元：endpoint 拼接（补 /v1、不重复、尾斜杠）", () => 
   );
 });
 
-test("tts 单元：合成成功（请求体/鉴权头/返回字节）与参数拒绝", async () => {
-  const fetchImpl = fakeTts((_url, _body, headers) => {
-    assert.equal(headers.Authorization, "Bearer sk-test");
-    return okMp3();
+test("tts 单元：合成成功（缺省 wav）与显式 format=mp3，参数拒绝", async () => {
+  // 缺省（旧配置无 format 字段）→ response_format=wav，RIFF 魔数校验
+  const fetchWav = fakeTts((_url, _body, headers) => {
+    assert.equal(headers.Accept, "audio/wav");
+    return okWav();
   });
-  const deps: TtsDeps = { fetchImpl };
-  const cfg = {
+  const base = {
     base_url: "https://tts.example.com/v1",
     api_key: "sk-test",
     model: "tts-1",
     voice: "alloy",
   };
-  const { buf, mime } = await synthesizeSpeech(cfg, "  你好呀  ", deps);
-  assert.equal(mime, "audio/mpeg");
-  assert.equal(buf.subarray(0, 3).toString("latin1"), "ID3");
-  const c = fetchImpl.calls[0]!;
-  assert.equal(c.url, "https://tts.example.com/v1/audio/speech");
-  assert.deepEqual(c.body, {
+  const r1 = await synthesizeSpeech(base, "  你好呀  ", { fetchImpl: fetchWav });
+  assert.equal(r1.mime, "audio/wav");
+  assert.equal(r1.buf.subarray(0, 4).toString("latin1"), "RIFF");
+  const c1 = fetchWav.calls[0]!;
+  assert.equal(c1.body.response_format, "wav");
+  assert.deepEqual(c1.body, {
     model: "tts-1",
     input: "你好呀", // trim 过
     voice: "alloy",
-    response_format: "mp3",
+    response_format: "wav",
   });
 
+  // 显式 format=mp3 → ID3 魔数校验
+  const fetchMp3 = fakeTts((_url, _body, headers) => {
+    assert.equal(headers.Accept, "audio/mpeg");
+    return okMp3();
+  });
+  const r2 = await synthesizeSpeech(
+    { ...base, format: "mp3" },
+    "x",
+    { fetchImpl: fetchMp3 },
+  );
+  assert.equal(r2.mime, "audio/mpeg");
+  assert.equal(r2.buf.subarray(0, 3).toString("latin1"), "ID3");
+  assert.equal(fetchMp3.calls[0]!.body.response_format, "mp3");
+
   // api_key 空 = 不带 Authorization 头（自建无鉴权网关）
-  const anon = fakeTts(() => okMp3());
-  await synthesizeSpeech({ ...cfg, api_key: "" }, "x", { fetchImpl: anon });
+  const anon = fakeTts(() => okWav());
+  await synthesizeSpeech({ ...base, api_key: "" }, "x", { fetchImpl: anon });
   assert.equal(anon.calls[0]!.headers.Authorization, undefined);
 
   // 空文本 / 超长
   await assert.rejects(
-    synthesizeSpeech(cfg, "   ", { fetchImpl: anon }),
+    synthesizeSpeech(base, "   ", { fetchImpl: anon }),
     /没有内容/,
   );
   await assert.rejects(
-    synthesizeSpeech(cfg, "长".repeat(1001), { fetchImpl: anon }),
+    synthesizeSpeech(base, "长".repeat(1001), { fetchImpl: anon }),
     /1000/,
+  );
+
+  // 魔数不符（要 wav 却回了 mp3）→ 拒绝
+  await assert.rejects(
+    synthesizeSpeech(base, "hi", { fetchImpl: fakeTts(() => okMp3()) }),
+    /不是音频/,
   );
 });
 
@@ -141,7 +172,10 @@ async function setupHttp(): Promise<HttpFixture> {
   repo.setAdminToken(TOKEN);
   const registry = new BotRegistry({ db });
   await registry.add({ appid: BOT, secret: "s1", name: "tts-bot" });
-  const tts = fakeTts(() => okMp3());
+  // 假上游按请求的 response_format 回对应格式（魔数校验按格式分支，须一致）
+  const tts = fakeTts((_url, body) =>
+    body.response_format === "mp3" ? okMp3() : okWav(),
+  );
   const app = buildServer({
     log: createLogger("error"),
     db,
@@ -204,24 +238,35 @@ test("tts 集成：config 保存/打码回显/空 key 保留旧值；缺字段 4
     const cfg = (await got.json()) as Record<string, unknown>;
     assert.equal(cfg.configured, true);
     assert.equal(cfg.base_url, "https://tts.example.com/v1");
+    assert.equal(cfg.format, "wav"); // 缺省格式
     assert.equal(cfg.api_key_masked, "sk-s…9999"); // 打码，绝不回原文
     assert.ok(!("api_key" in cfg), "响应不得含 api_key 原文");
 
-    // api_key 留空 = 保留已存值；其余字段更新
+    // api_key 留空 = 保留已存值；其余字段（含 format=mp3）更新
     const r2 = await put({
       base_url: "http://127.0.0.1:8000/v1",
       api_key: "",
       model: "fish",
       voice: "wanwan",
+      format: "mp3",
     });
     assert.equal(r2.status, 200);
     const stored = fx.repo.getTtsConfig();
     assert.equal(stored?.api_key, "sk-secret-9999");
     assert.equal(stored?.model, "fish");
+    assert.equal(stored?.format, "mp3");
 
-    // 缺 voice → 400 可操作
+    // 缺 voice → 400 可操作；format 非法 → 400
     const r3 = await put({ base_url: "x", model: "m" });
     assert.equal(r3.status, 400);
+    const r4 = await put({
+      base_url: "x",
+      model: "m",
+      voice: "v",
+      format: "flac",
+    });
+    assert.equal(r4.status, 400);
+    assert.match(((await r4.json()) as { error: string }).error, /format 无效/);
   } finally {
     await fx.close();
   }
@@ -250,13 +295,14 @@ test("tts 集成：test 试听（草稿优先/回退已存/未配置 400/上游 
       voice: "alloy",
     });
 
-    // 全空请求体 → 回退已存配置（断言上游收到 stored-model）
+    // 全空请求体 → 回退已存配置（断言上游收到 stored-model，缺省格式 wav）
     const r1 = await post({});
     assert.equal(r1.status, 200);
-    assert.equal(r1.headers.get("content-type"), "audio/mpeg");
+    assert.equal(r1.headers.get("content-type"), "audio/wav");
     const bytes = Buffer.from(await r1.arrayBuffer());
-    assert.equal(bytes.subarray(0, 3).toString("latin1"), "ID3");
+    assert.equal(bytes.subarray(0, 4).toString("latin1"), "RIFF");
     assert.equal(fx.tts.calls.at(-1)!.body.model, "stored-model");
+    assert.equal(fx.tts.calls.at(-1)!.body.response_format, "wav");
     assert.equal(fx.tts.calls.at(-1)!.body.input, "hi"); // 固定试听词
 
     // 草稿优先：只改 model → 上游收到草稿值，api_key 仍回退已存
@@ -267,6 +313,12 @@ test("tts 集成：test 试听（草稿优先/回退已存/未配置 400/上游 
       (fx.tts.calls.at(-1)!.body as Record<string, string>).voice,
       "alloy",
     );
+
+    // 草稿带 format=mp3 → 上游收到 mp3，content-type 跟随
+    const r3 = await post({ format: "mp3" });
+    assert.equal(r3.status, 200);
+    assert.equal(r3.headers.get("content-type"), "audio/mpeg");
+    assert.equal(fx.tts.calls.at(-1)!.body.response_format, "mp3");
   } finally {
     await fx.close();
   }
@@ -444,7 +496,8 @@ test("tts 工具层：send_media tts: 全链路（合成→语音条上传→发
     fx.repo.setTtsEnabled(BOT, true);
     const fetchImpl = fakeTts((_url, body) => {
       assert.equal(body.input, "今天天气不错");
-      return okMp3();
+      assert.equal(body.response_format, "wav"); // 配置未带 format → 缺省 wav
+      return okWav();
     });
     const ctx = {
       repo: fx.repo,

@@ -15,7 +15,7 @@ import { kvSessionPort } from "../gateway/session-store";
 import type { TokenService } from "../gateway/token";
 import type { Logger } from "../logger";
 import { QrBindError, createQrBindTask, pollQrBind, type QrBindDeps } from "../qrbind";
-import { TtsError, synthesizeSpeech, type TtsDeps } from "../tts";
+import { TtsError, synthesizeSpeech, type TtsDeps, type TtsFormat } from "../tts";
 import type { Sender } from "../sender";
 import type { DB } from "../store/db";
 import type { MsgRow, Repo } from "../store/repo";
@@ -442,6 +442,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           base_url: cfg.base_url,
           model: cfg.model,
           voice: cfg.voice,
+          format: cfg.format ?? "wav",
           api_key_masked: maskKey(cfg.api_key),
         };
       });
@@ -455,16 +456,24 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const model = text("model");
           const voice = text("voice");
           const apiKey = text("api_key");
+          const rawFormat =
+            body.format === undefined ? "wav" : (body.format as string);
           if (base_url === "" || model === "" || voice === "") {
             throw new BotRegistryError(
               "TTS 配置不完整：base_url / model / voice 均必填（api_key 可空 = 服务无鉴权）。",
             );
           }
+          if (rawFormat !== "mp3" && rawFormat !== "wav") {
+            throw new BotRegistryError(
+              'format 无效：只接受 "wav"（缺省，兼容面最广）或 "mp3"。',
+            );
+          }
+          const format: TtsFormat = rawFormat; // 校验已穷举枚举
           // api_key 留空 = 保持已存值（UI 回显是打码文本，无法也不必回传原文）
           const key = apiKey !== "" ? apiKey : (deps.repo.getTtsConfig()?.api_key ?? "");
-          const cfg = { base_url, api_key: key, model, voice };
+          const cfg = { base_url, api_key: key, model, voice, format };
           deps.repo.setTtsConfig(cfg);
-          uiLog.info("tts config via ui", { base_url, model, voice });
+          uiLog.info("tts config via ui", { base_url, model, voice, format });
           return { ok: true, configured: true, api_key_masked: maskKey(key) };
         } catch (e) {
           const m = mapError(uiLog, e);
@@ -473,7 +482,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       });
 
       // 试听（WebUI 测试按钮）：优先用请求体草稿（未保存也能试），缺省字段回退已存配置；
-      // 固定合成 "hi"，返回 mp3 字节由浏览器播放。TTS 上游故障 → 502 + 可操作文案。
+      // 固定合成 "hi"，返回音频字节由浏览器播放。TTS 上游故障 → 502 + 可操作文案。
       plugin.post("/tts/test", async (req, reply) => {
         try {
           const body = (req.body ?? {}) as Record<string, unknown>;
@@ -482,19 +491,30 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             typeof body[k] === "string" && (body[k] as string).trim() !== ""
               ? (body[k] as string).trim()
               : fallback;
+          const rawFormat =
+            typeof body.format === "string" && body.format !== ""
+              ? body.format
+              : (stored?.format ?? "wav");
+          if (rawFormat !== "mp3" && rawFormat !== "wav") {
+            throw new BotRegistryError(
+              'format 无效：只接受 "wav"（缺省，兼容面最广）或 "mp3"。',
+            );
+          }
+          const format: TtsFormat = rawFormat; // 上方校验已穷举枚举
           const cfg = {
             base_url: text("base_url", stored?.base_url ?? ""),
             api_key: text("api_key", stored?.api_key ?? ""),
             model: text("model", stored?.model ?? ""),
             voice: text("voice", stored?.voice ?? ""),
+            format,
           };
           if (cfg.base_url === "" || cfg.model === "" || cfg.voice === "") {
             throw new BotRegistryError(
               "TTS 尚未配置完整：请先填写 base_url / model / voice。",
             );
           }
-          const { buf } = await synthesizeSpeech(cfg, "hi", deps.ttsDeps);
-          reply.type("audio/mpeg").send(buf);
+          const { buf, mime } = await synthesizeSpeech(cfg, "hi", deps.ttsDeps);
+          reply.type(mime).send(buf);
         } catch (e) {
           const m = mapError(uiLog, e);
           reply.code(m.status).send({ error: m.message });

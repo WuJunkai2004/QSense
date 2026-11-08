@@ -523,7 +523,8 @@ export class Repo {
   // 全局服务配置：kv tts:config:v1（OpenAI 兼容 /audio/speech 四字段，JSON）；
   // 每 bot 使用开关：kv tts:<appid>（"enable"/"disable"，无键=关——新 bot 缺省禁用）。
 
-  /** 全局 TTS 配置；null=未配置（send_media tts: 将被可操作拒绝） */
+  /** 全局 TTS 配置；null=未配置（send_media tts: 将被可操作拒绝）。
+   *  format 缺省=旧配置（字段加入前保存的）→ 按 "wav" 处理；非法值视为坏数据。 */
   getTtsConfig(): TtsConfig | null {
     const row = this.kvGetStmt.get(TTS_CONFIG_KEY) as
       { v: string } | undefined;
@@ -537,7 +538,10 @@ export class Repo {
         cfg.model === "" ||
         typeof cfg.voice !== "string" ||
         cfg.voice === "" ||
-        typeof cfg.api_key !== "string"
+        typeof cfg.api_key !== "string" ||
+        (cfg.format !== undefined &&
+          cfg.format !== "mp3" &&
+          cfg.format !== "wav")
       ) {
         return null;
       }
