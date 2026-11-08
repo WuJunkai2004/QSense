@@ -1,6 +1,6 @@
-# qqbot-webui
+# QSense-UI
 
-QQ Bot 网关的 WebUI：**QQ 桌面版风格、智能体视角的客户端**。由 [`qqbot-websocket-mcp`](https://github.com/WuJunkai2004/QSense) 以 git submodule 形式挂载在 `ui/`，并托管于 `http://<host>:<port>/ui`。
+QQ Bot 网关的 WebUI：**QQ 桌面版风格、智能体视角的客户端**。由 [`QSense`](https://github.com/WuJunkai2004/QSense) 以 git submodule 形式挂载在 `ui/`，并托管于 `http://<host>:<port>/ui`。
 
 React 18 + antd 5 + Vite 构建，产物为纯静态文件（`dist/`），由 MCP 服务（Fastify）直接出。
 

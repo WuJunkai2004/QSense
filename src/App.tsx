@@ -1,12 +1,5 @@
 import { useCallback, useEffect, useReducer, useState } from "react";
-import {
-  Badge,
-  Button,
-  Drawer,
-  Spin,
-  Tag,
-  App as AntApp,
-} from "antd";
+import { Badge, Button, Drawer, Spin, Tag, App as AntApp } from "antd";
 import { SettingOutlined } from "@ant-design/icons";
 import {
   clearToken,
@@ -249,9 +242,7 @@ export default function App() {
   const handlePurgeGroup = async (): Promise<void> => {
     if (boot === null || currentBot === null || currentGroup === null) return;
     if (currentGroupItem?.type === "chat") return;
-    await del(
-      `/groups/${en(currentGroup)}?bot=${en(currentBot)}`,
-    );
+    await del(`/groups/${en(currentGroup)}?bot=${en(currentBot)}`);
     setCurrentGroup(null);
     loadGroups();
     void message.success("该群缓存已删除");
@@ -432,10 +423,7 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
         destroyOnClose
       >
-        <SettingsView
-          open={settingsOpen}
-          onChanged={refreshBoot}
-        />
+        <SettingsView open={settingsOpen} onChanged={refreshBoot} />
       </Drawer>
     </div>
   );

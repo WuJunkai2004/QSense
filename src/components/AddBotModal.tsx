@@ -67,9 +67,7 @@ export default function AddBotModal({ open, onClose, onAdded }: Props) {
       onOk={() => void submit()}
       okText={created === null ? "添加" : ""}
       okButtonProps={
-        created === null
-          ? { loading: busy }
-          : { style: { display: "none" } }
+        created === null ? { loading: busy } : { style: { display: "none" } }
       }
       cancelButtonProps={
         created === null ? undefined : { style: { display: "none" } }
@@ -107,10 +105,17 @@ export default function AddBotModal({ open, onClose, onAdded }: Props) {
           <Form.Item name="name" label="备注名（可选）">
             <Input placeholder="缺省使用 AppID" />
           </Form.Item>
-          <Form.Item name="auth_level" label="认证等级" initialValue="uncertified">
+          <Form.Item
+            name="auth_level"
+            label="认证等级"
+            initialValue="uncertified"
+          >
             <Select
               options={[
-                { value: "uncertified", label: "未认证（主动消息 30 条/分钟）" },
+                {
+                  value: "uncertified",
+                  label: "未认证（主动消息 30 条/分钟）",
+                },
                 { value: "certified", label: "已认证（主动消息 60 条/分钟）" },
               ]}
             />

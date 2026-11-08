@@ -66,7 +66,9 @@ export default function SettingsView({ open, onChanged }: Props) {
       setDrafts(
         Object.fromEntries(r.bots.map((b) => [b.appid, b.allow_groups])),
       );
-      void message.success(enabled ? "发送已开启" : "发送已关闭（写操作硬拒绝）");
+      void message.success(
+        enabled ? "发送已开启" : "发送已关闭（写操作硬拒绝）",
+      );
       onChanged();
     } catch (e) {
       void message.error(errMsg(e));
@@ -93,7 +95,10 @@ export default function SettingsView({ open, onChanged }: Props) {
   };
 
   // M9：认证等级按 bot 即时改（主动消息频控预算 30/60 qpm）
-  const saveAuthLevel = async (appid: string, level: AuthLevel): Promise<void> => {
+  const saveAuthLevel = async (
+    appid: string,
+    level: AuthLevel,
+  ): Promise<void> => {
     try {
       const r = await put<SettingsInfo>("/settings", {
         auth_levels: [{ appid, auth_level: level }],
@@ -227,9 +232,7 @@ export default function SettingsView({ open, onChanged }: Props) {
                     style={{ minWidth: 0, flex: 1 }}
                     value={draft}
                     placeholder="粘贴群 openid 后回车；留空 = 该 bot 无可发送群"
-                    onChange={(v) =>
-                      setDrafts((d) => ({ ...d, [b.appid]: v }))
-                    }
+                    onChange={(v) => setDrafts((d) => ({ ...d, [b.appid]: v }))}
                   />
                   <Button
                     type="primary"

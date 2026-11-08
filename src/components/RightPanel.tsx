@@ -178,10 +178,7 @@ export default function RightPanel({
                       locale={{ emptyText: "暂无成员（消息到达后自动积累）" }}
                       renderItem={(m) => (
                         <List.Item style={{ padding: "4px 0" }}>
-                          <div
-                            className="member-row"
-                            style={{ width: "100%" }}
-                          >
+                          <div className="member-row" style={{ width: "100%" }}>
                             <Avatar
                               size={26}
                               style={{ background: "#c9d4e0" }}
