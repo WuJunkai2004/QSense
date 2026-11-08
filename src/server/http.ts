@@ -14,6 +14,7 @@ import { Repo } from "../store/repo";
 import { createMcpHandler } from "../tools/mcp";
 import { registerUiRoutes } from "./ui";
 import type { QrBindDeps } from "../qrbind";
+import type { TtsDeps } from "../tts";
 
 const ASSET_MAX_BYTES = 20 * 1024 * 1024;
 
@@ -35,6 +36,8 @@ export interface ServerDeps {
   assets?: AssetStore;
   /** 扫码绑定上游依赖（透传 UiDeps.qrBind；缺省=直连 q.qq.com），测试注入假端点 */
   qrBind?: QrBindDeps;
+  /** TTS 合成依赖（透传 UiDeps.ttsDeps；缺省=直连），测试注入假端点 */
+  ttsDeps?: TtsDeps;
 }
 
 /** Authorization: Bearer <token> 提取；无效返回 null */
@@ -196,6 +199,7 @@ export function buildServer(deps: ServerDeps) {
       botStatuses: deps.botStatuses,
       sender: deps.sender,
       qrBind: deps.qrBind,
+      ttsDeps: deps.ttsDeps,
     });
   }
 

@@ -249,17 +249,20 @@ test("M7-U3 bootstrap：bots 含来源/网关状态，发送与白名单口径�
         allow_groups: string[];
         gateway: string;
         name: string;
+        tts_enabled?: boolean;
       }>;
     };
     assert.equal(body.version, "0.2.0");
     assert.equal(body.send_enabled, true);
-    // M8：白名单按 bot 落库（bots 表），不再是顶层全局字段；M9：含 auth_level
+    // M8：白名单按 bot 落库（bots 表），不再是顶层全局字段；M9：含 auth_level；
+    // TTS（kv 开关）：bootstrap 带 tts_enabled（缺省 false）
     assert.deepEqual(body.bots, [
       {
         appid: BOT,
         name: "基座",
         allow_groups: [GROUP],
         auth_level: "uncertified",
+        tts_enabled: false,
         gateway: "ready",
       },
     ]);

@@ -12,6 +12,7 @@
 import type { AuthLevel, BotApp } from "../config";
 import type { BotRegistry } from "../bots";
 import type { Sender } from "../sender";
+import { synthesizeSpeech } from "../tts";
 import type { MsgRow, Repo } from "../store/repo";
 import { Buffer } from "node:buffer";
 
@@ -60,6 +61,8 @@ export interface ToolContext {
   supervisor?: { addBot: (app: BotApp) => void };
   /** 资产存储（request_upload 票据签发 / send_media asset: 引用）；缺省=未装配 */
   assets?: import("../assets").AssetStore;
+  /** TTS 合成依赖（fetch 注入，测试用）；缺省=直连 OpenAI 兼容服务 */
+  ttsDeps?: import("../tts").TtsDeps;
   /** 本请求的服务 base URL（http://<Host>，upload_url 拼接用）；缺省=相对路径 */
   baseUrl?: string;
   /** 本请求绑定的 bot 的 agent_token（票据密钥）；缺省=未认证 */
@@ -802,7 +805,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "send_media",
     description:
-      '【真实写操作·默认关闭】向会话发送图片或语音（会话侧别由 id 自动探测；图片支持 GIF 动图；语音 mp3/wav/silk 展示为语音条，≤20MB；视频/文件暂未开放）。通道自动选择：被动窗口内走被动回复（不计额度、免审核），否则走主动消息（官方额度同 send；可能进入人工审核）。text 可选配文（语音配文会以同消息 content 附带）。quote_msg_id 可引用会话内某条消息（客户端显示引用样式）。media 三种来源："asset:<id>"（推荐——本地图片/音频先经 request_upload 上传为服务端资产，参数恒短）；http(s):// 媒体 URL（须公网可访问，.mp3/.wav/.silk 按语音发送）；data:image/...;base64 内联（仅小图兜底，大文件会撑爆模型上下文）。不支持本地路径。门禁同 send（发送总开关 + 群白名单/私聊接收条件）。请勿用相同内容重试——重复提交可能绕过幂等账本造成刷屏。',
+      '【真实写操作·默认关闭】向会话发送图片或语音（会话侧别由 id 自动探测；图片支持 GIF 动图；语音 mp3/wav/silk 展示为语音条，≤20MB；视频/文件暂未开放）。通道自动选择：被动窗口内走被动回复（不计额度、免审核），否则走主动消息（官方额度同 send；可能进入人工审核）。text 可选配文（语音配文会以同消息 content 附带）。quote_msg_id 可引用会话内某条消息（客户端显示引用样式）。media 四种来源："asset:<id>"（推荐——本地图片/音频先经 request_upload 上传为服务端资产，参数恒短）；http(s):// 媒体 URL（须公网可访问，.mp3/.wav/.silk 按语音发送）；data:image/...;base64 内联（仅小图兜底，大文件会撑爆模型上下文）；"tts:<要说的文本>" 服务端合成语音直发（管理员须在 WebUI 设置页配置 TTS 并对本 bot 启用「语音」，≤1000 字符，说人话口语短句效果最佳）。不支持本地路径。门禁同 send（发送总开关 + 群白名单/私聊接收条件）。请勿用相同内容重试——重复提交可能绕过幂等账本造成刷屏。',
     inputSchema: {
       type: "object",
       required: ["id", "media"],
@@ -814,7 +817,7 @@ export const TOOLS: ToolDef[] = [
         media: {
           type: "string",
           description:
-            '媒体来源："asset:<id>"（推荐，request_upload 上传后的服务端资产，图片/音频均可）；http(s):// 媒体 URL（须公网可访问，.mp3/.wav/.silk 扩展名按语音发送，其余按图片）；data:image/png;base64,… 内联（仅小图兜底，音频勿内联）。不支持本地路径。',
+            '媒体来源："asset:<id>"（推荐，request_upload 上传后的服务端资产，图片/音频均可）；http(s):// 媒体 URL（须公网可访问，.mp3/.wav/.silk 扩展名按语音发送，其余按图片）；data:image/png;base64,… 内联（仅小图兜底，音频勿内联）；"tts:<要说的文本>" 服务端合成语音直发（需 WebUI 已配置 TTS 且本 bot 启用语音，≤1000 字符）。不支持本地路径。',
         },
         text: {
           type: "string",
@@ -830,10 +833,36 @@ export const TOOLS: ToolDef[] = [
     handler: async (args, ctx) => {
       const sender = requireSender(ctx);
       const { botId, scopeId, kind } = resolveSession(ctx, args);
+      const mediaParam = str(args, "media", "媒体来源");
+      // tts:<文本>：服务端合成语音直发。双闸门（可操作拒绝）：全局配置存在 + 本 bot 已启用
+      if (mediaParam.startsWith("tts:")) {
+        const cfg = ctx.repo.getTtsConfig();
+        if (cfg === null) {
+          throw new ToolError(
+            "TTS 未配置：请管理员在 WebUI 设置页 → TTS 填写 OpenAI 兼容服务" +
+              "（base_url / api_key / model / voice）后重试，或改用文字/媒体发送。",
+          );
+        }
+        if (!ctx.repo.getTtsEnabled(botId)) {
+          throw new ToolError(
+            `本 bot（${botId}）未启用语音发送：请管理员在 WebUI 设置页 → 机器人 ` +
+              `打开其「语音」开关，或改用文字发送。`,
+          );
+        }
+        const { buf } = await synthesizeSpeech(cfg, mediaParam.slice(4), ctx.ttsDeps);
+        return sender.sendVoiceBytes(
+          botId,
+          scopeId,
+          buf,
+          optStr(args, "text"),
+          optStr(args, "quote_msg_id"),
+          kind,
+        );
+      }
       return sender.sendMediaAuto(
         botId,
         scopeId,
-        str(args, "media", "图片来源"),
+        mediaParam,
         optStr(args, "text"),
         optStr(args, "quote_msg_id"),
         kind,

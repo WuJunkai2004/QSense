@@ -15,6 +15,7 @@ import { kvSessionPort } from "../gateway/session-store";
 import type { TokenService } from "../gateway/token";
 import type { Logger } from "../logger";
 import { QrBindError, createQrBindTask, pollQrBind, type QrBindDeps } from "../qrbind";
+import { TtsError, synthesizeSpeech, type TtsDeps } from "../tts";
 import type { Sender } from "../sender";
 import type { DB } from "../store/db";
 import type { MsgRow, Repo } from "../store/repo";
@@ -34,6 +35,8 @@ export interface UiDeps {
   sender?: Sender;
   /** 扫码绑定上游依赖（fetch/host 注入；缺省=直连 q.qq.com），测试注入假端点 */
   qrBind?: QrBindDeps;
+  /** TTS 合成依赖（fetch 注入；缺省=直连），测试注入假端点 */
+  ttsDeps?: TtsDeps;
 }
 
 const MIME: Record<string, string> = {
@@ -51,13 +54,15 @@ const MIME: Record<string, string> = {
 
 const distDir = (): string => process.env.UI_DIST_DIR?.trim() || "./ui/dist";
 
-/** 统一错误映射：BotRegistryError（含参数类错误）→ 400，QrBindError（上游扫码接口）→ 502，其余 → 500（记日志） */
+/** 统一错误映射：BotRegistryError（含参数类错误）→ 400，QrBindError（上游扫码接口）→ 502，
+ *  TtsError（TTS 上游）→ 502，其余 → 500（记日志） */
 function mapError(
   log: Logger,
   e: unknown,
 ): { status: number; message: string } {
   if (e instanceof BotRegistryError) return { status: 400, message: e.message };
   if (e instanceof QrBindError) return { status: 502, message: e.message };
+  if (e instanceof TtsError) return { status: 502, message: e.message };
   const message = e instanceof Error ? e.message : String(e);
   log.error("ui api error", { reason: message.slice(0, 300) });
   return { status: 500, message: "内部错误，请查看服务日志。" };
@@ -205,6 +210,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               name: a.name,
               allow_groups: registry.allowGroupsOf(a.appid),
               auth_level: registry.authLevelOf(a.appid),
+              tts_enabled: deps.repo.getTtsEnabled(a.appid),
               gateway: st?.state ?? "unknown",
               detail: st?.detail,
             };
@@ -342,6 +348,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           name: a.name,
           allow_groups: registry.allowGroupsOf(a.appid),
           auth_level: registry.authLevelOf(a.appid),
+          tts_enabled: deps.repo.getTtsEnabled(a.appid),
           gateway:
             deps.botStatuses().find((st) => st.botId === a.appid)?.state ??
             "unknown",
@@ -398,7 +405,96 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               });
             }
           }
+          if (Array.isArray(body.tts_enabled)) {
+            for (const item of body.tts_enabled) {
+              const rec = (item ?? {}) as Record<string, unknown>;
+              const appid = typeof rec.appid === "string" ? rec.appid : "";
+              if (
+                registry.get(appid) === undefined ||
+                typeof rec.enabled !== "boolean"
+              ) {
+                throw new BotRegistryError(
+                  "tts_enabled 项无效：需要 { appid, enabled: boolean }，且 appid 已注册。",
+                );
+              }
+              deps.repo.setTtsEnabled(appid, rec.enabled);
+              uiLog.info("tts toggle via ui", { appid, enabled: rec.enabled });
+            }
+          }
           return settingsPayload();
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      // —— TTS（语音合成发送）：全局配置（kv tts:config:v1）+ 每 bot 开关（kv tts:<appid>）——
+      // api_key 明文落库（agent_token 同原则），此处只回显打码、不写日志。
+
+      const maskKey = (k: string): string =>
+        k === "" ? "" : k.length <= 8 ? "••••" : `${k.slice(0, 4)}…${k.slice(-4)}`;
+
+      plugin.get("/tts/config", async () => {
+        const cfg = deps.repo.getTtsConfig();
+        if (cfg === null) return { configured: false };
+        return {
+          configured: true,
+          base_url: cfg.base_url,
+          model: cfg.model,
+          voice: cfg.voice,
+          api_key_masked: maskKey(cfg.api_key),
+        };
+      });
+
+      plugin.put("/tts/config", async (req, reply) => {
+        try {
+          const body = (req.body ?? {}) as Record<string, unknown>;
+          const text = (k: string): string =>
+            typeof body[k] === "string" ? (body[k] as string).trim() : "";
+          const base_url = text("base_url");
+          const model = text("model");
+          const voice = text("voice");
+          const apiKey = text("api_key");
+          if (base_url === "" || model === "" || voice === "") {
+            throw new BotRegistryError(
+              "TTS 配置不完整：base_url / model / voice 均必填（api_key 可空 = 服务无鉴权）。",
+            );
+          }
+          // api_key 留空 = 保持已存值（UI 回显是打码文本，无法也不必回传原文）
+          const key = apiKey !== "" ? apiKey : (deps.repo.getTtsConfig()?.api_key ?? "");
+          const cfg = { base_url, api_key: key, model, voice };
+          deps.repo.setTtsConfig(cfg);
+          uiLog.info("tts config via ui", { base_url, model, voice });
+          return { ok: true, configured: true, api_key_masked: maskKey(key) };
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      // 试听（WebUI 测试按钮）：优先用请求体草稿（未保存也能试），缺省字段回退已存配置；
+      // 固定合成 "hi"，返回 mp3 字节由浏览器播放。TTS 上游故障 → 502 + 可操作文案。
+      plugin.post("/tts/test", async (req, reply) => {
+        try {
+          const body = (req.body ?? {}) as Record<string, unknown>;
+          const stored = deps.repo.getTtsConfig();
+          const text = (k: string, fallback: string): string =>
+            typeof body[k] === "string" && (body[k] as string).trim() !== ""
+              ? (body[k] as string).trim()
+              : fallback;
+          const cfg = {
+            base_url: text("base_url", stored?.base_url ?? ""),
+            api_key: text("api_key", stored?.api_key ?? ""),
+            model: text("model", stored?.model ?? ""),
+            voice: text("voice", stored?.voice ?? ""),
+          };
+          if (cfg.base_url === "" || cfg.model === "" || cfg.voice === "") {
+            throw new BotRegistryError(
+              "TTS 尚未配置完整：请先填写 base_url / model / voice。",
+            );
+          }
+          const { buf } = await synthesizeSpeech(cfg, "hi", deps.ttsDeps);
+          reply.type("audio/mpeg").send(buf);
         } catch (e) {
           const m = mapError(uiLog, e);
           reply.code(m.status).send({ error: m.message });

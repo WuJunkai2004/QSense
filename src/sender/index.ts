@@ -710,6 +710,43 @@ export class Sender {
     } else {
       src = parseMediaSource(mediaParam);
     }
+    return this.doSendMedia(app, botId, targetId, src, text, quoteMsgId, kind);
+  }
+
+  /** TTS 直发入口（send_media 的 "tts:<文本>" 来源）：合成产物（mp3 字节）已在内存，
+   *  即用即弃不落资产区，强制按语音条发送（b64 源默认归类图片，这里显式 override）。 */
+  async sendVoiceBytes(
+    botId: string,
+    targetId: string,
+    buf: Buffer,
+    text?: string,
+    quoteMsgId?: string,
+    kind: "group" | "chat" = "group",
+  ): Promise<SendResult> {
+    const app = this.gate(botId, kind, targetId);
+    return this.doSendMedia(
+      app,
+      botId,
+      targetId,
+      { kind: "b64", data: buf.toString("base64") },
+      text,
+      quoteMsgId,
+      kind,
+      "voice",
+    );
+  }
+
+  /** sendMediaAuto/sendVoiceBytes 共用尾段：通道判定 → 官方转存 → reply/proactive */
+  private async doSendMedia(
+    app: BotApp,
+    botId: string,
+    targetId: string,
+    src: MediaSource,
+    text: string | undefined,
+    quoteMsgId: string | undefined,
+    kind: "group" | "chat",
+    mediaTypeOverride?: MediaKind,
+  ): Promise<SendResult> {
     const { bindMsgId, quote } = this.resolveChannel(
       botId,
       kind,
@@ -718,7 +755,7 @@ export class Sender {
     );
     // 上传转存（官方对同内容返回相同 file_info，TTL 24h；失败不消耗通道额度）。
     // 类别在来源解析后即定：file 源魔数嗅探 / url 源扩展名（audio → file_type=3 语音条）
-    const mediaType = mediaTypeOf(src);
+    const mediaType = mediaTypeOverride ?? mediaTypeOf(src);
     let fileInfo: string;
     try {
       fileInfo = await this.api(app).uploadMedia(

@@ -12,6 +12,7 @@
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { NormalizedMessage, MsgScope } from "../normalize/types";
+import type { TtsConfig } from "../tts";
 import type { DB } from "./db";
 
 type Stmt<P extends unknown[] = unknown[]> = Database.Statement<P>;
@@ -516,6 +517,48 @@ export class Repo {
       { v: string } | undefined;
     if (!row) return null;
     return row.v === "1";
+  }
+
+  // —— TTS（语音合成发送）——
+  // 全局服务配置：kv tts:config:v1（OpenAI 兼容 /audio/speech 四字段，JSON）；
+  // 每 bot 使用开关：kv tts:<appid>（"enable"/"disable"，无键=关——新 bot 缺省禁用）。
+
+  /** 全局 TTS 配置；null=未配置（send_media tts: 将被可操作拒绝） */
+  getTtsConfig(): TtsConfig | null {
+    const row = this.kvGetStmt.get(TTS_CONFIG_KEY) as
+      { v: string } | undefined;
+    if (row === undefined) return null;
+    try {
+      const cfg = JSON.parse(row.v) as Partial<TtsConfig>;
+      if (
+        typeof cfg.base_url !== "string" ||
+        cfg.base_url === "" ||
+        typeof cfg.model !== "string" ||
+        cfg.model === "" ||
+        typeof cfg.voice !== "string" ||
+        cfg.voice === "" ||
+        typeof cfg.api_key !== "string"
+      ) {
+        return null;
+      }
+      return cfg as TtsConfig;
+    } catch {
+      return null; // 坏数据按未配置处理（安全默认）
+    }
+  }
+
+  setTtsConfig(cfg: TtsConfig): void {
+    this.kvSetStmt.run(TTS_CONFIG_KEY, JSON.stringify(cfg));
+  }
+
+  getTtsEnabled(botId: string): boolean {
+    const row = this.kvGetStmt.get(`tts:${botId}`) as
+      { v: string } | undefined;
+    return row?.v === "enable";
+  }
+
+  setTtsEnabled(botId: string, enabled: boolean): void {
+    this.kvSetStmt.run(`tts:${botId}`, enabled ? "enable" : "disable");
   }
 
   listGroups(botId: string): Array<Record<string, unknown>> {
@@ -1129,6 +1172,7 @@ export class Repo {
 
 const SETTINGS_KEY = "settings:runtime:v1";
 const ADMIN_TOKEN_KEY = "admin:token:v1";
+const TTS_CONFIG_KEY = "tts:config:v1";
 
 function newAdminToken(): string {
   // 与 agent_token 同规格（48hex）；生成后仅存 kv，首次生成时打印一次
