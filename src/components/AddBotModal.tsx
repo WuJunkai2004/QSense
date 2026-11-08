@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import {
   Alert,
@@ -29,13 +29,11 @@ type QrPhase = "idle" | "starting" | "waiting" | "expired" | "error";
 
 interface QrState {
   phase: QrPhase;
-  taskId?: string;
   connectUrl?: string;
-  intervalMs: number;
   err?: string;
 }
 
-const QR_IDLE: QrState = { phase: "idle", intervalMs: 2000 };
+const QR_IDLE: QrState = { phase: "idle" };
 
 /** 添加机器人（QQ 登录窗式双栏）：左=手动 appid+AppSecret，右=手机 QQ 扫码绑定。
  *  扫码走 /ui/api/qr-bind/*：bind_key 只在服务端，完成时 AppSecret 在服务端解密并
@@ -47,78 +45,75 @@ export default function AddBotModal({ open, onClose, onAdded }: Props) {
   const [created, setCreated] = useState<AddBotResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [qr, setQr] = useState<QrState>(QR_IDLE);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 重开任务计数：过期/失败的遮罩点击 +1，驱动下方 effect 重新建任务
+  const [qrNonce, setQrNonce] = useState(0);
 
-  const stopPoll = useCallback((): void => {
-    if (timerRef.current !== null) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-  }, []);
-
-  const startQr = useCallback(async (): Promise<void> => {
-    stopPoll();
-    setQr({ phase: "starting", intervalMs: 2000 });
-    try {
-      const r = await post<QrBindCreate>("/qr-bind/create", {});
-      const intervalMs = Math.max((r.interval_s || 2) * 1000, 1000);
-      setQr({
-        phase: "waiting",
-        taskId: r.task_id,
-        connectUrl: r.connect_url,
-        intervalMs,
-      });
-      timerRef.current = setInterval(() => {
-        void (async (): Promise<void> => {
-          if (timerRef.current === null) return;
-          try {
-            const p = await post<QrBindPoll>("/qr-bind/poll", {
-              task_id: r.task_id,
-            });
-            if (p.status === "pending") return;
-            stopPoll();
-            if (p.status === "expired") {
-              setQr((s) => ({ ...s, phase: "expired" }));
-              return;
-            }
-            // created：AppSecret 已在服务端解密并注册完毕，展示一次性 token
-            setQr(QR_IDLE);
-            setCreated({
-              ok: true,
-              bot: p.bot,
-              agent_token: p.agent_token,
-              note: p.note,
-            });
-          } catch (e) {
-            stopPoll();
-            setQr((s) => ({
-              ...s,
-              phase: "error",
-              err: e instanceof Error ? e.message : String(e),
-            }));
-          }
-        })();
-      }, intervalMs);
-    } catch (e) {
-      setQr({
-        phase: "error",
-        intervalMs: 2000,
-        err: e instanceof Error ? e.message : String(e),
-      });
-    }
-  }, [stopPoll]);
-
-  // 弹窗打开即开始扫码任务；关闭即停轮询并复位
+  /** 弹窗打开且未成功 → 建任务 + 定时轮询。create/interval/清理全部收在同一个
+   *  effect 闭包里（清理只随 [open, created, qrNonce] 变化触发）——历史上曾把
+   *  定时器句柄放 useRef、cleanup 挂在含 qr.phase 的依赖上，phase 一变清理就
+   *  把刚建的定时器杀掉，轮询从未真正跑起来（2026-11-08 真机踩坑）。 */
   useEffect(() => {
-    if (open && created === null && qr.phase === "idle") {
-      void startQr();
-    }
-    if (!open) {
-      stopPoll();
+    if (!open || created !== null) {
       setQr(QR_IDLE);
+      return;
     }
-    return stopPoll;
-  }, [open, created, qr.phase, startQr, stopPoll]);
+    let alive = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const clear = (): void => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    void (async (): Promise<void> => {
+      setQr({ phase: "starting" });
+      try {
+        const r = await post<QrBindCreate>("/qr-bind/create", {});
+        if (!alive) return;
+        const intervalMs = Math.max((r.interval_s || 2) * 1000, 1000);
+        setQr({ phase: "waiting", connectUrl: r.connect_url });
+        timer = setInterval(() => {
+          void (async (): Promise<void> => {
+            try {
+              const p = await post<QrBindPoll>("/qr-bind/poll", {
+                task_id: r.task_id,
+              });
+              if (!alive) return;
+              if (p.status === "pending") return;
+              clear();
+              if (p.status === "expired") {
+                setQr({ phase: "expired" });
+                return;
+              }
+              // created：AppSecret 已在服务端解密并注册完毕，展示一次性 token
+              setCreated({
+                ok: true,
+                bot: p.bot,
+                agent_token: p.agent_token,
+                note: p.note,
+              });
+            } catch (e) {
+              clear();
+              setQr({
+                phase: "error",
+                err: e instanceof Error ? e.message : String(e),
+              });
+            }
+          })();
+        }, intervalMs);
+      } catch (e) {
+        if (!alive) return;
+        setQr({
+          phase: "error",
+          err: e instanceof Error ? e.message : String(e),
+        });
+      }
+    })();
+    return () => {
+      alive = false;
+      clear();
+    };
+  }, [open, created, qrNonce]);
 
   const finish = (): void => {
     const appid = created?.bot.appid;
@@ -139,7 +134,6 @@ export default function AddBotModal({ open, onClose, onAdded }: Props) {
     };
     setBusy(true);
     try {
-      stopPoll();
       setCreated(await post<AddBotResult>("/bots", v));
     } catch (e) {
       void message.error(e instanceof Error ? e.message : String(e));
@@ -147,6 +141,10 @@ export default function AddBotModal({ open, onClose, onAdded }: Props) {
       setBusy(false);
     }
   };
+
+  const refreshQr = useCallback((): void => {
+    setQrNonce((n) => n + 1);
+  }, []);
 
   const statusText =
     qr.phase === "starting"
@@ -251,7 +249,7 @@ export default function AddBotModal({ open, onClose, onAdded }: Props) {
                 }`}
                 onClick={() => {
                   if (qr.phase === "expired" || qr.phase === "error")
-                    void startQr();
+                    refreshQr();
                 }}
               >
                 {qr.connectUrl !== undefined ? (
