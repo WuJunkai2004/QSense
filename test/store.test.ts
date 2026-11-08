@@ -56,6 +56,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
       { version: 6, name: "bots-auth-level" },
       { version: 7, name: "msg-idx-column" },
       { version: 8, name: "storage-refactor" },
+      { version: 9, name: "cursor-rebase" },
     ]);
     // 幂等：重跑不报错、不重复记录
     runMigrations(db, migrations);
@@ -65,7 +66,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
           n: number;
         }
       ).n,
-      8,
+      9,
     );
 
     db.close();
@@ -101,10 +102,106 @@ test("追加迁移只执行增量", () => {
       { version: 6 },
       { version: 7 },
       { version: 8 },
+      { version: 9 },
       { version: 99 },
     ]);
     // 新表可用
     db.prepare("INSERT INTO future_t(k) VALUES ('x')").run();
+    db.close();
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("v9 游标重定基：指向已不存在 rowid 空间的旧水位收敛到会话 max(rowid)", () => {
+  const dir = tempDbDir();
+  try {
+    const db = openDatabase(dir);
+    runMigrations(db, migrations);
+    const repo = new Repo(db);
+    const base = {
+      mentions: [],
+      attachments: [],
+      records: [],
+      quote: null,
+      raw: {},
+      ts: Date.now(),
+    };
+    // 造三个会话：群 A（max=101）、群 B（max=202）、单聊（max=303）
+    repo.saveMessage({ ...base, botId: "B", scope: "group", scopeId: "GA", msgId: "a1", authorOpenid: "u1", text: "x", content: "x", ts: 1 });
+    repo.saveMessage({ ...base, botId: "B", scope: "group", scopeId: "GB", msgId: "b1", authorOpenid: "u1", text: "x", content: "x", ts: 1 });
+    repo.saveMessage({ ...base, botId: "B", scope: "chat", scopeId: "UC", msgId: "c1", authorOpenid: "u1", text: "x", content: "x", ts: 1 });
+
+    // 模拟 v7 时代残留游标：群 A 游标(99000) > 其 max(rowid)（坏——get_new 永远查空）；
+    // 群 B 游标在合理区间（1，落后于 max，正常未读语义）；单聊带 c2c: 前缀且超界
+    const seed = db.prepare("INSERT INTO kv(k, v) VALUES (?, ?)");
+    seed.run("cursor:B:GA", "99000");
+    seed.run("cursor:B:GB", "1");
+    seed.run("cursor:B:c2c:UC", "99001");
+    seed.run("cursor:B:GONE", "5"); // 会话已无消息 → 收敛到 0
+
+    // 重跑全部迁移：v9 已应用则不触发；这里直接构造一个全新库走全量迁移路径
+    // （v9 在同一次 runMigrations 里应用的前提是它尚未记录——故用第二个库模拟升级路径）
+    const dir2 = tempDbDir();
+    try {
+      const db2 = openDatabase(dir2);
+      // 只建 kv 与 schema_migrations 骨架，手工灌入「v8 已应用但 v9 未应用」的状态
+      db2.exec(migrations.slice(0, 8).map((m) => m.up).join("\n"));
+      db2.exec(
+        `CREATE TABLE schema_migrations(
+           version INTEGER PRIMARY KEY,
+           name TEXT NOT NULL,
+           applied_at INTEGER
+         )`,
+      );
+      const ins = db2.prepare(
+        "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+      );
+      migrations.slice(0, 8).forEach((m, i) => ins.run(m.version, m.name, i));
+      const kv = db2.prepare("INSERT INTO kv(k, v) VALUES (?, ?)");
+      kv.run("cursor:B2:GA", "99000");
+      kv.run("cursor:B2:c2c:UC", "99001");
+      // 灌两条消息（v8 表结构）：群 A 两行、单聊一行
+      db2.exec(
+        `INSERT INTO messages(bot_id, scope, scope_id, msg_id, ts, text, content, records_count, direction) VALUES
+         ('B2','group','GA','a1',1,'x','x',0,0),
+         ('B2','group','GA','a2',2,'x','x',0,0),
+         ('B2','chat','UC','c1',3,'x','x',0,0)`,
+      );
+      runMigrations(db2, migrations); // 只跑 v9
+      const cur = db2
+        .prepare("SELECT k, v FROM kv WHERE k LIKE 'cursor:%' ORDER BY k")
+        .all() as Array<{ k: string; v: string }>;
+      const maxGA = (
+        db2
+          .prepare(
+            "SELECT MAX(rowid) AS m FROM messages WHERE bot_id='B2' AND scope='group' AND scope_id='GA'",
+          )
+          .get() as { m: number | null }
+      ).m ?? 0;
+      const maxUC = (
+        db2
+          .prepare(
+            "SELECT MAX(rowid) AS m FROM messages WHERE bot_id='B2' AND scope='chat' AND scope_id='UC'",
+          )
+          .get() as { m: number | null }
+      ).m ?? 0;
+      assert.deepEqual(cur, [
+        { k: "cursor:B2:GA", v: String(maxGA) },
+        { k: "cursor:B2:c2c:UC", v: String(maxUC) },
+      ]);
+      assert.ok(maxGA > 0 && maxUC > 0, "会话内确有消息，重定基非平凡");
+      db2.close();
+    } finally {
+      cleanupDir(dir2);
+    }
+
+    // 第一个库再跑一次幂等：v9 不重复改合理游标
+    runMigrations(db, migrations);
+    const cur1 = db
+      .prepare("SELECT k, v FROM kv WHERE k LIKE 'cursor:%' ORDER BY k")
+      .all();
+    assert.ok(cur1.length >= 4);
     db.close();
   } finally {
     cleanupDir(dir);

@@ -501,4 +501,42 @@ export const migrations: Migration[] = [
       db.exec("DROP TABLE c2c_messages_v7");
     },
   },
+  {
+    version: 9,
+    name: "cursor-rebase",
+    // 2026-11-08 真机踩坑：kv 已读水位存的是 messages 表 rowid（get_new 写入 rows[last].rid）。
+    // v7 旧表因官方重推（INSERT OR IGNORE 失败仍消耗 rowid）积累了 rowid 空洞，计数器曾到 7882；
+    // v8 重建 messages 表后 rowid 从 1 连续重排，而 kv 游标值原样保留——旧游标（如 7881/7882）
+    // 大于新表全部 rowid，get_new 永远查空，增量拉取哑火直到 rowid 涨过旧值（真机复现：
+    // E8CD87 群 9 条新消息 get_new 返回空）。
+    // 修复：游标重定基 = 各会话在新表的当前 MAX(rowid)（历史视为已读；水位键名不变，此后增量恢复）。
+    up: "",
+    run: (db: DB): void => {
+      const rows = db
+        .prepare("SELECT k, v FROM kv WHERE k LIKE 'cursor:%'")
+        .all() as Array<{ k: string; v: string }>;
+      const maxStmt = db.prepare(
+        "SELECT MAX(rowid) AS m FROM messages WHERE bot_id = ? AND scope = ? AND scope_id = ?",
+      );
+      const update = db.prepare("UPDATE kv SET v = ? WHERE k = ?");
+      for (const row of rows) {
+        // 键格式：cursor:{botId}:{groupOpenid} | cursor:{botId}:c2c:{userOpenid}
+        const rest = row.k.slice("cursor:".length);
+        const i = rest.indexOf(":");
+        if (i < 0) continue;
+        const botId = rest.slice(0, i);
+        const key = rest.slice(i + 1);
+        const isChat = key.startsWith("c2c:");
+        const scope: MsgScope = isChat ? "chat" : "group";
+        const scopeId = isChat ? key.slice(4) : key;
+        const hit = maxStmt.get(botId, scope, scopeId) as {
+          m: number | null;
+        };
+        const maxRid = hit.m ?? 0;
+        const cur = Number(row.v);
+        if (Number.isFinite(cur) && cur <= maxRid) continue; // 已在合理区间，不动
+        update.run(String(maxRid), row.k);
+      }
+    },
+  },
 ];
