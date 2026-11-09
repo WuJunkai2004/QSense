@@ -269,3 +269,34 @@ test("M8-B9 token 绑定：bot 参数已退役（传了也被忽略）；未绑�
     fx.close();
   }
 });
+
+test("B10 每 bot 开关：接收消息 / MCP 访问缺省开、可独立落库，重启保持；未知 appid 报错", async () => {
+  const fx = setupDb();
+  try {
+    const reg = newRegistry(fx.db);
+    await reg.add(SEED);
+    // 迁移默认值：既有与新建 bot 均开启，升级不改行为
+    assert.equal(reg.receiveEnabledOf(SEED.appid), true);
+    assert.equal(reg.mcpEnabledOf(SEED.appid), true);
+
+    reg.setReceiveEnabled(SEED.appid, false);
+    assert.equal(reg.receiveEnabledOf(SEED.appid), false);
+    assert.equal(reg.mcpEnabledOf(SEED.appid), true); // 两把开关互不影响
+
+    // 重启（新实例）后仍是禁用态
+    const reg2 = newRegistry(fx.db);
+    assert.equal(reg2.receiveEnabledOf(SEED.appid), false);
+    reg2.setMcpEnabled(SEED.appid, false);
+    assert.equal(newRegistry(fx.db).mcpEnabledOf(SEED.appid), false);
+
+    assert.throws(
+      () => reg.setMcpEnabled("99999", false),
+      /不在注册表中/,
+    );
+    // 未知 bot 保守不接入 / 不放行
+    assert.equal(reg.receiveEnabledOf("99999"), false);
+    assert.equal(reg.mcpEnabledOf("99999"), false);
+  } finally {
+    fx.close();
+  }
+});

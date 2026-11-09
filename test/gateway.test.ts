@@ -52,6 +52,7 @@ interface Ctx {
 
 async function setup(
   opts?: ConstructorParameters<typeof MockGateway>[0],
+  behavior?: { receiveEnabled?: boolean },
 ): Promise<Ctx> {
   const dir = mkdtempSync(join(tmpdir(), "qqbot-gw-test-"));
   const db = openDatabase(dir);
@@ -62,6 +63,9 @@ async function setup(
   // M9：无 config 回落——bot 经注册表入表后由 supervisor 连接
   const registry = new BotRegistry({ db });
   await registry.add({ appid: "10001", secret: "secret-value", name: "t" });
+  if (behavior?.receiveEnabled === false) {
+    registry.setReceiveEnabled("10001", false); // 模拟 WebUI 已禁用后再启动
+  }
   const captured: RawEvent[] = [];
   const statuses: GatewayStatus[] = [];
   let clearCount = 0;
@@ -304,6 +308,25 @@ test("M1-7 进程重启（新连接实例 + 同一 kv）→ 直接 RESUME 恢复
       supervisor2.stop();
       await supervisor2.start().catch(() => undefined);
     }
+  } finally {
+    await teardown(ctx);
+  }
+});
+
+test("M1-8 接收开关：启动时跳过禁用 bot；运行中启用 → addBot 接入网关", async () => {
+  const ctx = await setup(undefined, { receiveEnabled: false });
+  try {
+    await sleep(300);
+    assert.equal(ctx.gw.identifies.length, 0, "禁用 bot 不应发起 IDENTIFY");
+    assert.equal(ctx.statuses.length, 0, "禁用 bot 不应产生网关状态");
+
+    // WebUI 启用：落库 + addBot（supervisor 运行时接入）
+    ctx.registry.setReceiveEnabled("10001", true);
+    const app = ctx.registry.get("10001");
+    assert.ok(app);
+    ctx.supervisor.addBot(app);
+    await readyAt(ctx);
+    assert.equal(ctx.gw.identifies.length, 1);
   } finally {
     await teardown(ctx);
   }

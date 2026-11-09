@@ -561,4 +561,16 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 10,
+    name: "bot-toggles",
+    // 每 bot 两把独立开关（WebUI「机器人」栏管理，缺省均开启）：
+    // - receive_enabled=0：停止该 bot 的 WebSocket 接入，不再缓存新消息（注册信息/缓存/token 保留）
+    // - mcp_enabled=0：该 bot 的 agent_token 访问 /mcp 直接 403，工具面不可用
+    // 由于是 ADD COLUMN + DEFAULT 1，既有 bot 升级后行为不变。
+    up: `
+      ALTER TABLE bots ADD COLUMN receive_enabled INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE bots ADD COLUMN mcp_enabled INTEGER NOT NULL DEFAULT 1;
+    `,
+  },
 ];

@@ -79,11 +79,15 @@ export class GatewaySupervisor {
     this.tokens = deps.tokens ?? new TokenService(deps.log.child("token"));
   }
 
-  /** 启动全部 bot 的连接循环；阻塞到 stop()（各 bot abort 后正常返回） */
+  /** 启动全部「接收开启」的 bot 连接循环；阻塞到 stop()（各 bot abort 后正常返回）。
+   *  receive_enabled=0 的 bot 不接入（WebUI 禁用），运行时可经 addBot 重新接入。 */
   start(): Promise<void> {
     if (this.startPromise === null) {
+      const apps = (this.deps.bots?.list() ?? []).filter(
+        (app) => this.deps.bots?.receiveEnabledOf(app.appid) ?? true,
+      );
       this.startPromise = Promise.all(
-        (this.deps.bots?.list() ?? []).map((app) => this.launch(app)),
+        apps.map((app) => this.launch(app)),
       ).then(() => undefined);
     }
     return this.startPromise;

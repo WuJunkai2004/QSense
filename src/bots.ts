@@ -79,6 +79,8 @@ export class BotRegistry {
   private readonly allowGroupsStmt: Stmt<[string]>;
   private readonly agentTokenStmt: Stmt<[string]>;
   private readonly authLevelStmt: Stmt<[string]>;
+  private readonly receiveEnabledStmt: Stmt<[string]>;
+  private readonly mcpEnabledStmt: Stmt<[string]>;
 
   constructor(private readonly deps: BotRegistryDeps) {
     this.verify = deps.verify ?? (async () => {});
@@ -93,6 +95,12 @@ export class BotRegistry {
     );
     this.authLevelStmt = deps.db.prepare(
       "SELECT auth_level FROM bots WHERE appid = ?",
+    );
+    this.receiveEnabledStmt = deps.db.prepare(
+      "SELECT receive_enabled FROM bots WHERE appid = ?",
+    );
+    this.mcpEnabledStmt = deps.db.prepare(
+      "SELECT mcp_enabled FROM bots WHERE appid = ?",
     );
   }
 
@@ -245,6 +253,38 @@ export class BotRegistry {
     const r = this.deps.db
       .prepare("UPDATE bots SET auth_level = ? WHERE appid = ?")
       .run(parseAuthLevel(level), appid);
+    if (r.changes !== 1) {
+      throw new BotRegistryError(`更新失败：appid=${appid} 不在注册表中。`);
+    }
+  }
+
+  /** 是否接收网关消息（WebUI「接收消息」开关；未知 bot 保守返回 false） */
+  receiveEnabledOf(appid: string): boolean {
+    const row = this.receiveEnabledStmt.get(appid) as
+      { receive_enabled: number } | undefined;
+    return row?.receive_enabled === 1;
+  }
+
+  setReceiveEnabled(appid: string, enabled: boolean): void {
+    const r = this.deps.db
+      .prepare("UPDATE bots SET receive_enabled = ? WHERE appid = ?")
+      .run(enabled ? 1 : 0, appid);
+    if (r.changes !== 1) {
+      throw new BotRegistryError(`更新失败：appid=${appid} 不在注册表中。`);
+    }
+  }
+
+  /** 是否允许 MCP 访问（WebUI「MCP 访问」开关；未知 bot 保守返回 false） */
+  mcpEnabledOf(appid: string): boolean {
+    const row = this.mcpEnabledStmt.get(appid) as
+      { mcp_enabled: number } | undefined;
+    return row?.mcp_enabled === 1;
+  }
+
+  setMcpEnabled(appid: string, enabled: boolean): void {
+    const r = this.deps.db
+      .prepare("UPDATE bots SET mcp_enabled = ? WHERE appid = ?")
+      .run(enabled ? 1 : 0, appid);
     if (r.changes !== 1) {
       throw new BotRegistryError(`更新失败：appid=${appid} 不在注册表中。`);
     }

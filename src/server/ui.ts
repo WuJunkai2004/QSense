@@ -211,6 +211,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               allow_groups: registry.allowGroupsOf(a.appid),
               auth_level: registry.authLevelOf(a.appid),
               tts_enabled: deps.repo.getTtsEnabled(a.appid),
+              receive_enabled: registry.receiveEnabledOf(a.appid),
+              mcp_enabled: registry.mcpEnabledOf(a.appid),
               gateway: st?.state ?? "unknown",
               detail: st?.detail,
             };
@@ -349,6 +351,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           allow_groups: registry.allowGroupsOf(a.appid),
           auth_level: registry.authLevelOf(a.appid),
           tts_enabled: deps.repo.getTtsEnabled(a.appid),
+          receive_enabled: registry.receiveEnabledOf(a.appid),
+          mcp_enabled: registry.mcpEnabledOf(a.appid),
           gateway:
             deps.botStatuses().find((st) => st.botId === a.appid)?.state ??
             "unknown",
@@ -419,6 +423,43 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               }
               deps.repo.setTtsEnabled(appid, rec.enabled);
               uiLog.info("tts toggle via ui", { appid, enabled: rec.enabled });
+            }
+          }
+          // 接收消息：落库后即时接入/断开该 bot 的官方网关（缓存与注册保留）
+          if (Array.isArray(body.receive_enabled)) {
+            for (const item of body.receive_enabled) {
+              const rec = (item ?? {}) as Record<string, unknown>;
+              const appid = typeof rec.appid === "string" ? rec.appid : "";
+              const app = registry.get(appid);
+              if (app === undefined || typeof rec.enabled !== "boolean") {
+                throw new BotRegistryError(
+                  "receive_enabled 项无效：需要 { appid, enabled: boolean }，且 appid 已注册。",
+                );
+              }
+              registry.setReceiveEnabled(appid, rec.enabled);
+              if (rec.enabled) supervisor.addBot(app);
+              else supervisor.removeBot(appid);
+              uiLog.info("receive toggle via ui", {
+                appid,
+                enabled: rec.enabled,
+              });
+            }
+          }
+          // MCP 访问：不涉及网关；落库后该 token 的下一次请求即被 /mcp 拒绝
+          if (Array.isArray(body.mcp_enabled)) {
+            for (const item of body.mcp_enabled) {
+              const rec = (item ?? {}) as Record<string, unknown>;
+              const appid = typeof rec.appid === "string" ? rec.appid : "";
+              if (
+                registry.get(appid) === undefined ||
+                typeof rec.enabled !== "boolean"
+              ) {
+                throw new BotRegistryError(
+                  "mcp_enabled 项无效：需要 { appid, enabled: boolean }，且 appid 已注册。",
+                );
+              }
+              registry.setMcpEnabled(appid, rec.enabled);
+              uiLog.info("mcp toggle via ui", { appid, enabled: rec.enabled });
             }
           }
           return settingsPayload();

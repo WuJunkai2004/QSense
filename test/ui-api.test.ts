@@ -51,6 +51,7 @@ interface Fixture {
   api: MockApi & SendApi;
   db: import("../src/store/db").DB;
   repo: Repo;
+  agentToken: string;
   added: string[];
   removed: string[];
   cleared: string[];
@@ -102,6 +103,8 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
     name: "基座",
     allowGroups: [GROUP],
   });
+  // 已有 bot 的 token 反查（MCP 开关测试用）：轮换接口不回显旧值，从域层取当前值
+  const agentToken = registry.agentTokenOf(BOT) ?? "";
 
   const api = makeApiMock();
   const sender = new Sender({
@@ -160,6 +163,7 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
     api,
     db,
     repo,
+    agentToken,
     added,
     removed,
     cleared,
@@ -263,6 +267,8 @@ test("M7-U3 bootstrap：bots 含来源/网关状态，发送与白名单口径�
         allow_groups: [GROUP],
         auth_level: "uncertified",
         tts_enabled: false,
+        receive_enabled: true,
+        mcp_enabled: true,
         gateway: "ready",
       },
     ]);
@@ -496,6 +502,79 @@ test("M7-U12 改备注名：PATCH 即时落库；空名回落 appid；未知 app
     assert.match(
       ((await missing.json()) as { error: string }).error,
       /不在注册表中/,
+    );
+  } finally {
+    await fx.close();
+  }
+});
+
+test("M7-U13 每 bot 开关：接收消息联动网关增删；MCP 关闭后该 token 一律 403", async () => {
+  const fx = await setupServer(false);
+  try {
+    const h = authHeaders({ "Content-Type": "application/json" });
+    const toggle = async (body: unknown): Promise<Response> =>
+      fetch(`${fx.baseUrl}/ui/api/settings`, {
+        method: "PUT",
+        headers: h,
+        body: JSON.stringify(body),
+      });
+    const mcpInit = async (): Promise<Response> =>
+      fetch(`${fx.baseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          Authorization: `Bearer ${fx.agentToken}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "initialize",
+          params: {},
+          id: 1,
+        }),
+      });
+
+    // 缺省两把开关都开
+    const settings = (await (
+      await fetch(`${fx.baseUrl}/ui/api/settings`, { headers: authHeaders() })
+    ).json()) as {
+      bots: Array<{ receive_enabled: boolean; mcp_enabled: boolean }>;
+    };
+    assert.equal(settings.bots[0].receive_enabled, true);
+    assert.equal(settings.bots[0].mcp_enabled, true);
+
+    // 关接收 → 断开该 bot 网关；开接收 → 重新接入
+    const off = await toggle({ receive_enabled: [{ appid: BOT, enabled: false }] });
+    assert.equal(off.status, 200);
+    const offBody = (await off.json()) as {
+      bots: Array<{ receive_enabled: boolean }>;
+    };
+    assert.equal(offBody.bots[0].receive_enabled, false);
+    assert.deepEqual(fx.removed, [BOT]);
+    const on = await toggle({ receive_enabled: [{ appid: BOT, enabled: true }] });
+    assert.equal(on.status, 200);
+    assert.deepEqual(fx.added, [BOT]);
+
+    // 关 MCP → 该 bot 的 agent_token 访问 /mcp 一律 403（不触达 transport）
+    const mcpOff = await toggle({ mcp_enabled: [{ appid: BOT, enabled: false }] });
+    assert.equal(mcpOff.status, 200);
+    const denied = await mcpInit();
+    assert.equal(denied.status, 403);
+    assert.match(
+      ((await denied.json()) as { error: { message: string } }).error.message,
+      /MCP 访问已在 WebUI 设置页禁用/,
+    );
+
+    // 恢复 MCP → 403 闸门解除（后续 400 属 initialize 载荷校验，与本开关无关）
+    await toggle({ mcp_enabled: [{ appid: BOT, enabled: true }] });
+    assert.notEqual((await mcpInit()).status, 403);
+
+    // 未知 appid → 400 可操作错误
+    const bad = await toggle({ receive_enabled: [{ appid: "99999", enabled: false }] });
+    assert.equal(bad.status, 400);
+    assert.match(
+      ((await bad.json()) as { error: string }).error,
+      /appid 已注册/,
     );
   } finally {
     await fx.close();

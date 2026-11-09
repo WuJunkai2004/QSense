@@ -57,6 +57,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
       { version: 7, name: "msg-idx-column" },
       { version: 8, name: "storage-refactor" },
       { version: 9, name: "cursor-rebase" },
+      { version: 10, name: "bot-toggles" },
     ]);
     // 幂等：重跑不报错、不重复记录
     runMigrations(db, migrations);
@@ -66,7 +67,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
           n: number;
         }
       ).n,
-      9,
+      10,
     );
 
     db.close();
@@ -103,6 +104,7 @@ test("追加迁移只执行增量", () => {
       { version: 7 },
       { version: 8 },
       { version: 9 },
+      { version: 10 },
       { version: 99 },
     ]);
     // 新表可用

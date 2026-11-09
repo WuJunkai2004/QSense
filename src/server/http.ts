@@ -119,6 +119,23 @@ export function buildServer(deps: ServerDeps) {
         });
         return;
       }
+      // 每 bot MCP 开关（WebUI「MCP 访问」）：关闭后该 token 的所有请求一律拒绝
+      if (
+        deps.registry !== undefined &&
+        !deps.registry.mcpEnabledOf(botId)
+      ) {
+        reply.code(403).send({
+          jsonrpc: "2.0",
+          error: {
+            code: -32003,
+            message:
+              `Forbidden：bot ${botId} 的 MCP 访问已在 WebUI 设置页禁用（「机器人」栏 → MCP 访问）。` +
+              "请先在设置页启用，或联系管理员。",
+          },
+          id: null,
+        });
+        return;
+      }
       reply.hijack(); // 响应由 SDK transport 直接写原生 res
       await handleMcp(req.raw, reply.raw, req.body, botId);
     },
