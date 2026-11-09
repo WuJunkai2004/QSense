@@ -11,6 +11,10 @@ export interface BotInfo {
   auth_level: AuthLevel;
   /** TTS 语音发送开关（kv tts:<appid>，缺省关）；send_media "tts:" 来源的使用闸门之一 */
   tts_enabled: boolean;
+  /** 接收官方网关消息（false=停止接入，不再缓存新消息；注册与缓存保留） */
+  receive_enabled: boolean;
+  /** 允许该 bot 的 agent_token 访问 /mcp（false=一律 403） */
+  mcp_enabled: boolean;
   gateway: "ready" | "resumed" | "disconnected" | "fatal" | "unknown";
   detail?: string;
 }
@@ -31,6 +35,8 @@ export interface SettingsInfo {
     allow_groups: string[];
     auth_level: AuthLevel;
     tts_enabled: boolean;
+    receive_enabled: boolean;
+    mcp_enabled: boolean;
     gateway: string;
   }>;
 }

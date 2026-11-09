@@ -360,6 +360,8 @@ export default function SettingsPage({ boot, onClose, onChanged }: Props) {
   // 轮换结果：新 token 仅本次返回，弹窗强制确认后才消失
   const [fresh, setFresh] = useState<AgentTokenResult | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  // 机器人栏选中项：null 时回落为第一个 bot（移除当前项后自动切换）
+  const [botSel, setBotSel] = useState<string | null>(null);
 
   const load = useCallback((): void => {
     get<SettingsInfo>("/settings")
@@ -442,6 +444,44 @@ export default function SettingsPage({ boot, onClose, onChanged }: Props) {
       applyInfo(r);
       void message.success(
         enabled ? "语音发送已开启（该 bot）" : "语音发送已关闭（该 bot）",
+      );
+    } catch (e) {
+      void message.error(errMsg(e));
+    }
+  };
+
+  // 接收消息（官方网关接入）：关闭即断开 WS，不再缓存新消息；注册与缓存保留
+  const toggleReceive = async (
+    appid: string,
+    enabled: boolean,
+  ): Promise<void> => {
+    try {
+      const r = await put<SettingsInfo>("/settings", {
+        receive_enabled: [{ appid, enabled }],
+      });
+      applyInfo(r);
+      void message.success(
+        enabled
+          ? "已启用：正在重新接入官方网关"
+          : "已禁用：该 bot 不再接收新消息（缓存与配置保留）",
+      );
+      onChanged();
+    } catch (e) {
+      void message.error(errMsg(e));
+    }
+  };
+
+  // MCP 访问：关闭后该 bot 的 agent_token 访问 /mcp 一律 403（已建会话下次请求即失效）
+  const toggleMcp = async (appid: string, enabled: boolean): Promise<void> => {
+    try {
+      const r = await put<SettingsInfo>("/settings", {
+        mcp_enabled: [{ appid, enabled }],
+      });
+      applyInfo(r);
+      void message.success(
+        enabled
+          ? "MCP 访问已开启"
+          : "MCP 访问已关闭：该 bot 的 agent_token 将被拒绝",
       );
     } catch (e) {
       void message.error(errMsg(e));
@@ -552,6 +592,11 @@ export default function SettingsPage({ boot, onClose, onChanged }: Props) {
     });
   };
 
+  // 机器人栏只渲染选中项：选择器选项来自 info（含 tts_enabled 等落库后口径）
+  const botList = info?.bots ?? [];
+  const activeBot =
+    botList.find((b) => b.appid === botSel) ?? botList[0] ?? null;
+
   return (
     <div className="settings-page">
       <aside className="settings-side">
@@ -609,8 +654,8 @@ export default function SettingsPage({ boot, onClose, onChanged }: Props) {
                   <div className="label">
                     {b.name} 网关状态
                   </div>
-                  <Tag color={GATEWAY_COLOR[b.gateway] ?? "default"}>
-                    {b.gateway}
+                  <Tag color={b.receive_enabled ? (GATEWAY_COLOR[b.gateway] ?? "default") : "default"}>
+                    {b.receive_enabled ? b.gateway : "接收已禁用"}
                   </Tag>
                 </div>
               ))}
@@ -639,105 +684,163 @@ export default function SettingsPage({ boot, onClose, onChanged }: Props) {
             </div>
             {info === null ? (
               <Spin />
+            ) : activeBot === null ? (
+              <div className="settings-card">
+                <Typography.Text type="secondary">
+                  暂无机器人，点击右上角「添加机器人」接入
+                </Typography.Text>
+              </div>
             ) : (
-              info.bots.map((b) => {
-                const draft = drafts[b.appid] ?? [];
-                const dirty =
-                  JSON.stringify(draft) !== JSON.stringify(b.allow_groups);
-                return (
-                  <div className="settings-card" key={b.appid}>
-                    <div className="settings-row">
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span className="label">{b.name}</span>
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<EditOutlined />}
-                          onClick={() => {
-                            setRenameTarget(b);
-                            setRenameValue(b.name);
-                          }}
-                          title="改备注名"
-                        />
-                        <Typography.Text code type="secondary">
-                          {b.appid}
-                        </Typography.Text>
-                        <Tag color={GATEWAY_COLOR[b.gateway] ?? "default"}>
-                          {b.gateway}
-                        </Tag>
+              <>
+                <div className="settings-card">
+                  <div className="settings-row">
+                    <div>
+                      <div className="label">选择机器人</div>
+                      <div className="desc">
+                        逐个配置语音发送、认证等级、群白名单与接入凭证
                       </div>
                     </div>
-                    <div className="settings-row">
-                      <div>
-                        <div className="label">语音发送（TTS）</div>
-                        <div className="desc">
-                          允许 send_media 的 &quot;tts:&quot; 合成语音；需先在「TTS
-                          语音」栏完成全局配置
-                        </div>
-                      </div>
-                      <Switch
-                        checked={b.tts_enabled}
-                        onChange={(v) => void toggleTts(b.appid, v)}
-                      />
-                    </div>
-                    <div className="settings-row">
-                      <div>
-                        <div className="label">认证等级</div>
-                        <div className="desc">主动消息频控预算</div>
-                      </div>
-                      <Select<AuthLevel>
-                        value={b.auth_level}
-                        style={{ width: 200 }}
-                        onChange={(v) => void saveAuthLevel(b.appid, v)}
-                        options={[
-                          {
-                            value: "uncertified",
-                            label: "未认证（30 条/分钟）",
-                          },
-                          {
-                            value: "certified",
-                            label: "已认证（60 条/分钟）",
-                          },
-                        ]}
-                      />
-                    </div>
-                    <div className="settings-row">
-                      <GroupWhitelist
-                        appid={b.appid}
-                        draft={draft}
-                        dirty={dirty}
-                        saving={savingKey === b.appid}
-                        onChange={(v) =>
-                          setDrafts((d) => ({ ...d, [b.appid]: v }))
-                        }
-                        onSave={() => void saveGroups(b.appid)}
-                      />
-                    </div>
-                    <div className="settings-row">
-                      <div>
-                        <div className="label">agent token</div>
-                        <div className="desc">
-                          MCP 客户端（如 OpenCode）的接入凭证
-                        </div>
-                      </div>
-                      <Button danger onClick={() => rotate(b.appid, b.name)}>
-                        轮换 token
-                      </Button>
-                    </div>
-                    <div className="settings-row">
-                      <div>
-                        <div className="label">移除机器人</div>
-                        <div className="desc">
-                          断开网关并清除登录态；缓存数据保留
-                        </div>
-                      </div>
-                      <Button danger onClick={() => removeBot(b)}>
-                        移除
-                      </Button>
-                    </div>
+                    <Select
+                      style={{ width: 260 }}
+                      value={activeBot.appid}
+                      onChange={setBotSel}
+                      options={botList.map((b) => ({
+                        value: b.appid,
+                        label: `${b.name}（${b.appid}）`,
+                      }))}
+                    />
                   </div>
-                );
-              })
+                </div>
+                {(() => {
+                  const b = activeBot;
+                  const draft = drafts[b.appid] ?? [];
+                  const dirty =
+                    JSON.stringify(draft) !== JSON.stringify(b.allow_groups);
+                  return (
+                    <div className="settings-card" key={b.appid}>
+                      <div className="settings-row">
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span className="label">{b.name}</span>
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<EditOutlined />}
+                            onClick={() => {
+                              setRenameTarget(b);
+                              setRenameValue(b.name);
+                            }}
+                            title="改备注名"
+                          />
+                          <Typography.Text code type="secondary">
+                            {b.appid}
+                          </Typography.Text>
+                          {b.receive_enabled ? (
+                            <Tag color={GATEWAY_COLOR[b.gateway] ?? "default"}>
+                              {b.gateway}
+                            </Tag>
+                          ) : (
+                            <Tag>接收已禁用</Tag>
+                          )}
+                        </div>
+                      </div>
+                      <div className="settings-row">
+                        <div>
+                          <div className="label">接收消息（网关）</div>
+                          <div className="desc">
+                            关闭后断开官方 WebSocket，不再缓存新消息；配置、缓存与
+                            token 保留
+                          </div>
+                        </div>
+                        <Switch
+                          checked={b.receive_enabled}
+                          onChange={(v) => void toggleReceive(b.appid, v)}
+                        />
+                      </div>
+                      <div className="settings-row">
+                        <div>
+                          <div className="label">MCP 访问</div>
+                          <div className="desc">
+                            关闭后该 bot 的 agent_token 访问 /mcp 一律拒绝（403），
+                            已接入客户端下次请求即失效
+                          </div>
+                        </div>
+                        <Switch
+                          checked={b.mcp_enabled}
+                          onChange={(v) => void toggleMcp(b.appid, v)}
+                        />
+                      </div>
+                      <div className="settings-row">
+                        <div>
+                          <div className="label">语音发送（TTS）</div>
+                          <div className="desc">
+                            允许 send_media 的 &quot;tts:&quot; 合成语音；需先在「TTS
+                            语音」栏完成全局配置
+                          </div>
+                        </div>
+                        <Switch
+                          checked={b.tts_enabled}
+                          onChange={(v) => void toggleTts(b.appid, v)}
+                        />
+                      </div>
+                      <div className="settings-row">
+                        <div>
+                          <div className="label">认证等级</div>
+                          <div className="desc">主动消息频控预算</div>
+                        </div>
+                        <Select<AuthLevel>
+                          value={b.auth_level}
+                          style={{ width: 200 }}
+                          onChange={(v) => void saveAuthLevel(b.appid, v)}
+                          options={[
+                            {
+                              value: "uncertified",
+                              label: "未认证（30 条/分钟）",
+                            },
+                            {
+                              value: "certified",
+                              label: "已认证（60 条/分钟）",
+                            },
+                          ]}
+                        />
+                      </div>
+                      <div className="settings-row">
+                        <GroupWhitelist
+                          appid={b.appid}
+                          draft={draft}
+                          dirty={dirty}
+                          saving={savingKey === b.appid}
+                          onChange={(v) =>
+                            setDrafts((d) => ({ ...d, [b.appid]: v }))
+                          }
+                          onSave={() => void saveGroups(b.appid)}
+                        />
+                      </div>
+                      <div className="settings-row">
+                        <div>
+                          <div className="label">agent token</div>
+                          <div className="desc">
+                            MCP 客户端（如 OpenCode）的接入凭证
+                          </div>
+                        </div>
+                        <Button danger onClick={() => rotate(b.appid, b.name)}>
+                          轮换 token
+                        </Button>
+                      </div>
+                      <div className="settings-row">
+                        <div>
+                          <div className="label">移除机器人</div>
+                          <div className="desc">
+                            断开网关并清除登录态；缓存数据保留
+                          </div>
+                        </div>
+                        <Button danger onClick={() => removeBot(b)}>
+                          移除
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </>
             )}
           </>
         )}
