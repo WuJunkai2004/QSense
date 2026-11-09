@@ -19,6 +19,7 @@ ExecStart=/usr/bin/node dist/index.js
 Restart=on-failure
 RestartSec=5
 # 日志进 journald：journalctl -u qqbot-websocket-mcp -f
+# 采集端建议在 .env 设 LOG_FORMAT=json（JSON 行）；缺省 pretty 为人类可读格式
 # 加固：只读系统 + 仅 data 目录可写 + 私有 tmp
 NoNewPrivileges=true
 ProtectSystem=strict

@@ -31,7 +31,9 @@ async function main(): Promise<void> {
     process.stderr.write((e instanceof Error ? e.message : String(e)) + "\n");
     process.exit(1);
   }
-  const log = createLogger(config.logLevel).child("main");
+  const log = createLogger(config.logLevel, "main", config.logFormat).child(
+    "main",
+  );
 
   const db = openDatabase(config.dataDir);
   runMigrations(db, migrations);

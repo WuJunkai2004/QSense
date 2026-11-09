@@ -2,7 +2,7 @@
 // 环境变量清单见 .env.example；配置只在启动时读取一次。
 
 import { existsSync, readFileSync } from "node:fs";
-import type { Level } from "./logger";
+import type { Level, LogFormat } from "./logger";
 import { levelFromEnv } from "./logger";
 import { t } from "./i18n";
 
@@ -23,6 +23,7 @@ export interface Config {
   dataDir: string;
   logContent: boolean;
   logLevel: Level;
+  logFormat: LogFormat;
 }
 
 /** 读取 .env（不覆盖已存在的进程环境变量）；零依赖轻实现，仅需 KEY=VALUE 语法。 */
@@ -61,6 +62,13 @@ function parseBool(
   throw new Error(t("cfg_bad_bool", { key, value: raw }));
 }
 
+function parseLogFormat(raw: string | undefined): LogFormat {
+  if (raw === undefined || raw.trim() === "") return "pretty";
+  const v = raw.trim().toLowerCase();
+  if (v === "pretty" || v === "json") return v;
+  throw new Error(t("cfg_bad_log_format", { value: raw }));
+}
+
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
 ): Config {
@@ -86,5 +94,6 @@ export function loadConfig(
     dataDir: env.DATA_DIR?.trim() || "./data",
     logContent: parseBool(env, "LOG_CONTENT", false),
     logLevel: levelFromEnv(env.LOG_LEVEL),
+    logFormat: parseLogFormat(env.LOG_FORMAT),
   };
 }

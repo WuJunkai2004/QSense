@@ -6,6 +6,8 @@ const zh = {
   // —— 配置校验 ——
   cfg_bad_bool: "配置无效：{key}={value}，只接受 true / false。",
   cfg_bad_port: "配置无效：PORT={value}，必须是 1-65535 的整数。",
+  cfg_bad_log_format:
+    "配置无效：LOG_FORMAT={value}，只接受 pretty（人类可读，缺省）或 json（JSON 行，供采集端解析）。",
   // —— 启动 ——
   boot_db_fail:
     "数据库初始化失败：{path}（{reason}）。检查 DATA_DIR 是否存在且可写。",
@@ -91,6 +93,8 @@ type Translation = Record<keyof typeof zh, string>;
 const en: Translation = {
   cfg_bad_bool: "Invalid config: {key}={value}, only true / false accepted.",
   cfg_bad_port: "Invalid config: PORT={value}, must be an integer in 1-65535.",
+  cfg_bad_log_format:
+    "Invalid config: LOG_FORMAT={value}, only pretty (default) or json is accepted.",
   boot_db_fail:
     "Database init failed: {path} ({reason}). Check DATA_DIR exists and is writable.",
   boot_listen_fail:

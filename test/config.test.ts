@@ -56,3 +56,13 @@ test("非法布尔值与端口拒绝", () => {
 test("LOG_CONTENT=true 生效", () => {
   assert.equal(loadConfig({ LOG_CONTENT: "true" }).logContent, true);
 });
+
+test("LOG_FORMAT：缺省 pretty；json 可选；非法值拒绝", () => {
+  assert.equal(loadConfig({}).logFormat, "pretty");
+  assert.equal(loadConfig({ LOG_FORMAT: "json" }).logFormat, "json");
+  assert.equal(loadConfig({ LOG_FORMAT: " PRETTY " }).logFormat, "pretty");
+  assert.throws(
+    () => loadConfig({ LOG_FORMAT: "xml" }),
+    (e: Error) => e.message.includes("LOG_FORMAT"),
+  );
+});

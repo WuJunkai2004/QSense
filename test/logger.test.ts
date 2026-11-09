@@ -27,7 +27,7 @@ test("redact：敏感键替换为 [REDACTED]，含嵌套对象与数组", () => 
   assert.equal((out.list as Array<{ fine?: string }>)[1].fine, "y");
 });
 
-test("日志输出为 JSON 行且默认不含 debug；child 保留模块前缀", () => {
+test("pretty（缺省）：loguru 风格行、级别过滤、敏感字段剥离", () => {
   const lines: string[] = [];
   const origWrite = process.stdout.write.bind(process.stdout);
   process.stdout.write = ((chunk: unknown) => {
@@ -44,7 +44,33 @@ test("日志输出为 JSON 行且默认不含 debug；child 保留模块前缀",
   }
 
   assert.equal(lines.length, 1);
+  // 去 ANSI 后断言纯文本形状（颜色开关随运行环境 TTY 变化，不参与断言）
+  const plain = lines[0].replace(/\x1b\[[0-9;]*m/g, "").replace(/\n$/, "");
+  assert.match(
+    plain,
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \| INFO {2}\| main:unit - visible content=\[REDACTED\] ok=1$/,
+  );
+  assert.ok(!plain.includes("不得出现"));
+});
+
+test("json 格式（LOG_FORMAT=json）：结构化 JSON 行，采集端可解析", () => {
+  const lines: string[] = [];
+  const origWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: unknown) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    const log = createLogger("info", "main", "json").child("unit");
+    log.info("visible", { content: "不得出现", ok: 1 });
+  } finally {
+    process.stdout.write = origWrite;
+  }
+
+  assert.equal(lines.length, 1);
   const parsed = JSON.parse(lines[0]) as {
+    t: string;
     level: string;
     mod: string;
     msg: string;
