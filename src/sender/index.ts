@@ -1,24 +1,30 @@
-// 发送器（DESIGN.md §3.5）：被动窗口管理、msg_seq 幂等账本、主动消息令牌桶与额度记账、
-// 官方错误码翻译、Markdown 无权限自动降级、人工审核（304023/304024）pending 标记。
+// 发送器·策略半（DESIGN.md §3.5，P1 收口后）：被动窗口管理、msg_seq 幂等账本、
+// 通道自动路由（被动优先）、双重门禁、Markdown 无权限自动降级、人工审核
+// （304023/304024）pending 标记、官方错误码翻译、自发消息补记。
+//
+// 传输经 net.* 原语（ConnectorNet）：宿主装配时按 bot 绑定各平台 connector 实例
+// （QQ=connector-qq 的 reply/proactive/recall/uploadMedia，线格式组装在连接器侧）。
+// 额度门禁/记账经平台插件钩子（QQ=令牌桶+日额度，见 connector-qq/quota）；
+// 未装配钩子的平台视为无额度语义，直接放行。
 //
 // 硬约束（AGENTS.md #4）：写操作默认关闭——所有入口先过双重门禁
-// （SEND_ENABLE=true 且目标群在 ALLOW_GROUPS 白名单），否则硬拒绝，API 一个包都不发。
-// 发送通道仅官方 API（SDK MessageApi.sendRaw / recallMessage）；msg_seq 由本项目账本权威分配，
-// 不用 SDK 内置计数器（进程重启即丢，不满足幂等要求）。
+// （发送总开关且目标群在该 bot 白名单），否则硬拒绝，一个包都不发。
 
 import { createHash } from "node:crypto";
-import {
-  ApiClient,
-  MediaApi,
-  MediaFileType,
-  MessageApi,
-  type TokenManager,
-} from "@tencent-connect/qqbot-nodejs/protocol";
-import type { BotApp } from "../config";
+import type {
+  ConnectorNet,
+  MediaWire,
+  PlatformCaps,
+  ProactiveVerdict,
+  ProactiveWire,
+  RecallWire,
+  ReplyWire,
+  UploadMediaWire,
+} from "@qsense/connector-sdk";
 import type { BotRegistry } from "../bots";
 import { sniffPathMime } from "../assets";
 import { t } from "../i18n";
-import type { Logger } from "../logger";
+import type { Logger } from "../utils/logger";
 import type { DB } from "../store/db";
 import type { Repo } from "../store/repo";
 import {
@@ -34,23 +40,13 @@ export const PASSIVE_WINDOW = {
   c2c: { ms: 60 * 60_000, max: 4 },
 } as const;
 
-/** 工具面会话类型（group/chat）→ 官方 API scope（group/c2c）：两套词汇在发送边界转换 */
-function scopeOf(kind: "group" | "chat"): "group" | "c2c" {
+/** 被动窗口查表键（工具面会话类型 → 官方 scope 词汇）；wire 的 scope 字段直接传 kind */
+function windowKeyOf(kind: "group" | "chat"): "group" | "c2c" {
   return kind === "chat" ? "c2c" : "group";
 }
 
-/** 官方限制常量：单关系（每群）主动消息 20 条/分钟、1000 条/天 */
-export const PER_RELATION_QPM = 20;
-export const PER_GROUP_DAILY = 1000;
 /** 消息内容官方上限 5000 字符 */
 export const MAX_CONTENT_LEN = 5000;
-
-export interface SendLimits {
-  /** bot 级主动消息条/分钟：认证 60 / 未认证 30（config.authLevel 决定默认值） */
-  qpm: number;
-  perRelationQpm: number;
-  perGroupDaily: number;
-}
 
 export type SendStatus = "sent" | "replayed" | "downgraded" | "pending_audit";
 
@@ -66,40 +62,20 @@ export interface SendResult {
   detail?: string;
 }
 
-/** 富媒体类别（本项目域层词汇，生产适配映射到 SDK MediaFileType）：
- * image=图片(file_type=1)；voice=语音(file_type=3，silk/mp3/wav，客户端展示语音条) */
+/** 富媒体类别（本项目域层词汇）：image=图片(file_type=1)；voice=语音(file_type=3) */
 export type MediaKind = "image" | "voice";
 
-/** 发送 API 最小接口（生产=SDK MessageApi/MediaApi 适配；测试=记录调用的 mock） */
-export interface SendApi {
-  sendRaw(
-    scope: "group" | "c2c",
-    targetId: string,
-    creds: { appId: string; clientSecret: string },
-    body: Record<string, unknown>,
-  ): Promise<{ id: string }>;
-  recallMessage(
-    scope: "group" | "c2c",
-    targetId: string,
-    messageId: string,
-    creds: { appId: string; clientSecret: string },
-  ): Promise<void>;
-  /** 富媒体上传，返回官方 file_info（TTL 24h，可复用）；mediaType 决定官方 file_type */
-  uploadMedia(
-    scope: "group" | "c2c",
-    targetId: string,
-    creds: { appId: string; clientSecret: string },
-    src: MediaSource,
-    mediaType: MediaKind,
-  ): Promise<string>;
-}
-
 /** 富媒体来源（传输自足：MCP 服务可能与智能体不同机，不收智能体侧本地路径；
- * "file" 为服务端资产（DATA_DIR/assets，经 request_upload 票据上传），跨机安全） */
-export type MediaSource =
-  | { kind: "url"; url: string }
-  | { kind: "b64"; data: string }
-  | { kind: "file"; path: string };
+ * "file" 为服务端资产（DATA_DIR/assets，经 request_upload 票据上传），跨机安全）
+ * （与 SDK MediaSourceWire 同形；P1 保留本名以稳测试导入） */
+export type MediaSource = import("@qsense/connector-sdk").MediaSourceWire;
+
+/** 回复/主动共用的媒体载荷：handle=官方转存句柄（file_info），label=补记占位符标签 */
+export interface OutgoingMedia {
+  kind: MediaKind;
+  handle: string;
+  label: string;
+}
 
 /** 来源 → 富媒体类别：
  * file 源按魔数嗅探（audio/* → 语音，图片魔数/未知 → 图片）；b64 仅 data:image/* → 图片；
@@ -130,141 +106,87 @@ export function parseMediaSource(media: string): MediaSource {
   throw new Error(t("media_source_invalid"));
 }
 
+/** 平台策略钩子（宿主按 bot 绑定后注入；与 ConnectorHooks 的差别是免 ctx 参数） */
+export interface BoundConnectorHooks {
+  proactiveGate?(botId: string, target: string): Promise<ProactiveVerdict>;
+  proactiveRecord?(botId: string, target: string): void | Promise<void>;
+}
+
 export interface SenderDeps {
   log: Logger;
-  db: DB;
+  /** 历史遗留字段（旧测试仍在传）；P1 后策略半不再直连 DB */
+  db?: DB;
   repo: Repo;
-  /** SDK TokenManager（与网关共用同一实例，token 缓存复用） */
-  tokenManager: TokenManager;
-  /** 机器人注册表（bots 表域层）：bot 查找、白名单、认证等级频控档位 */
+  /** 机器人注册表（bots 表域层）：bot 查找、白名单、认证等级展示 */
   bots?: BotRegistry;
-  /** 测试注入：覆盖限额默认值 */
-  limits?: Partial<SendLimits>;
-  /** 测试注入：替换真实 MessageApi/MediaApi */
-  apiFor?: (app: BotApp) => SendApi;
+  /** 传输原语按 bot 解析（宿主运行时装配；测试注入 mock）；缺省=写路径硬拒绝 */
+  transportFor?: (botId: string) => ConnectorNet | undefined;
+  /**
+   * 平台 caps 按 bot 解析（P3.5 caps 感知路由）：passiveWindow=false 平台
+   * （Telegram）发送恒走主动通道、原语校验放宽；缺省=严格校验（QQ 现行为不变）
+   */
+  capsFor?: (botId: string) => PlatformCaps | undefined;
+  /** 平台策略钩子（QQ=额度门禁/记账）；缺省=无额度语义平台，直接放行 */
+  hooks?: BoundConnectorHooks;
   /** 资产存储（send_media 的 asset:<id> 引用解析）；缺省=资产功能未装配 */
   assets?: import("../assets").AssetStore;
 }
 
-/** 内存令牌桶：容量=配额，按 refillPerMin 匀速回填 */
-class TokenBucket {
-  private tokens: number;
-  private last: number;
-  constructor(
-    private readonly capacity: number,
-    private readonly refillPerMin: number,
-  ) {
-    this.tokens = capacity;
-    this.last = Date.now();
-  }
-  private refill(): void {
-    const now = Date.now();
-    this.tokens = Math.min(
-      this.capacity,
-      this.tokens + ((now - this.last) / 60_000) * this.refillPerMin,
-    );
-    this.last = now;
-  }
-  tryTake(): { ok: boolean; waitMs: number } {
-    this.refill();
-    if (this.tokens >= 1) {
-      this.tokens -= 1;
-      return { ok: true, waitMs: 0 };
-    }
-    return {
-      ok: false,
-      waitMs: Math.ceil(((1 - this.tokens) / this.refillPerMin) * 60_000),
-    };
-  }
-  get remaining(): number {
-    this.refill();
-    return Math.floor(this.tokens);
-  }
-}
-
-/** 额度日期串：官方 1000 条/天按北京时间自然日计 */
-export function beijingDate(now = Date.now()): string {
-  return new Date(now + 8 * 3_600_000).toISOString().slice(0, 10);
-}
-
 export class Sender {
   private readonly log: Logger;
-  private readonly limits: SendLimits;
-  private readonly apis = new Map<string, SendApi>();
-  /** bot 级主动消息令牌桶（appid → bucket） */
-  private readonly botBuckets = new Map<string, TokenBucket>();
-  /** 单关系令牌桶（`appid:group_openid` → bucket） */
-  private readonly relationBuckets = new Map<string, TokenBucket>();
 
   constructor(private readonly deps: SenderDeps) {
     this.log = deps.log.child("sender");
-    this.limits = {
-      qpm: deps.limits?.qpm ?? 0, // 0=按 bot 的 auth_level 现算（60/30），见 qpmOf
-      perRelationQpm: deps.limits?.perRelationQpm ?? PER_RELATION_QPM,
-      perGroupDaily: deps.limits?.perGroupDaily ?? PER_GROUP_DAILY,
-    };
   }
 
   /**
-   * M9：主动消息 qpm 预算按 bot 的 auth_level 现算（certified=60 / uncertified=30）；
-   * limits.qpm 显式注入时覆盖所有 bot（测试用）。
+   * 传输原语解析；未装配=发送面关闭，硬拒绝。原语必备性按 caps 判定
+   * （P3.5 caps 感知）：caps 未装配=现行严格校验（QQ 现行为/存量测试不变）；
+   * passiveWindow=false 平台不需要 reply；recall=false 不需要 recall；
+   * media 全关不需要 uploadMedia。proactive 恒必备。
    */
-  private qpmOf(botId: string): number {
-    if (this.limits.qpm > 0) return this.limits.qpm;
-    return this.deps.bots?.authLevelOf(botId) === "certified" ? 60 : 30;
-  }
-
-  /** 指定 bot 的发送 API（生产懒建 SDK MessageApi/MediaApi 适配；测试用注入） */
-  private api(app: BotApp): SendApi {
-    const injected = this.deps.apiFor?.(app);
-    if (injected !== undefined) return injected;
-    let api = this.apis.get(app.appid);
-    if (api === undefined) {
-      const client = new ApiClient({
-        logger: {
-          info: (msg, meta) => this.log.debug(msg, meta),
-          error: (msg, meta) => this.log.error(msg, meta),
-          warn: (msg, meta) => this.log.warn(msg, meta),
-          debug: (msg, meta) => this.log.debug(msg, meta),
-        },
-      });
-      const messageApi = new MessageApi(client, this.deps.tokenManager, {
-        markdownSupport: true,
-      });
-      const mediaApi = new MediaApi(client, this.deps.tokenManager);
-      api = {
-        sendRaw: (scope, targetId, creds, body) =>
-          messageApi.sendRaw(scope, targetId, creds, body),
-        recallMessage: (scope, targetId, messageId, creds) =>
-          messageApi.recallMessage(scope, targetId, messageId, creds),
-        uploadMedia: (scope, targetId, creds, src, mediaType) =>
-          mediaApi
-            .uploadMedia(
-              scope,
-              targetId,
-              mediaType === "voice" ? MediaFileType.VOICE : MediaFileType.IMAGE,
-              creds,
-              src.kind === "url"
-                ? { url: src.url }
-                : src.kind === "file"
-                  ? { localPath: src.path }
-                  : { fileData: src.data },
-            )
-            .then((up) => up.file_info),
-      };
-      this.apis.set(app.appid, api);
-    }
-    return api;
-  }
-
-  private appOf(botId: string): BotApp {
-    const bots = this.deps.bots?.list() ?? [];
-    const app = bots.find((a) => a.appid === botId);
-    if (app === undefined)
+  private transport(botId: string): {
+    reply(wire: ReplyWire): Promise<{ providerMsgId: string }>;
+    proactive(wire: ProactiveWire): Promise<{ providerMsgId: string }>;
+    recall(wire: RecallWire): Promise<void>;
+    uploadMedia(wire: UploadMediaWire): Promise<{ handle: string }>;
+  } {
+    const net = this.deps.transportFor?.(botId);
+    if (net === undefined) {
       throw new Error(
-        `bot 不存在：${botId}。可用：${bots.map((a) => a.appid).join(", ") || "（无）"}`,
+        "发送功能未装配：服务端未装配平台传输（写工具面关闭）。",
       );
-    return app;
+    }
+    const caps = this.deps.capsFor?.(botId);
+    const missing: string[] = [];
+    if (caps?.passiveWindow !== false && net.reply === undefined) {
+      missing.push("reply");
+    }
+    if (net.proactive === undefined) missing.push("proactive");
+    if (caps?.recall !== false && net.recall === undefined) {
+      missing.push("recall");
+    }
+    if (
+      (caps === undefined ||
+        caps.media.image ||
+        caps.media.voice ||
+        caps.media.video ||
+        caps.media.file) &&
+      net.uploadMedia === undefined
+    ) {
+      missing.push("uploadMedia");
+    }
+    if (missing.length > 0) {
+      throw new Error(
+        `发送功能未装配：平台传输缺少原语 ${missing.join("/")}（写工具面关闭）。`,
+      );
+    }
+    return {
+      reply: net.reply!,
+      proactive: net.proactive!,
+      recall: net.recall!,
+      uploadMedia: net.uploadMedia!,
+    };
   }
 
   /** 双重门禁（M8 读库版）：发送总开关（kv settings）+ 会话级发送条件——
@@ -275,7 +197,7 @@ export class Sender {
     kind: "group" | "chat",
     targetId: string,
     requireOptIn = false,
-  ): BotApp {
+  ): void {
     const sendEnabled = this.deps.repo.getSendEnable();
     if (!sendEnabled) {
       throw new Error(
@@ -299,7 +221,6 @@ export class Sender {
         throw new Error(t("send_c2c_not_optin", { user: targetId }));
       }
     }
-    return this.appOf(botId);
   }
 
   private checkContent(text: string): string {
@@ -322,17 +243,17 @@ export class Sender {
     markdown = false,
     /** true=附带 message_reference 引用块（客户端展示引用样式）；false=纯被动回复（仅窗口绑定） */
     quote = false,
-    /** 富媒体（图片/语音）：msg_type=7，text 降级为配文；fileInfo 由 uploadMedia 预先取得，
+    /** 富媒体（图片/语音）：handle 由 transport.uploadMedia 预先取得，
      * label 为补记占位符标签（图片/语音，与读取层附件占位符约定一致） */
-    media?: { fileInfo: string; label: string },
+    media?: OutgoingMedia,
     /** 会话类型（缺省群聊）：决定被动窗口（群 5 分钟/5 次、单聊 60 分钟/4 次）与缓存查询表 */
     kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
-    const app = this.gate(botId, kind, targetId);
+    this.gate(botId, kind, targetId);
     const content = text === undefined ? "" : this.checkContent(text);
     const payloadHash =
       media !== undefined
-        ? sha256(`img\0${media.fileInfo}\0${content}`)
+        ? sha256(`img\0${media.handle}\0${content}`)
         : sha256(`${markdown ? "md" : "text"}\0${content}`);
 
     // 幂等重放：同 回复目标+payload 已成功受理（sent/pending_audit）→ 直接返回首次结果
@@ -365,7 +286,7 @@ export class Sender {
     );
     if (inbound === null || inbound.ts === null)
       throw new Error(t("send_window_no_msg", { msg_id: replyMsgId }));
-    const win = PASSIVE_WINDOW[scopeOf(kind)];
+    const win = PASSIVE_WINDOW[windowKeyOf(kind)];
     if (Date.now() - inbound.ts > win.ms)
       throw new Error(
         kind === "chat"
@@ -393,60 +314,28 @@ export class Sender {
         payload_hash: payloadHash,
         status: "reserved",
       });
-      // 官方群聊引用块（2026-03 v2 autogen 文档收录 message_reference，真机实测返回 ext_info.ref_idx）：
-      // 显式引用（quote=true）时附带，QQ 客户端以引用样式展示；ignore_get_message_error=true 兜底——
-      // 原消息详情拉取失败（如被撤回）时仍送达，仅丢失引用样式（送达优先于样式）。
-      // 纯被动回复（quote=false）只做 msg_id 窗口绑定，不带引用块。
-      const messageReference = quote
-        ? {
-            message_id: replyMsgId,
-            ignore_get_message_error: true,
-          }
-        : undefined;
-      const body: Record<string, unknown> = media
-        ? {
-            // 富媒体（2026-10-27 真机验证：msg_type=7 可走被动窗口，可带 message_reference 引用块）
-            msg_type: 7,
-            content,
-            media: { file_info: media.fileInfo },
-            msg_id: replyMsgId,
-            msg_seq: seq,
-            ...(messageReference !== undefined
-              ? { message_reference: messageReference }
-              : {}),
-          }
-        : asMarkdown
-          ? {
-              msg_type: 2,
-              markdown: { content },
-              msg_id: replyMsgId,
-              msg_seq: seq,
-              ...(messageReference !== undefined
-                ? { message_reference: messageReference }
-                : {}),
-            }
-          : {
-              msg_type: 0,
-              content,
-              msg_id: replyMsgId,
-              msg_seq: seq,
-              ...(messageReference !== undefined
-                ? { message_reference: messageReference }
-                : {}),
-            };
+      const mediaWire: MediaWire | undefined =
+        media !== undefined
+          ? { kind: media.kind, handle: media.handle }
+          : undefined;
       try {
-        const resp = await this.api(app).sendRaw(
-          scopeOf(kind),
-          targetId,
-          credsOf(app),
-          body,
-        );
-        this.deps.repo.updateSendStatus(reservation, "sent", resp.id);
+        const receipt = await this.transport(botId).reply({
+          botId,
+          target: targetId,
+          scope: kind,
+          content,
+          msgId: replyMsgId,
+          msgSeq: seq,
+          markdown: asMarkdown || undefined,
+          quoteMsgId: quote ? replyMsgId : undefined,
+          media: mediaWire,
+        });
+        this.deps.repo.updateSendStatus(reservation, "sent", receipt.providerMsgId);
         this.recordOutgoing(
           botId,
           kind,
           targetId,
-          resp.id,
+          receipt.providerMsgId,
           media !== undefined
             ? `![${media.label}]${content === "" ? "" : ` ${content}`}`
             : content,
@@ -455,13 +344,13 @@ export class Sender {
           kind,
           target: targetId,
           seq,
-          provider: resp.id,
+          provider: receipt.providerMsgId,
         });
         return {
           status: "sent",
           channel: "passive",
           msg_seq: seq,
-          provider_msg_id: resp.id,
+          provider_msg_id: receipt.providerMsgId,
         };
       } catch (e) {
         const biz = extractBizCode(e);
@@ -528,52 +417,26 @@ export class Sender {
      * 主动消息携带 message_reference 照常受理，目标超窗亦可），仅影响客户端展示。
      */
     quoteMsgId?: string,
-    /** 富媒体（图片/语音）：msg_type=7，text 降级为配文；fileInfo 由 uploadMedia 预先取得，
-     * label 为补记占位符标签（图片/语音） */
-    media?: { fileInfo: string; label: string },
+    /** 富媒体（图片/语音）：handle 由 transport.uploadMedia 预先取得 */
+    media?: OutgoingMedia,
     /** 会话类型（缺省群聊）；私聊主动消息额外要求用户已同意（C2C_MSG_RECEIVE） */
     kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
-    const app = this.gate(botId, kind, targetId, true);
+    this.gate(botId, kind, targetId, true);
     const content = text === undefined ? "" : this.checkContent(text);
     const payloadHash =
       media !== undefined
-        ? sha256(`img\0${media.fileInfo}\0${content}`)
+        ? sha256(`img\0${media.handle}\0${content}`)
         : sha256(`text\0${content}`);
     const repo = this.deps.repo;
-    const date = beijingDate();
 
-    // 日额度（官方 1000 条/天/单关系）：先查后记，超限明确报错不重试
-    const usedToday = repo.proactiveCountFor(botId, targetId, date);
-    if (usedToday >= this.limits.perGroupDaily) {
-      throw new Error(
-        t("send_quota_daily", {
-          group: targetId,
-          used: usedToday,
-          limit: this.limits.perGroupDaily,
-        }),
-      );
-    }
-
-    // 令牌桶：bot 级 → 单关系级
-    const waitOf = (r: { ok: boolean; waitMs: number }): number =>
-      Math.max(1, Math.ceil(r.waitMs / 1000));
-    const botBucket = this.botBucket(botId);
-    const botTake = botBucket.tryTake();
-    if (!botTake.ok) {
-      throw new Error(
-        t("send_rate_limited_bot", {
-          qpm: this.qpmOf(botId),
-          level: this.deps.bots?.authLevelOf(botId) ?? "uncertified",
-          wait: waitOf(botTake),
-        }),
-      );
-    }
-    const relTake = this.relationBucket(botId, targetId).tryTake();
-    if (!relTake.ok) {
-      throw new Error(
-        t("send_rate_limited_relation", { wait: waitOf(relTake) }),
-      );
+    // 额度门禁/记账：平台插件钩子（QQ=日额度+令牌桶，拒绝时 reason 面向 AI/用户可操作）；
+    // 未装配钩子=无额度语义平台，直接放行。
+    if (this.deps.hooks?.proactiveGate !== undefined) {
+      const verdict = await this.deps.hooks.proactiveGate(botId, targetId);
+      if (!verdict.ok) {
+        throw new Error(verdict.reason ?? "平台策略拒绝本次发送。");
+      }
     }
 
     const reservation = repo.insertSend({
@@ -585,37 +448,24 @@ export class Sender {
       payload_hash: payloadHash,
       status: "reserved",
     });
+    const mediaWire: MediaWire | undefined =
+      media !== undefined ? { kind: media.kind, handle: media.handle } : undefined;
     try {
-      const resp = await this.api(app).sendRaw(
-        scopeOf(kind),
-        targetId,
-        credsOf(app),
-        {
-          ...(media !== undefined
-            ? {
-                // 富媒体（2026-10-27 真机验证：主动 msg_type=7 受理，可带引用块）
-                msg_type: 7,
-                media: { file_info: media.fileInfo },
-              }
-            : { msg_type: 0 }),
-          content,
-          ...(quoteMsgId !== undefined
-            ? {
-                message_reference: {
-                  message_id: quoteMsgId,
-                  ignore_get_message_error: true,
-                },
-              }
-            : {}),
-        },
-      );
-      repo.updateSendStatus(reservation, "sent", resp.id);
-      repo.incrQuotaDaily(botId, targetId, date);
+      const receipt = await this.transport(botId).proactive({
+        botId,
+        target: targetId,
+        scope: kind,
+        content,
+        quoteMsgId,
+        media: mediaWire,
+      });
+      repo.updateSendStatus(reservation, "sent", receipt.providerMsgId);
+      await this.deps.hooks?.proactiveRecord?.(botId, targetId);
       this.recordOutgoing(
         botId,
         kind,
         targetId,
-        resp.id,
+        receipt.providerMsgId,
         media !== undefined
           ? `![${media.label}]${content === "" ? "" : ` ${content}`}`
           : content,
@@ -623,9 +473,13 @@ export class Sender {
       this.log.info("proactive sent", {
         kind,
         target: targetId,
-        provider: resp.id,
+        provider: receipt.providerMsgId,
       });
-      return { status: "sent", channel: "proactive", provider_msg_id: resp.id };
+      return {
+        status: "sent",
+        channel: "proactive",
+        provider_msg_id: receipt.providerMsgId,
+      };
     } catch (e) {
       const biz = extractBizCode(e);
       if (isAuditPendingCode(biz)) {
@@ -636,7 +490,7 @@ export class Sender {
           undefined,
           biz ?? undefined,
         );
-        repo.incrQuotaDaily(botId, targetId, date);
+        await this.deps.hooks?.proactiveRecord?.(botId, targetId);
         return {
           status: "pending_audit",
           channel: "proactive",
@@ -699,7 +553,7 @@ export class Sender {
     /** 会话类型（缺省群聊） */
     kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
-    const app = this.gate(botId, kind, targetId); // 先门禁：上传同属写路径前置
+    this.gate(botId, kind, targetId); // 先门禁：上传同属写路径前置
     // 来源解析：asset:<id>（服务端资产）→ file；其余按 URL / data: 内联
     let src: MediaSource;
     if (mediaParam.startsWith("asset:")) {
@@ -710,7 +564,7 @@ export class Sender {
     } else {
       src = parseMediaSource(mediaParam);
     }
-    return this.doSendMedia(app, botId, targetId, src, text, quoteMsgId, kind);
+    return this.doSendMedia(botId, targetId, src, text, quoteMsgId, kind);
   }
 
   /** TTS 直发入口（send_media 的 "tts:<文本>" 来源）：合成产物（mp3 字节）已在内存，
@@ -723,9 +577,8 @@ export class Sender {
     quoteMsgId?: string,
     kind: "group" | "chat" = "group",
   ): Promise<SendResult> {
-    const app = this.gate(botId, kind, targetId);
+    this.gate(botId, kind, targetId);
     return this.doSendMedia(
-      app,
       botId,
       targetId,
       { kind: "b64", data: buf.toString("base64") },
@@ -736,9 +589,8 @@ export class Sender {
     );
   }
 
-  /** sendMediaAuto/sendVoiceBytes 共用尾段：通道判定 → 官方转存 → reply/proactive */
+  /** sendMediaAuto/sendVoiceBytes 共用尾段：通道判定 → 官方转存（transport.uploadMedia）→ reply/proactive */
   private async doSendMedia(
-    app: BotApp,
     botId: string,
     targetId: string,
     src: MediaSource,
@@ -756,15 +608,16 @@ export class Sender {
     // 上传转存（官方对同内容返回相同 file_info，TTL 24h；失败不消耗通道额度）。
     // 类别在来源解析后即定：file 源魔数嗅探 / url 源扩展名（audio → file_type=3 语音条）
     const mediaType = mediaTypeOverride ?? mediaTypeOf(src);
-    let fileInfo: string;
+    let handle: string;
     try {
-      fileInfo = await this.api(app).uploadMedia(
-        scopeOf(kind),
-        targetId,
-        credsOf(app),
-        src,
-        mediaType,
-      );
+      const up = await this.transport(botId).uploadMedia({
+        botId,
+        target: targetId,
+        scope: kind,
+        kind: mediaType,
+        source: src,
+      });
+      handle = up.handle;
     } catch (e) {
       throw new Error(
         t("media_upload_failed", { reason: describeSendError(e) }),
@@ -774,38 +627,19 @@ export class Sender {
       kind,
       target: targetId,
       mediaType,
-      file_info_len: fileInfo.length,
+      file_info_len: handle.length,
     });
+    const media: OutgoingMedia = { kind: mediaType, handle, label: labelOf(mediaType) };
     if (bindMsgId !== undefined) {
-      return this.reply(
-        botId,
-        targetId,
-        bindMsgId,
-        text,
-        false,
-        quote,
-        {
-          fileInfo,
-          label: labelOf(mediaType),
-        },
-        kind,
-      );
+      return this.reply(botId, targetId, bindMsgId, text, false, quote, media, kind);
     }
-    return this.proactive(
-      botId,
-      targetId,
-      text,
-      quoteMsgId,
-      {
-        fileInfo,
-        label: labelOf(mediaType),
-      },
-      kind,
-    );
+    return this.proactive(botId, targetId, text, quoteMsgId, media, kind);
   }
 
   /** 通道判定（sendAuto/sendMediaAuto 共用）：引用目标窗内→绑=引（形态A）；
-   * 无引用→绑最新可绑消息（白嫖被动）；否则主动兜底 */
+   * 无引用→绑最新可绑消息（白嫖被动）；否则主动兜底。
+   * P3.5：passiveWindow=false 平台（Telegram）无官方窗口/次数语义——绑定与
+   * 窗口查表不适用，恒走主动通道（引用照传，平台侧渲染 reply 样式）。 */
   private resolveChannel(
     botId: string,
     kind: "group" | "chat",
@@ -822,6 +656,9 @@ export class Sender {
       if (q === null || q.ts === null) {
         throw new Error(t("send_quote_not_found", { msg_id: quoteMsgId }));
       }
+    }
+    if (this.deps.capsFor?.(botId)?.passiveWindow === false) {
+      return { bindMsgId: undefined, quote: false };
     }
     let bindMsgId: string | undefined;
     if (
@@ -847,10 +684,11 @@ export class Sender {
   ): boolean {
     const row = this.deps.repo.getMessageByMsgId(botId, kind, targetId, msgId);
     if (row === null || row.ts === null) return false;
-    if (Date.now() - row.ts > PASSIVE_WINDOW[scopeOf(kind)].ms) return false;
+    if (Date.now() - row.ts > PASSIVE_WINDOW[windowKeyOf(kind)].ms)
+      return false;
     return (
       this.deps.repo.countPassiveSends(botId, msgId) <
-      PASSIVE_WINDOW[scopeOf(kind)].max
+      PASSIVE_WINDOW[windowKeyOf(kind)].max
     );
   }
 
@@ -866,9 +704,9 @@ export class Sender {
       if (row.direction === 1) continue;
       if (
         row.ts !== null &&
-        Date.now() - row.ts <= PASSIVE_WINDOW[scopeOf(kind)].ms &&
+        Date.now() - row.ts <= PASSIVE_WINDOW[windowKeyOf(kind)].ms &&
         this.deps.repo.countPassiveSends(botId, row.msg_id) <
-          PASSIVE_WINDOW[scopeOf(kind)].max
+          PASSIVE_WINDOW[windowKeyOf(kind)].max
       ) {
         return row.msg_id;
       }
@@ -890,7 +728,7 @@ export class Sender {
   ): void {
     try {
       const authorName =
-        this.deps.bots?.list().find((b) => b.appid === botId)?.name ?? null;
+        this.deps.bots?.list().find((b) => b.botId === botId)?.name ?? null;
       this.deps.repo.saveOutgoing({
         botId,
         scope: kind,
@@ -916,7 +754,7 @@ export class Sender {
     /** 会话类型（缺省群聊） */
     kind: "group" | "chat" = "group",
   ): Promise<{ recalled: string }> {
-    const app = this.gate(botId, kind, targetId);
+    this.gate(botId, kind, targetId);
     const reservation = this.deps.repo.insertSend({
       bot_id: botId,
       target_openid: targetId,
@@ -927,12 +765,12 @@ export class Sender {
       status: "reserved",
     });
     try {
-      await this.api(app).recallMessage(
-        scopeOf(kind),
-        targetId,
-        messageId,
-        credsOf(app),
-      );
+      await this.transport(botId).recall({
+        botId,
+        target: targetId,
+        scope: kind,
+        providerMsgId: messageId,
+      });
       this.deps.repo.updateSendStatus(reservation, "sent");
       this.log.info("message recalled", {
         kind,
@@ -950,57 +788,6 @@ export class Sender {
       throw new Error(describeSendError(e));
     }
   }
-
-  // —— 额度水位（quota 工具用） ——
-
-  snapshot(botId: string): {
-    limits: SendLimits;
-    bot_bucket_remaining: number;
-    today_by_group: Array<{ group: string; used: number }>;
-    relation_remaining: Record<string, number>;
-  } {
-    const date = beijingDate();
-    const allowGroups = this.deps.bots?.allowGroupsOf(botId) ?? [];
-    return {
-      limits: this.limits,
-      bot_bucket_remaining: this.botBucket(botId).remaining,
-      today_by_group: allowGroups.map((g) => ({
-        group: g,
-        used: this.deps.repo.proactiveCountFor(botId, g, date),
-      })),
-      relation_remaining: Object.fromEntries(
-        allowGroups.map((g) => [g, this.relationBucket(botId, g).remaining]),
-      ),
-    };
-  }
-
-  private botBucket(appid: string): TokenBucket {
-    let b = this.botBuckets.get(appid);
-    if (b === undefined) {
-      const qpm = this.qpmOf(appid);
-      b = new TokenBucket(qpm, qpm);
-      this.botBuckets.set(appid, b);
-    }
-    return b;
-  }
-
-  private relationBucket(appid: string, groupOpenid: string): TokenBucket {
-    const key = `${appid}:${groupOpenid}`;
-    let b = this.relationBuckets.get(key);
-    if (b === undefined) {
-      b = new TokenBucket(
-        this.limits.perRelationQpm,
-        this.limits.perRelationQpm,
-      );
-      this.relationBuckets.set(key, b);
-    }
-    return b;
-  }
-}
-
-/** BotApp → SDK Credentials 字段名映射 */
-function credsOf(app: BotApp): { appId: string; clientSecret: string } {
-  return { appId: app.appid, clientSecret: app.secret };
 }
 
 function sha256(s: string): string {

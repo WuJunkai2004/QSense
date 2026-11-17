@@ -6,15 +6,35 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLogger } from "../src/logger";
-import { Sender, beijingDate } from "../src/sender";
+import { createLogger } from "../src/utils/logger";
+import { Sender } from "../src/sender";
 import { t } from "../src/i18n";
-import { handleGatewayEvent } from "../src/normalize/handler";
+import { normalizeQqEnvelope } from "@qsense/connector-qq";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { BotRegistry } from "../src/bots";
 import { Repo } from "../src/store/repo";
 import { runTool } from "../src/tools/defs";
+import { createBotHost, configSnapshotOf } from "../src/connectors/host";
+import {
+  BASE_TOOL_NAMES,
+  ToolRouter,
+  callPluginTool,
+  type ConnectorNet,
+  type ProactiveVerdict,
+  type ProactiveWire,
+  type RecallWire,
+  type ReplyWire,
+  type ToolPayload,
+  type UploadMediaWire,
+} from "@qsense/connector-sdk";
+import {
+  beijingDate,
+  createQqConnector,
+  dailyCountOf,
+  type QqConnectorPlugin,
+  type QqSendLimits,
+} from "@qsense/connector-qq";
 
 const GROUP = "G1";
 const BOT = "10001";
@@ -31,65 +51,102 @@ class FakeApiError extends Error {
   }
 }
 
-interface Call {
-  scope: string;
-  targetId: string;
-  body: Record<string, unknown>;
+interface NetMock {
+  mock: ConnectorNet;
+  replies: ReplyWire[];
+  proactives: ProactiveWire[];
+  recalls: RecallWire[];
+  uploads: UploadMediaWire[];
+  /** replies+proactives 总数（等价旧 calls.length） */
+  sentCount(): number;
 }
 
-function makeApiMock(
-  script?: (call: Call, n: number) => { id: string } | never,
-): {
-  calls: Call[];
-  recalls: string[];
-  uploads: Array<{
-    scope: "group" | "chat";
-    targetId: string;
-    src: import("../src/sender").MediaSource;
-    mediaType: import("../src/sender").MediaKind;
-  }>;
-} & import("../src/sender").SendApi {
-  const calls: Call[] = [];
-  const recalls: string[] = [];
-  const uploads: Array<{
-    scope: "group" | "chat";
-    targetId: string;
-    src: import("../src/sender").MediaSource;
-    mediaType: import("../src/sender").MediaKind;
-  }> = [];
+/** 发送原语假件（ConnectorNet 形状）：记录 wire，回执 PROVIDER_N；script 可注错 */
+function makeNetMock(
+  script?: (
+    kind: "reply" | "proactive",
+    wire: ReplyWire | ProactiveWire,
+    n: number,
+  ) => { providerMsgId: string } | never,
+): NetMock {
+  const replies: ReplyWire[] = [];
+  const proactives: ProactiveWire[] = [];
+  const recalls: RecallWire[] = [];
+  const uploads: UploadMediaWire[] = [];
+  const fail = (r: unknown): { providerMsgId: string } => {
+    if (r instanceof Error) throw r;
+    return r as { providerMsgId: string };
+  };
+  const mock: ConnectorNet = {
+    reply: async (wire) => {
+      replies.push(wire);
+      return fail(
+        script?.("reply", wire, replies.length) ?? {
+          providerMsgId: `PROVIDER_${replies.length + proactives.length}`,
+        },
+      );
+    },
+    proactive: async (wire) => {
+      proactives.push(wire);
+      return fail(
+        script?.("proactive", wire, proactives.length) ?? {
+          providerMsgId: `PROVIDER_${replies.length + proactives.length}`,
+        },
+      );
+    },
+    recall: async (wire) => {
+      recalls.push(wire);
+    },
+    uploadMedia: async (wire) => {
+      uploads.push(wire);
+      return { handle: `FILEINFO_${uploads.length}` };
+    },
+  };
   return {
-    calls,
+    mock,
+    replies,
+    proactives,
     recalls,
     uploads,
-    async sendRaw(
-      scope: "group" | "chat",
-      targetId: string,
-      _creds: { appId: string; clientSecret: string },
-      body: Record<string, unknown>,
-    ) {
-      calls.push({ scope, targetId, body });
-      const r = script?.({ scope, targetId, body }, calls.length);
-      if (r instanceof Error) throw r;
-      return r ?? { id: `PROVIDER_${calls.length}` };
+    sentCount: () => replies.length + proactives.length,
+  };
+}
+
+/** QQ 额度钩子台架：真插件（可注 limits）+ 宿主上下面绑定（记账走 kv StatePort） */
+function makeQqHooks(
+  fx: { db: DB; repo: Repo; registry: BotRegistry },
+  limits?: Partial<QqSendLimits>,
+): {
+  hooks: {
+    proactiveGate(botId: string, target: string): Promise<ProactiveVerdict>;
+    proactiveRecord(botId: string, target: string): void;
+  };
+  host: ReturnType<typeof createBotHost>;
+  plugin: QqConnectorPlugin;
+} {
+  const plugin = createQqConnector({
+    log: createLogger("error"),
+    ...(limits !== undefined ? { limits } : {}),
+  });
+  const host = createBotHost({
+    log: createLogger("error"),
+    db: fx.db,
+    platform: "qq",
+    botId: BOT,
+    ingest: () => undefined,
+    onStatus: () => undefined,
+  });
+  const config = configSnapshotOf(fx.repo, fx.registry, BOT);
+  return {
+    hooks: {
+      proactiveGate: (botId, target) =>
+        plugin.hooks!.proactiveGate!({ host, config }, botId, target),
+      proactiveRecord: (botId, target) =>
+        plugin.hooks!.proactiveRecord!({ host, config }, botId, target),
     },
-    async recallMessage(
-      _scope: "group" | "chat",
-      _targetId: string,
-      messageId: string,
-    ) {
-      recalls.push(messageId);
-    },
-    async uploadMedia(
-      scope: "group" | "chat",
-      targetId: string,
-      _creds: { appId: string; clientSecret: string },
-      src: import("../src/sender").MediaSource,
-      mediaType: import("../src/sender").MediaKind,
-    ) {
-      uploads.push({ scope, targetId, src, mediaType });
-      return `FILEINFO_${uploads.length}`;
-    },
-  } as never;
+    host,
+    plugin,
+  };
 }
 
 interface Fixture {
@@ -164,22 +221,20 @@ test("M4-1 幂等重放：同 msg_id+同文本 两次调用只发一条，第二
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "M1");
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     const first = await sender.reply(BOT, GROUP, "M1", "你好呀");
     assert.equal(first.status, "sent");
     const second = await sender.reply(BOT, GROUP, "M1", "你好呀");
     assert.equal(second.status, "replayed");
     assert.equal(second.provider_msg_id, first.provider_msg_id);
-    assert.equal(mock.calls.length, 1, "API 只应被调一次");
-    assert.equal(mock.calls[0]!.body.msg_seq, 1);
+    assert.equal(mock.sentCount(), 1, "API 只应被调一次");
+    assert.equal(mock.replies[0]!.msgSeq, 1);
   } finally {
     fx.close();
   }
@@ -189,14 +244,12 @@ test("M4-13 发送成功后本地补记：messages 表出现 direction=1 的自�
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "M1");
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     const r = await sender.reply(BOT, GROUP, "M1", "你好呀");
     assert.equal(r.status, "sent");
@@ -220,20 +273,18 @@ test("M4-2 不同文本 → 第二次以 msg_seq=2 真实发出（账本落库�
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "M1");
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     await sender.reply(BOT, GROUP, "M1", "第一条");
     const second = await sender.reply(BOT, GROUP, "M1", "第二条");
     assert.equal(second.status, "sent");
-    assert.equal(mock.calls.length, 2);
-    assert.equal(mock.calls[1]!.body.msg_seq, 2);
+    assert.equal(mock.sentCount(), 2);
+    assert.equal(mock.replies[1]!.msgSeq, 2);
   } finally {
     fx.close();
   }
@@ -243,27 +294,23 @@ test("M4-2b 引用开关：默认纯被动回复不带 message_reference；quote
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "M1");
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     await sender.reply(BOT, GROUP, "M1", "纯回复（不带引用块）");
     await sender.reply(BOT, GROUP, "M1", "引用回复（带引用块）", false, true);
-    assert.equal(mock.calls.length, 2);
+    assert.equal(mock.sentCount(), 2);
     assert.equal(
-      mock.calls[0]!.body.message_reference,
+      mock.replies[0]!.quoteMsgId,
       undefined,
       "默认不携带引用块",
     );
-    assert.deepEqual(mock.calls[1]!.body.message_reference, {
-      message_id: "M1",
-      ignore_get_message_error: true,
-    });
+    // 引用块线格式映射（message_reference）规格见 connector-qq-net.test
+    assert.equal(mock.replies[1]!.quoteMsgId, "M1");
   } finally {
     fx.close();
   }
@@ -273,20 +320,18 @@ test("M4-3 窗口过期（>5分钟）→ 明确报错且不发", async () => {
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "OLD", 6 * 60_000);
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     await assert.rejects(
       () => sender.reply(BOT, GROUP, "OLD", "迟到的回复"),
       /被动回复窗口已过期/,
     );
-    assert.equal(mock.calls.length, 0);
+    assert.equal(mock.sentCount(), 0);
   } finally {
     fx.close();
   }
@@ -308,20 +353,18 @@ test("M4-4 次数耗尽（5次后）→ 明确报错；failed 行不占次数", 
       });
       fx.repo.updateSendStatus(id, "sent", `P${i}`);
     }
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     await assert.rejects(
       () => sender.reply(BOT, GROUP, "M1", "第六次"),
       /次数已用完/,
     );
-    assert.equal(mock.calls.length, 0);
+    assert.equal(mock.sentCount(), 0);
 
     // failed 行不计入窗口次数：4 条 sent + 1 条 failed → 还能发
     for (let i = 0; i < 5; i++)
@@ -358,14 +401,12 @@ test("M4-4 次数耗尽（5次后）→ 明确报错；failed 行不占次数", 
 test("M4-5 双重门禁：开关关/白名单外 → 硬拒绝，API 零调用", async () => {
   const fx = setupDb();
   try {
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     // M8：门禁权威在 SQLite（config.sendEnabled 已不参与判定）——落库关开关
     fx.repo.setSendEnable(false);
@@ -389,11 +430,11 @@ test("M4-5 双重门禁：开关关/白名单外 → 硬拒绝，API 零调用",
       () => sender.proactive(BOT, "OTHER_GROUP", "hi"),
       /白名单/,
     );
-    assert.equal(mock.calls.length, 0, "任何拒绝都不得触发 API 调用");
+    assert.equal(mock.sentCount(), 0, "任何拒绝都不得触发 API 调用");
     // 正向对照：白名单内群放行
     const ok = await sender.proactive(BOT, GROUP, "白名单内放行");
     assert.equal(ok.status, "sent");
-    assert.equal(mock.calls.length, 1);
+    assert.equal(mock.sentCount(), 1);
   } finally {
     fx.close();
   }
@@ -402,15 +443,14 @@ test("M4-5 双重门禁：开关关/白名单外 → 硬拒绝，API 零调用",
 test('M4-6 日额度不足 → 明确报"配额不足"且不重试', async () => {
   const fx = setupDb();
   try {
-    const mock = makeApiMock();
+    const mock = makeNetMock();
+    const qq = makeQqHooks(fx, { perGroupDaily: 3 });
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      limits: { perGroupDaily: 3 },
-      apiFor: () => mock,
+      hooks: qq.hooks,
+      transportFor: () => mock.mock,
     });
     for (let i = 0; i < 3; i++) {
       const r = await sender.proactive(BOT, GROUP, `日报 #${i}`);
@@ -420,7 +460,7 @@ test('M4-6 日额度不足 → 明确报"配额不足"且不重试', async () =>
       () => sender.proactive(BOT, GROUP, "第四条"),
       /日额度不足/,
     );
-    assert.equal(mock.calls.length, 3, "额度耗尽后不得再调 API");
+    assert.equal(mock.sentCount(), 3, "额度耗尽后不得再调 API");
   } finally {
     fx.close();
   }
@@ -429,20 +469,19 @@ test('M4-6 日额度不足 → 明确报"配额不足"且不重试', async () =>
 test("M4-7 令牌桶：bot 级 qpm 耗尽 → 报频控（含等待秒数）", async () => {
   const fx = setupDb();
   try {
-    const mock = makeApiMock();
+    const mock = makeNetMock();
+    const qq = makeQqHooks(fx, { qpm: 2, perRelationQpm: 20, perGroupDaily: 100 });
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      limits: { qpm: 2, perRelationQpm: 20, perGroupDaily: 100 },
-      apiFor: () => mock,
+      hooks: qq.hooks,
+      transportFor: () => mock.mock,
     });
     await sender.proactive(BOT, GROUP, "a");
     await sender.proactive(BOT, GROUP, "b");
     await assert.rejects(() => sender.proactive(BOT, GROUP, "c"), /bot 级频控/);
-    assert.equal(mock.calls.length, 2);
+    assert.equal(mock.sentCount(), 2);
   } finally {
     fx.close();
   }
@@ -452,24 +491,24 @@ test("M4-8 304036 → Markdown 自动降级纯文本（新 seq，降级结果可
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "M1");
-    const mock = makeApiMock((call) => {
-      if (call.body.msg_type === 2) throw new FakeApiError(304036);
-      return { id: "PLAIN_OK" };
+    const mock = makeNetMock((kind, wire) => {
+      if (kind === "reply" && (wire as ReplyWire).markdown === true) {
+        throw new FakeApiError(304036);
+      }
+      return { providerMsgId: "PLAIN_OK" };
     });
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     const r = await sender.reply(BOT, GROUP, "M1", "# 标题", true);
     assert.equal(r.status, "downgraded");
     assert.equal(r.provider_msg_id, "PLAIN_OK");
-    assert.equal(mock.calls.length, 2);
-    assert.equal(mock.calls[0]!.body.msg_type, 2);
-    assert.equal(mock.calls[1]!.body.msg_type, 0);
+    assert.equal(mock.sentCount(), 2);
+    assert.equal(mock.replies[0]!.markdown, true);
+    assert.notEqual(mock.replies[1]!.markdown, true);
     // 失败行（304036）不入窗口次数：账本里 1 failed + 1 sent
     const rows = fx.db
       .prepare("SELECT status FROM sends WHERE reply_msg_id='M1'")
@@ -483,16 +522,14 @@ test("M4-8 304036 → Markdown 自动降级纯文本（新 seq，降级结果可
 test("M4-9 304023 → pending_audit；MESSAGE_AUDIT_PASS 事件回填 audit_pass", async () => {
   const fx = setupDb();
   try {
-    const mock = makeApiMock(() => {
+    const mock = makeNetMock(() => {
       throw new FakeApiError(304023, 200, "受理待审核");
     });
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     const r = await sender.proactive(BOT, GROUP, "待审核内容");
     assert.equal(r.status, "pending_audit");
@@ -500,12 +537,20 @@ test("M4-9 304023 → pending_audit；MESSAGE_AUDIT_PASS 事件回填 audit_pass
       .prepare("SELECT status FROM sends WHERE kind='proactive'")
       .get() as { status: string };
     assert.equal(row.status, "pending_audit");
-    // 审核通过事件（经事件路由）
-    handleGatewayEvent(fx.repo, {
-      botId: BOT,
+    // 审核通过事件（契约 v2：信封 → 插件 normalize 效应 → repo 回填）
+    const inbound = normalizeQqEnvelope(BOT, {
+      platform: "qq",
       type: "MESSAGE_AUDIT_PASS",
       data: { group_openid: GROUP },
     });
+    assert.ok(inbound !== null);
+    fx.repo.applyAuditResult(
+      BOT,
+      GROUP,
+      inbound.effects[0]?.kind === "audit" && inbound.effects[0]?.pass
+        ? "audit_pass"
+        : "audit_reject",
+    );
     row = fx.db
       .prepare("SELECT status FROM sends WHERE kind='proactive'")
       .get() as { status: string };
@@ -519,16 +564,14 @@ test('M4-10 官方错误码翻译：40054002 → "禁言"可操作文案', async
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "M1");
-    const mock = makeApiMock(() => {
+    const mock = makeNetMock(() => {
       throw new FakeApiError(40054002);
     });
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     await assert.rejects(() => sender.reply(BOT, GROUP, "M1", "hi"), /禁言/);
   } finally {
@@ -539,18 +582,19 @@ test('M4-10 官方错误码翻译：40054002 → "禁言"可操作文案', async
 test("M4-11 撤回：走官方 DELETE，账本记一行", async () => {
   const fx = setupDb();
   try {
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     const r = await sender.recall(BOT, GROUP, "MSG_TO_RECALL");
     assert.equal(r.recalled, "MSG_TO_RECALL");
-    assert.deepEqual(mock.recalls, ["MSG_TO_RECALL"]);
+    assert.deepEqual(
+      mock.recalls.map((r) => r.providerMsgId),
+      ["MSG_TO_RECALL"],
+    );
     const row = fx.db
       .prepare("SELECT status FROM sends WHERE kind='recall'")
       .get() as { status: string };
@@ -636,18 +680,17 @@ test("runTool 未知工具名 → isError 快速失败（并发闸集成测试�
   }
 });
 
-test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、快照进 quota", async () => {
+test("M4-12 经 runTool/插件路由：额度耗尽报配额不足、快照进 quota（平台扩展工具）", async () => {
   const fx = setupDb();
   try {
-    const mock = makeApiMock();
+    const mock = makeNetMock();
+    const qq = makeQqHooks(fx, { perGroupDaily: 1 });
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      limits: { perGroupDaily: 1 },
-      apiFor: () => mock,
+      hooks: qq.hooks,
+      transportFor: () => mock.mock,
     });
     const ctx = { repo: fx.repo, botId: BOT, sender, bots: fx.registry };
     const ok = await runTool("send", { id: GROUP, text: "首条" }, ctx);
@@ -657,9 +700,25 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
     assert.equal(exceeded.isError, true);
     assert.ok(exceeded.text.includes("日额度不足"));
 
-    const quota = await runTool("quota", {}, ctx);
-    assert.ok(quota.text.includes('"today_by_group"'));
-    assert.ok(quota.text.includes('"used": 1'));
+    // quota 是平台扩展工具（QQ 插件声明，P1 收口）：经 ToolRouter 路由（名单仍 15，见 mcp.test）
+    const router = new ToolRouter(BASE_TOOL_NAMES);
+    router.registerPlugin(qq.plugin);
+    const route = router.resolve("quota");
+    assert.equal(route?.source, "plugin");
+    const payload: ToolPayload = await callPluginTool(
+      route!.plugin!,
+      "quota",
+      {},
+      {
+        host: qq.host,
+        botId: BOT,
+        config: configSnapshotOf(fx.repo, fx.registry, BOT),
+      },
+    );
+    assert.ok(!payload.isError);
+    const text = payload.content[0]?.text ?? "";
+    assert.ok(text.includes('"today_by_group"'));
+    assert.ok(text.includes('"used": 1'));
   } finally {
     fx.close();
   }
@@ -669,15 +728,18 @@ test("M4-12 经 runTool（MCP 工具路径）：额度耗尽报配额不足、�
 
 function makeSender(
   fx: ReturnType<typeof setupDb>,
-  mock: ReturnType<typeof makeApiMock>,
+  mock: ReturnType<typeof makeNetMock>,
+  hooks?: {
+    proactiveGate(botId: string, target: string): Promise<ProactiveVerdict>;
+    proactiveRecord(botId: string, target: string): void;
+  },
 ): Sender {
   return new Sender({
     log: createLogger("error"),
-    db: fx.db,
     repo: fx.repo,
-    tokenManager: {} as never,
     bots: fx.registry,
-    apiFor: () => mock,
+    transportFor: () => mock.mock,
+    ...(hooks !== undefined ? { hooks } : {}),
   });
 }
 
@@ -686,45 +748,38 @@ test("M4-14 sendAuto 路由：quote 窗内 → 被动绑=引；quote 超窗 → 
   try {
     // 场景1：quote 目标在窗内 → 走被动，绑定与引用同一条（WebUI quote=true 已验证形态）
     seedInbound(fx.repo, "M_Q", 60_000); // 1 分钟前
-    const m1 = makeApiMock();
+    const m1 = makeNetMock();
     const r1 = await makeSender(fx, m1).sendAuto(BOT, GROUP, "场景一", "M_Q");
     assert.equal(r1.channel, "passive");
-    assert.equal(m1.calls[0]!.body.msg_id, "M_Q");
-    assert.deepEqual(m1.calls[0]!.body.message_reference, {
-      message_id: "M_Q",
-      ignore_get_message_error: true,
-    });
+    assert.equal(m1.replies[0]!.msgId, "M_Q");
+    // 引用块线格式映射（message_reference）规格见 connector-qq-net.test
+    assert.equal(m1.replies[0]!.quoteMsgId, "M_Q");
 
     // 场景2：quote 目标超窗 → 主动通道 + 引用块（2026-10-26 真机验证受理）
     seedInbound(fx.repo, "M_OLD", 6 * 60_000); // 6 分钟前，已超窗
-    const m2 = makeApiMock();
+    const m2 = makeNetMock();
     const r2 = await makeSender(fx, m2).sendAuto(BOT, GROUP, "场景二", "M_OLD");
     assert.equal(r2.channel, "proactive");
-    assert.equal(m2.calls[0]!.body.msg_id, undefined);
-    assert.equal(
-      (m2.calls[0]!.body.message_reference as { message_id: string })
-        .message_id,
-      "M_OLD",
-    );
+    assert.equal(m2.proactives[0]!.quoteMsgId, "M_OLD");
 
     // 场景3：无 quote、群里有窗内消息 → 被动绑定最新，不带引用块
     seedInbound(fx.repo, "M_NEW", 30_000);
-    const m3 = makeApiMock();
+    const m3 = makeNetMock();
     const r3 = await makeSender(fx, m3).sendAuto(BOT, GROUP, "场景三");
     assert.equal(r3.channel, "passive");
-    assert.equal(m3.calls[0]!.body.msg_id, "M_NEW");
-    assert.equal(m3.calls[0]!.body.message_reference, undefined);
+    assert.equal(m3.replies[0]!.msgId, "M_NEW");
+    assert.equal(m3.replies[0]!.quoteMsgId, undefined);
 
     // 场景4：无 quote、无窗内消息（M_Q/M_NEW 均已被场景1/3消费为绑定目标，仍窗内——
     // 但次数未超，latestBindable 命中最新的 M_NEW）→ 清空重来验证纯主动：
     // 全新 fixture，不 seed 任何消息。
     const fx4 = setupDb();
     try {
-      const m4 = makeApiMock();
+      const m4 = makeNetMock();
       const r4 = await makeSender(fx4, m4).sendAuto(BOT, GROUP, "场景四");
       assert.equal(r4.channel, "proactive");
-      assert.equal(m4.calls[0]!.body.msg_id, undefined);
-      assert.equal(m4.calls[0]!.body.message_reference, undefined);
+      assert.equal(m4.proactives[0]!.quoteMsgId, undefined);
+      assert.equal(m4.proactives[0]!.media, undefined);
     } finally {
       fx4.close();
     }
@@ -736,23 +791,23 @@ test("M4-14 sendAuto 路由：quote 窗内 → 被动绑=引；quote 超窗 → 
 test("M4-15 sendAuto：quote 不在缓存 → 报错不发送；被动次数用尽 → 主动兜底", async () => {
   const fx = setupDb();
   try {
-    const m1 = makeApiMock();
+    const m1 = makeNetMock();
     await assert.rejects(
       () => makeSender(fx, m1).sendAuto(BOT, GROUP, "x", "M_MISSING"),
       /不在缓存中/,
     );
-    assert.equal(m1.calls.length, 0, "报错路径不应发出任何请求");
+    assert.equal(m1.sentCount(), 0, "报错路径不应发出任何请求");
 
     // 窗内消息已被回复 5 次 → latestBindable 跳过 → 主动兜底
     seedInbound(fx.repo, "M_FULL", 30_000);
-    const m2 = makeApiMock();
+    const m2 = makeNetMock();
     const sender = makeSender(fx, m2);
     for (let i = 0; i < 5; i++) {
       await sender.reply(BOT, GROUP, "M_FULL", `第${i}次回复`);
     }
     const r = await sender.sendAuto(BOT, GROUP, "第六次");
     assert.equal(r.channel, "proactive", "次数用尽后应换主动通道");
-    assert.equal(m2.calls[m2.calls.length - 1]!.body.msg_id, undefined);
+    assert.ok(m2.proactives.length >= 1, "兜底应落在主动通道");
   } finally {
     fx.close();
   }
@@ -763,7 +818,7 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
   try {
     // 场景1：窗内有消息 → 被动图（绑最新），msg_type=7 + 配文，不带引用块
     seedInbound(fx.repo, "M_PIC", 60_000); // 1 分钟前
-    const m1 = makeApiMock();
+    const m1 = makeNetMock();
     const r1 = await makeSender(fx, m1).sendMediaAuto(
       BOT,
       GROUP,
@@ -773,15 +828,17 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
     assert.equal(r1.channel, "passive", "窗内有消息应走被动图（免额度）");
     assert.equal(r1.msg_seq, 1);
     assert.equal(m1.uploads.length, 1);
-    assert.deepEqual(m1.uploads[0]!.src, {
+    assert.deepEqual(m1.uploads[0]!.source, {
       kind: "url",
       url: "https://example.com/cat.png",
     });
-    assert.equal(m1.calls[0]!.body.msg_type, 7);
-    assert.equal(m1.calls[0]!.body.msg_id, "M_PIC");
-    assert.equal(m1.calls[0]!.body.content, "看看这只猫");
-    assert.deepEqual(m1.calls[0]!.body.media, { file_info: "FILEINFO_1" });
-    assert.equal(m1.calls[0]!.body.message_reference, undefined);
+    // 富媒体线格式（msg_type=7 + file_info）规格见 connector-qq-net.test
+    const r1wire = m1.replies[0]!;
+    assert.equal(r1wire.media?.kind, "image");
+    assert.equal(r1wire.media?.handle, "FILEINFO_1");
+    assert.equal(r1wire.msgId, "M_PIC");
+    assert.equal(r1wire.content, "看看这只猫");
+    assert.equal(r1wire.quoteMsgId, undefined);
     // 补记行：读取层以 ![图片] 占位（与附件占位符约定一致）
     const latest = fx.repo.browseLatest(BOT, "group", GROUP, 1)[0]!;
     assert.equal(latest.direction, 1);
@@ -790,18 +847,18 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
     // 场景2：无窗内消息 → 主动图（独立 fixture：场景1 的 M_PIC 仍窗内会干扰路由）
     const fx2 = setupDb();
     try {
-      const m2 = makeApiMock();
-      const r2 = await makeSender(fx2, m2).sendMediaAuto(
+      const m2 = makeNetMock();
+      const qq2 = makeQqHooks(fx2);
+      const r2 = await makeSender(fx2, m2, qq2.hooks).sendMediaAuto(
         BOT,
         GROUP,
         "data:image/png;base64,AAAA",
       );
       assert.equal(r2.channel, "proactive");
-      assert.equal(m2.calls[0]!.body.msg_type, 7);
-      assert.equal(m2.calls[0]!.body.msg_id, undefined);
-      assert.deepEqual(m2.uploads[0]!.src, { kind: "b64", data: "AAAA" });
+      assert.notEqual(m2.proactives[0]!.media, undefined);
+      assert.deepEqual(m2.uploads[0]!.source, { kind: "b64", data: "AAAA" });
       assert.equal(
-        fx2.repo.proactiveCountFor(BOT, GROUP, beijingDate()),
+        await dailyCountOf(qq2.host.state, beijingDate(), GROUP),
         1,
         "主动图应计入日额度",
       );
@@ -811,7 +868,7 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
 
     // 场景3：quote 超窗目标 → 主动 + 引用块（2026-10-27 真机验证受理）
     seedInbound(fx.repo, "M_OLDPIC", 6 * 60_000);
-    const m3 = makeApiMock();
+    const m3 = makeNetMock();
     const r3 = await makeSender(fx, m3).sendMediaAuto(
       BOT,
       GROUP,
@@ -820,13 +877,10 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
       "M_OLDPIC",
     );
     assert.equal(r3.channel, "proactive");
-    assert.deepEqual(m3.calls[0]!.body.message_reference, {
-      message_id: "M_OLDPIC",
-      ignore_get_message_error: true,
-    });
+    assert.equal(m3.proactives[0]!.quoteMsgId, "M_OLDPIC");
 
     // 场景4：本地路径 → 硬拒绝（MCP 服务可能与智能体不同机），上传与发送零调用
-    const m4 = makeApiMock();
+    const m4 = makeNetMock();
     await assert.rejects(
       () =>
         makeSender(fx, m4).sendMediaAuto(
@@ -837,11 +891,11 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
       /media 参数格式不支持/,
     );
     assert.equal(m4.uploads.length, 0);
-    assert.equal(m4.calls.length, 0);
+    assert.equal(m4.sentCount(), 0);
 
     // 场景5：上传转存失败 → media_upload_failed 文案，不发送任何消息
-    const m5 = makeApiMock();
-    m5.uploadMedia = async () => {
+    const m5 = makeNetMock();
+    m5.mock.uploadMedia = async () => {
       throw new Error("HTTP 500");
     };
     await assert.rejects(
@@ -853,7 +907,7 @@ test("M4-16 sendMediaAuto：窗内被动图/无窗内主动图/引用块/本地�
         ),
       /图片上传官方转存失败/,
     );
-    assert.equal(m5.calls.length, 0, "上传失败不得发送消息");
+    assert.equal(m5.sentCount(), 0, "上传失败不得发送消息");
   } finally {
     fx.close();
   }
@@ -863,7 +917,7 @@ test("M10 sendMediaAuto 语音：.mp3 URL → file_type=3 类别，补记 ![语�
   const fx = setupDb();
   try {
     seedInbound(fx.repo, "M_SONG", 60_000);
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const r = await makeSender(fx, mock).sendMediaAuto(
       BOT,
       GROUP,
@@ -873,11 +927,11 @@ test("M10 sendMediaAuto 语音：.mp3 URL → file_type=3 类别，补记 ![语�
     assert.equal(r.channel, "passive", "窗内语音同样走被动回复");
     assert.equal(mock.uploads.length, 1);
     assert.equal(
-      mock.uploads[0]!.mediaType,
+      mock.uploads[0]!.kind,
       "voice",
       "mp3 扩展名应分类为语音（生产适配映射 file_type=3）",
     );
-    assert.equal(mock.calls[0]!.body.msg_type, 7);
+    assert.notEqual(mock.replies[0]!.media, undefined);
     // 补记行：读取层以 ![语音] 占位（与 ![图片]/![附件n] 占位符约定一致）
     const latest = fx.repo.browseLatest(BOT, "group", GROUP, 1)[0]!;
     assert.equal(latest.direction, 1);
@@ -913,24 +967,26 @@ test("M4-18 单聊被动回复：窗内 sendAuto 绑定 msg_id（seq=1）走 c2c
   const fx = setupDb();
   try {
     seedC2cInbound(fx.repo, "C1", 60_000);
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     const r = await sender.sendAuto(BOT, C2C_USER, "收到！", undefined, "chat");
     assert.equal(r.status, "sent");
     assert.equal(r.channel, "passive", "60 分钟窗内走被动");
-    assert.equal(mock.calls.length, 1);
-    assert.equal(mock.calls[0]!.scope, "c2c", "sendRaw 用官方 c2c scope");
-    assert.equal(mock.calls[0]!.targetId, C2C_USER);
-    assert.equal(mock.calls[0]!.body.msg_id, "C1", "被动绑定目标消息");
-    assert.equal(mock.calls[0]!.body.msg_seq, 1);
-    assert.equal(mock.calls[0]!.body.msg_type, 0);
+    assert.equal(mock.sentCount(), 1);
+    assert.equal(
+      mock.replies[0]!.scope,
+      "chat",
+      "wire 会话形态标签（官方 c2c scope 映射规格见 connector-qq-net.test）",
+    );
+    assert.equal(mock.replies[0]!.target, C2C_USER);
+    assert.equal(mock.replies[0]!.msgId, "C1", "被动绑定目标消息");
+    assert.equal(mock.replies[0]!.msgSeq, 1);
+    assert.notEqual(mock.replies[0]!.markdown, true);
     const row = fx.repo.getMessageByMsgId(
       BOT,
       "chat",
@@ -948,32 +1004,27 @@ test("M4-19 单聊被动窗超时 → 主动兜底需 opt-in：无 C2C_MSG_RECEI
   const fx = setupDb();
   try {
     seedC2cInbound(fx.repo, "C1", 61 * 60_000); // 超出 60 分钟被动窗
-    const mock = makeApiMock();
+    const mock = makeNetMock();
+    const qq = makeQqHooks(fx);
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      hooks: qq.hooks,
+      transportFor: () => mock.mock,
     });
     await assert.rejects(
       () => sender.sendAuto(BOT, C2C_USER, "早", undefined, "chat"),
       (e: Error) => e.message === t("send_c2c_not_optin", { user: C2C_USER }),
       "无 opt-in 记录的主动单聊硬拒绝",
     );
-    assert.equal(mock.calls.length, 0, "硬拒绝不得触发 API");
+    assert.equal(mock.sentCount(), 0, "硬拒绝不得触发 API");
     fx.repo.setC2cSwitch(BOT, C2C_USER, true);
     const r = await sender.sendAuto(BOT, C2C_USER, "早", undefined, "chat");
     assert.equal(r.channel, "proactive");
-    assert.equal(mock.calls[0]!.scope, "c2c");
+    assert.equal(mock.proactives[0]!.scope, "chat");
     assert.equal(
-      mock.calls[0]!.body.msg_id,
-      undefined,
-      "主动消息不绑定 msg_id",
-    );
-    assert.equal(
-      fx.repo.proactiveCountFor(BOT, C2C_USER, beijingDate()),
+      await dailyCountOf(qq.host.state, beijingDate(), C2C_USER),
       1,
       "单关系日额度记账 +1",
     );
@@ -986,14 +1037,12 @@ test("M4-20 单聊门禁：对方拒绝（C2C_MSG_REJECT）连被动回复也硬
   const fx = setupDb();
   try {
     seedC2cInbound(fx.repo, "C1");
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     fx.repo.setC2cSwitch(BOT, C2C_USER, false);
     await assert.rejects(
@@ -1010,7 +1059,7 @@ test("M4-20 单聊门禁：对方拒绝（C2C_MSG_REJECT）连被动回复也硬
         ),
       (e: Error) => e.message === t("send_c2c_optout", { user: C2C_USER }),
     );
-    assert.equal(mock.calls.length, 0);
+    assert.equal(mock.sentCount(), 0);
     fx.repo.setSendEnable(false);
     await assert.rejects(
       () =>
@@ -1031,7 +1080,7 @@ test("M4-20 单聊门禁：对方拒绝（C2C_MSG_REJECT）连被动回复也硬
           allow: 1, // setupDb：白名单 [GROUP]
         }),
     );
-    assert.equal(mock.calls.length, 0);
+    assert.equal(mock.sentCount(), 0);
   } finally {
     fx.close();
   }
@@ -1041,14 +1090,12 @@ test("M4-21 单聊被动窗次数上限 4 次；撤回走 c2c scope", async () =
   const fx = setupDb();
   try {
     seedC2cInbound(fx.repo, "C1");
-    const mock = makeApiMock();
+    const mock = makeNetMock();
     const sender = new Sender({
       log: createLogger("error"),
-      db: fx.db,
       repo: fx.repo,
-      tokenManager: {} as never,
       bots: fx.registry,
-      apiFor: () => mock,
+      transportFor: () => mock.mock,
     });
     for (let i = 0; i < 4; i += 1) {
       const r = await sender.reply(
@@ -1079,7 +1126,7 @@ test("M4-21 单聊被动窗次数上限 4 次；撤回走 c2c scope", async () =
         e.message === t("send_window_exhausted_c2c", { used: 4, max: 4 }),
       "官方限制每条单聊消息最多回复 4 次",
     );
-    assert.equal(mock.calls.length, 4);
+    assert.equal(mock.sentCount(), 4);
     await sender.recall(BOT, C2C_USER, "PROVIDER_1", "chat");
     assert.equal(mock.recalls.length, 1, "撤回 API 被调用");
   } finally {
