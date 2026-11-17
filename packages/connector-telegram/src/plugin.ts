@@ -1,0 +1,144 @@
+// Telegram 连接器插件声明面（ConnectorPlugin）：caps / credentialSchema /
+// hooks（verifyCredential）/ create。P3.5 试金石（2026-11-16）——
+// 纯外挂包进场：core 预期改动仅 normalize/telegram parser + ingest 路由 +
+// Sender caps 感知路由三处（diff 记录于 todo.md，即「抽象不泄漏」的账本）。
+//
+// 平台语义判定（与 QQ 的差异全部走 caps 声明，不进宿主）：
+// - passiveWindow=false：Telegram 无被动窗口概念，任意时刻可发 → 发送只走
+//   proactive 通道（net.reply 仅为契约兼容别名）；
+// - quota=false：无官方日额度（限流是 ~1 msg/s/chat 的网络节流，归 connector
+//   net 内部 pace，不做门禁工具）；
+// - recall=true：deleteMessage（bot 只能删自己的消息）；
+// - media 全支持：图（sendPhoto）/语音（sendVoice，OGG/MP3/M4A）。
+
+import type {
+  ConnectorLogger,
+  ConnectorPlugin,
+  HostApi,
+  NormalizedInbound,
+} from "@qsense/connector-sdk";
+import {
+  createTelegramApi,
+  TelegramApiError,
+  TG_ERROR_UNAUTHORIZED,
+  type TelegramInboundPayload,
+} from "./api";
+import { createTelegramInstance } from "./instance";
+import { normalizeTelegramInbound } from "./parser";
+import { tt } from "./texts";
+
+export interface TelegramConnectorOpts {
+  /** 宿主根日志器（loadModule 注入；缺省=静默 noop，仅独立调试用） */
+  log?: ConnectorLogger;
+  /** 测试注入：替换 Bot API 端点/fetch（CI 不碰真实网络） */
+  apiOverrides?: Parameters<typeof createTelegramApi>[1];
+}
+
+/** 无日志器缺省（分仓包不依赖 SDK 运行时值，noop 本地实现） */
+function noopLog(): ConnectorLogger {
+  const noop = (): void => undefined;
+  const logger: ConnectorLogger = {
+    debug: noop,
+    info: noop,
+    warn: noop,
+    error: noop,
+    fatal: noop,
+    child: () => logger,
+  };
+  return logger;
+}
+
+/** BotFather token 形制（<bot_id>:<至少 30 位凭据串>） */
+const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
+
+export function createTelegramConnector(
+  opts: TelegramConnectorOpts = {},
+): ConnectorPlugin {
+  void (opts.log ?? noopLog()); // 当前无插件级共享服务；占位对齐 connector-qq 形态
+
+  return {
+    id: "telegram",
+    sdkRange: "^2.0.0",
+    title: "Telegram Bot",
+    caps: {
+      scopes: ["group", "c2c"],
+      media: { image: true, voice: true, video: true, file: true },
+      recall: true,
+      passiveWindow: false,
+      quota: false,
+    },
+    // 契约 v2：解读权在本插件——core ingest 表驱动按 payload.platform="telegram" 路由到此
+    normalize: (botId, payload): NormalizedInbound | null => {
+      if (
+        payload === null ||
+        typeof payload !== "object" ||
+        (payload as Record<string, unknown>)["platform"] !== "telegram"
+      ) {
+        return null;
+      }
+      return normalizeTelegramInbound(botId, payload as TelegramInboundPayload);
+    },
+    credentialSchema: {
+      type: "object",
+      required: ["appid", "token"],
+      properties: {
+        appid: {
+          type: "string",
+          description: "Bot 数字 id（token 冒号前的数字；getMe 的 id）",
+        },
+        token: {
+          type: "string",
+          description: "BotFather 下发的 token（形如 123456:AA-xxx）",
+        },
+      },
+    },
+    credentialSecrets: ["token"],
+    tools: [],
+    hooks: {
+      verifyCredential: async (credential) => {
+        // 两级校验：token 形制 → getMe（官方真伪 + bot id 一致性）。
+        // 平台专属提示由本插件自带（宿主包装只承担统一前缀）。
+        const token = credential["token"] ?? "";
+        if (!TOKEN_RE.test(token)) {
+          throw new Error(
+            "token 形制不对：应为 BotFather 下发的 <数字id>:<凭据串>（形如 123456:AA-xxx）。",
+          );
+        }
+        const expected = credential["appid"] ?? "";
+        if (!/^\d{6,12}$/.test(expected)) {
+          throw new Error(
+            "appid 应为 bot 数字 id（token 冒号前的数字，getMe 的 id）。",
+          );
+        }
+        try {
+          const api = createTelegramApi(token, opts.apiOverrides);
+          const me = await api.call<{ id: number }>("getMe");
+          if (String(me.id) !== expected) {
+            throw new Error(
+              tt("tg_appid_mismatch", {
+                actual: String(me.id),
+                expected,
+              }),
+            );
+          }
+        } catch (e) {
+          if (e instanceof TelegramApiError && e.errorCode === TG_ERROR_UNAUTHORIZED) {
+            throw new Error(tt("tg_token_invalid", { reason: e.description }));
+          }
+          throw e;
+        }
+      },
+    },
+    create: (host: HostApi, creds) => {
+      const api = createTelegramApi(
+        creds.credential["token"] ?? "",
+        opts.apiOverrides,
+      );
+      return createTelegramInstance({
+        host,
+        botId: creds.botId,
+        api,
+      });
+    },
+  };
+}
