@@ -14,6 +14,10 @@
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true,
     "useDefineForClassFields": true,
+    "paths": {
+      "@qsense/connector-sdk": ["./packages/connector-sdk/src/index.ts"],
+      "@qsense/connector-qq": ["./packages/connector-qq/src/index.ts"]
+    },
   },
-  "include": ["src", "test"],
+  "include": ["src", "test", "packages/connector-sdk/src", "packages/connector-qq/src"],
 }
