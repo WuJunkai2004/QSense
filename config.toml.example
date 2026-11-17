@@ -1,0 +1,45 @@
+# qqbot-websocket-mcp 配置模板。复制为 config.toml 后按需修改；config.toml 已 gitignore，严禁提交。
+#
+# config.toml 是服务配置的唯一权威（2026-11-17 起 env/.env 已退役，服务不读任何环境变量）：
+#   - 服务参数 + 日志：下方顶层键（全部可省略 = 缺省值）
+#   - 连接器声明：[connectors.<platform>] 存在即启用，整节删除/注释 = 平台下线
+#
+# 不需要填任何 bot 或凭据（凭据红线：绝不进 toml）——
+#   - bot：经 WebUI「添加机器人」或 MCP 工具 register_bot 注册（过平台官方校验），
+#     凭据唯一权威在 SQLite（data_dir 下）bots.credentials_json
+#   - admin token：首次启动自动生成并打印一次（登录 WebUI 用）
+#   - 发送开关 / 白名单 / 认证等级：WebUI 设置页管理，即时落库生效
+#   - agent_token（OpenCode 连 /mcp 用）：注册 bot 时返回一次，配进 opencode.jsonc
+
+# —— 服务 ——
+host = "127.0.0.1"          # 形态A（本地）保持 127.0.0.1；反代/隧道按需改 0.0.0.0
+port = 8787                 # 1-65535 整数
+data_dir = "./data"         # SQLite 目录（WAL；bots 表 / kv / 消息缓存都在这）
+ui_dist_dir = "./ui/dist"   # WebUI 静态产物目录（ui/ junction 内构建产物）
+
+# —— 日志 ——
+log_content = false         # 是否记录消息正文；硬约束：生产禁止开启（AGENTS.md 禁止事项）
+log_level = "info"          # debug/info/warn/error/fatal（非法值宽松回落 info）
+log_format = "pretty"       # pretty（缺省，loguru 风格，TTY 着色）| json（采集端解析）
+                            # 终端着色不受本文件管：NO_COLOR/FORCE_COLOR 是 TTY 惯例
+
+# —— 连接器声明（部署拓扑权威） ——
+# 字段：package = 动态 import 的包说明符（必填）；range = 可选 sdkRange 钉版
+#（semver-lite，如 "^2.0.0"，与插件自声明双重校验）；source = 供应链标注（文档性）。
+# 来源纪律：file: = 本地自研插件（零摩擦）；npmjs/github = 显式安装 + lockfile 钉版 +
+# 首次启用人工确认；启动零隐式网络拉取。
+# 已注册 bot 的平台缺失声明 = 启动期 fail-fast 拒启（可操作文案提示补声明或移除 bot）。
+
+[connectors.qq]
+package = "@qsense/connector-qq"
+source = "file:packages/connector-qq"
+
+[connectors.telegram]
+package = "@qsense/connector-telegram"
+source = "file:packages/connector-telegram"
+
+# 新平台示例（P4 微信或第三方插件，core 零改动进场）：
+# [connectors.weixin]
+# package = "@qsense/connector-weixin"
+# range = "^2.0.0"
+# source = "file:packages/connector-weixin"
