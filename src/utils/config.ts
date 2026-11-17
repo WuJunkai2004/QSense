@@ -10,8 +10,8 @@
 // 如 MCP_TOKEN/TELEGRAM_TOKEN 是每次调用的入参，不是服务配置）。
 
 import { readFileSync } from "node:fs";
-import type { Level, LogFormat } from "../logger";
-import { levelFromRaw } from "../logger";
+import type { Level, LogFormat } from "./logger";
+import { levelFromRaw } from "./logger";
 import { t } from "../i18n";
 import { connectorDeclsOf, type ConnectorDecl } from "../connectors/decl";
 import { parse } from "smol-toml";

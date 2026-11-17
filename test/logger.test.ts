@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createLogger, levelFromEnv, redact } from "../src/logger";
+import { createLogger, levelFromRaw, redact } from "../src/utils/logger";
 
 test("redact：敏感键替换为 [REDACTED]，含嵌套对象与数组", () => {
   const out = redact({
@@ -84,8 +84,8 @@ test("json 格式（LOG_FORMAT=json）：结构化 JSON 行，采集端可解析
   assert.equal(parsed.ok, 1);
 });
 
-test("levelFromEnv：非法值回落 info", () => {
-  assert.equal(levelFromEnv("debug"), "debug");
-  assert.equal(levelFromEnv(undefined), "info");
-  assert.equal(levelFromEnv("nope"), "info");
+test("levelFromRaw：非法值回落 info", () => {
+  assert.equal(levelFromRaw("debug"), "debug");
+  assert.equal(levelFromRaw(undefined), "info");
+  assert.equal(levelFromRaw("nope"), "info");
 });
