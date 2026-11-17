@@ -1,6 +1,7 @@
 // 事件去重：有界环形去重器。
 // 这是第一道闸（进程内）；第二道闸是 M2 存储层主键（messages 表 msg_id 唯一 + INSERT OR IGNORE）。
 // 官方在重连补发窗口内可能重复投递同一事件，去重键 = bot:type:事件id。
+// （P1 收口：自 gateway/dedup.ts 上移 core ingest 管线——去重是语义幂等，不是网络。）
 
 export class BoundedDedup {
   private readonly seen = new Set<string>();

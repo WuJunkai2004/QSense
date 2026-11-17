@@ -3,11 +3,17 @@
 // {param} 占位插值；未提供的参数保留占位符原文。语言进程内检测一次，无运行时切换。
 
 const zh = {
-  // —— 配置校验 ——
+  // —— 配置校验（config.toml 唯一权威；env 已退役） ——
+  cfg_file_missing:
+    "配置文件缺失：{path}。请复制仓库根的 config.toml.example 为 config.toml（服务参数与连接器声明都在其中）。",
+  cfg_unknown_key:
+    'config.toml 存在未知键 "{key}"（允许：host/port/data_dir/ui_dist_dir/log_content/log_level/log_format/connectors；凭据绝不进 toml）。',
+  cfg_bad_type: "配置无效：{key} 类型错误，必须是{type}。",
+  type_string: "字符串",
   cfg_bad_bool: "配置无效：{key}={value}，只接受 true / false。",
-  cfg_bad_port: "配置无效：PORT={value}，必须是 1-65535 的整数。",
+  cfg_bad_port: "配置无效：port={value}，必须是 1-65535 的整数。",
   cfg_bad_log_format:
-    "配置无效：LOG_FORMAT={value}，只接受 pretty（人类可读，缺省）或 json（JSON 行，供采集端解析）。",
+    "配置无效：log_format={value}，只接受 pretty（人类可读，缺省）或 json（JSON 行，供采集端解析）。",
   // —— 启动 ——
   boot_db_fail:
     "数据库初始化失败：{path}（{reason}）。检查 DATA_DIR 是否存在且可写。",
@@ -22,6 +28,12 @@ const zh = {
     "网关连接致命关闭，已停止重连（{detail}）。若为 4914/4915：intents 未授权或机器人状态异常，需到开放平台人工核查。",
   gw_disconnected_final: "网关断开且不再重连（code={code}，{reason}）。",
   gw_event_dedup: "重复事件已去重丢弃：type={type}，id={id}。",
+  ingest_no_platform:
+    "上行信封缺 platform 键，已丢弃（bot={bot}）。请检查连接器版本是否与契约 v2 兼容。",
+  ingest_platform_unloaded:
+    "平台 {platform} 的连接器未注册（bot={bot}），上行已丢弃。请检查 config.toml 声明与对应连接器包安装/构建。",
+  ingest_parse_fail:
+    "平台 {platform} 的 normalize 解读失败，载荷已丢弃：{reason}",
   // —— 退出 ——
   shutdown_done: "已优雅退出。",
   // —— 发送器（M4） ——
@@ -91,10 +103,16 @@ const zh = {
 type Translation = Record<keyof typeof zh, string>;
 
 const en: Translation = {
+  cfg_file_missing:
+    "Config file missing: {path}. Copy config.toml.example from the repo root to config.toml (server options and connector declarations live there).",
+  cfg_unknown_key:
+    'config.toml has unknown key "{key}" (allowed: host/port/data_dir/ui_dist_dir/log_content/log_level/log_format/connectors; credentials never go into toml).',
+  cfg_bad_type: "Invalid config: {key} must be {type}.",
+  type_string: "a string",
   cfg_bad_bool: "Invalid config: {key}={value}, only true / false accepted.",
-  cfg_bad_port: "Invalid config: PORT={value}, must be an integer in 1-65535.",
+  cfg_bad_port: "Invalid config: port={value}, must be an integer in 1-65535.",
   cfg_bad_log_format:
-    "Invalid config: LOG_FORMAT={value}, only pretty (default) or json is accepted.",
+    "Invalid config: log_format={value}, only pretty (default) or json is accepted.",
   boot_db_fail:
     "Database init failed: {path} ({reason}). Check DATA_DIR exists and is writable.",
   boot_listen_fail:
@@ -108,6 +126,12 @@ const en: Translation = {
   gw_disconnected_final:
     "Gateway disconnected and will not reconnect (code={code}, {reason}).",
   gw_event_dedup: "Duplicate event dropped: type={type}, id={id}.",
+  ingest_no_platform:
+    "Inbound envelope lacks the platform key, dropped (bot={bot}). Check that the connector is compatible with contract v2.",
+  ingest_platform_unloaded:
+    "Connector for platform {platform} is not registered (bot={bot}); inbound dropped. Check config.toml declarations and the connector package install/build.",
+  ingest_parse_fail:
+    "normalize failed for platform {platform}; payload dropped: {reason}",
   shutdown_done: "Graceful shutdown complete.",
   send_disabled:
     "Sending is disabled, rejected. Writes require the master send switch enabled (managed in the WebUI settings) and the target conversation meeting send conditions (group = in the bot's allowlist; direct message = recipient has not rejected messages). Current switch {enabled}, allowlisted groups {allow}.",

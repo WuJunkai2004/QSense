@@ -2,8 +2,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BoundedDedup } from "../src/gateway/dedup";
-import { OUR_INTENTS } from "../src/gateway/intents";
+import { BoundedDedup } from "../src/connectors/dedup";
+import { OUR_INTENTS } from "@qsense/connector-qq";
 
 test("BoundedDedup：首次 true、重复 false、容量淘汰后视为新", () => {
   const d = new BoundedDedup(2);

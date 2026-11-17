@@ -7,13 +7,37 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decomposeElements } from "../src/normalize/expand";
-import { normalizeMessage } from "../src/normalize";
-import { handleGatewayEvent } from "../src/normalize/handler";
-import type { RawEvent } from "../src/gateway";
+import {
+  ConnectorRegistry,
+  type ConnectorLogger,
+} from "@qsense/connector-sdk";
+import {
+  createQqConnector,
+  decomposeElements,
+  normalizeQqMessage as normalizeMessage,
+  type QqEvent,
+} from "@qsense/connector-qq";
+import { createIngestPipeline } from "../src/connectors/ingest";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
+
+/** 表驱动 ingest 台架：真 QQ 插件 + 假日志（信封 {platform:"qq", type, data} 全链路） */
+function makePipeline(repo: Repo) {
+  const plugins = new ConnectorRegistry();
+  plugins.register(createQqConnector());
+  const log = {
+    debug: () => undefined,
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    fatal: () => undefined,
+    child: () => log,
+  } as unknown as ConnectorLogger;
+  const pipeline = createIngestPipeline({ repo, log: log as never, plugins });
+  return (type: string, data: unknown, botId = "10001"): void =>
+    pipeline({ botId, payload: { platform: "qq", type, data } });
+}
 
 function setupDb(): { dir: string; db: DB; repo: Repo } {
   const dir = mkdtempSync(join(tmpdir(), "qqbot-m2-test-"));
@@ -36,11 +60,20 @@ function cleanup(dir: string, db: DB): void {
   }
 }
 
-const ev = (type: string, data: unknown, botId = "10001"): RawEvent => ({
+const ev = (type: string, data: unknown, botId = "10001"): QqEvent => ({
   botId,
   type,
   data,
 });
+
+/**
+ * 原 core handler（P5 契约 v2 已下沉 connector-qq）：测试改为走真管线——
+ * 信封 {platform:"qq"} → 表驱动路由 → 插件 normalize → 消息入库 + 效应落地。
+ * 既有 M2 断言（群注册表/名册/users 语义）原样保留，验证的是端到端路径。
+ */
+function handleGatewayEvent(repo: Repo, event: QqEvent): void {
+  makePipeline(repo)(event.type, event.data, event.botId);
+}
 
 /** 官方 GROUP_MESSAGE_CREATE 事件形状（依据 API-FACTS.md #2 字段表） */
 const groupMsgShape = {
