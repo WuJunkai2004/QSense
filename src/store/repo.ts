@@ -11,7 +11,7 @@
 
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { NormalizedMessage, MsgScope } from "../normalize/types";
+import type { NormalizedMessage, MsgScope } from "@qsense/connector-sdk";
 import type { TtsConfig } from "../tts";
 import type { DB } from "./db";
 
@@ -98,6 +98,9 @@ export class Repo {
   private readonly detectGroupMsgStmt: Stmt<[string, string]>;
   private readonly detectChatMsgStmt: Stmt<[string, string]>;
   private readonly detectGroupRegStmt: Stmt<[string, string]>;
+  /** P3：会话注册表（sessions 表）——kind 裁决权威源 + ingest 登写 */
+  private readonly sessionKindStmt: Stmt<[string, string]>;
+  private readonly upsertSessionStmt: Stmt<[Record<string, unknown>]>;
   private readonly upsertGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly ensureGroupStmt: Stmt<[Record<string, unknown>]>;
   private readonly setGroupSwitchStmt: Stmt<[Record<string, unknown>]>;
@@ -220,6 +223,17 @@ export class Repo {
     this.detectGroupRegStmt = db.prepare(
       "SELECT 1 FROM groups WHERE bot_id = ? AND group_openid = ? LIMIT 1",
     );
+    // P3 会话注册表：显式登记 (bot_id, session_id) → kind，探测降级为兜底
+    this.sessionKindStmt = db.prepare(
+      "SELECT kind FROM sessions WHERE bot_id = ? AND session_id = ?",
+    );
+    this.upsertSessionStmt = db.prepare(`
+      INSERT INTO sessions(bot_id, session_id, kind, updated_at)
+      VALUES (@bot_id, @session_id, @kind, @now)
+      ON CONFLICT(bot_id, session_id) DO UPDATE SET
+        kind = @kind,
+        updated_at = @now
+    `);
     this.upsertGroupStmt = db.prepare(`
       INSERT INTO groups(bot_id, group_openid, full_msg_enabled, added_at, updated_at)
       VALUES (@bot_id, @group_openid, @full_msg_enabled, @now, @now)
@@ -346,6 +360,8 @@ export class Repo {
             rec.attachments.length > 0 ? JSON.stringify(rec.attachments) : null,
         });
       }
+      // P3：会话注册表登记（detectSessionKind 的权威源；upsert 幂等）
+      this.registerSession(m.botId, m.scopeId, m.scope);
       if (m.scope === "group" && m.authorOpenid !== "") {
         this.upsertMemberStmt.run({
           bot_id: m.botId,
@@ -466,6 +482,25 @@ export class Repo {
 
   // —— 群注册表 / 成员名册 ——
 
+  /**
+   * 会话注册表登记（P3）：任何「该 bot 存在此会话」的证据路径都登记——
+   * 消息入库（saveMessage 事务内）、群注册/开关事件、C2C 开关事件。
+   * 只登记侧别事实（kind），不携带任何业务状态；同 id 同 kind 重复登记幂等。
+   */
+  private registerSession(
+    botId: string,
+    sessionId: string,
+    kind: "group" | "chat",
+  ): void {
+    if (sessionId === "") return;
+    this.upsertSessionStmt.run({
+      bot_id: botId,
+      session_id: sessionId,
+      kind,
+      now: Date.now(),
+    });
+  }
+
   addGroup(botId: string, groupOpenid: string): void {
     this.upsertGroupStmt.run({
       bot_id: botId,
@@ -473,6 +508,7 @@ export class Repo {
       full_msg_enabled: 0,
       now: Date.now(),
     });
+    this.registerSession(botId, groupOpenid, "group");
   }
 
   /** 群保底在册（INSERT OR IGNORE，已存在不覆盖开关状态）；fullMsgEnabled=null 仅新建时落 0 */
@@ -487,6 +523,7 @@ export class Repo {
       full_msg_enabled: fullMsgEnabled ?? 0,
       now: Date.now(),
     });
+    this.registerSession(botId, groupOpenid, "group");
   }
 
   /** GROUP_MSG_RECEIVE / GROUP_MSG_REJECT：全量消息开关状态 */
@@ -497,6 +534,7 @@ export class Repo {
       full_msg_enabled: enabled ? 1 : 0,
       now: Date.now(),
     });
+    this.registerSession(botId, groupOpenid, "group");
   }
 
   /** GROUP_DEL_ROBOT：被移出群 → 注册表失效（缓存历史保留，名册独立存在） */
@@ -510,6 +548,8 @@ export class Repo {
       `c2c:switch:${botId}:${userOpenid}`,
       enabled ? "1" : "0",
     );
+    // 开关事件可先行于首条消息（用户已同意但还没说话）——登记会话存在性（只登记侧别）
+    this.registerSession(botId, userOpenid, "chat");
   }
 
   getC2cSwitch(botId: string, userOpenid: string): boolean | null {
@@ -729,12 +769,20 @@ export class Repo {
 
   /**
    * 会话侧别自动探测（读写工具的 type 参数退役后的裁决源）：
-   * openid 是权威定位标识（群 openid 与用户 openid 命名空间互斥、不可能同值），
-   * 按缓存归属即可唯一裁决。group 证据=群消息缓存或群注册表；
-   * chat 证据=单聊消息缓存或 C2C 开关 kv 记录（开关事件可先行于首条缓存消息——
-   * 用户已同意接收但尚无消息时仍可裁决，主动消息门禁亦依赖该记录）；null=两侧均无。
+   * P3 起权威源 = sessions 显式注册表（ingest 入库/开关事件即登记）——
+   * 不再依赖「群 openid 与用户 openid 命名空间互斥」这一 QQ 保证
+   * （其他平台同值 id 可能群/私并存，注册表按登记侧别唯一裁决）。
+   * 注册表未命中（迁移前历史数据/异常路径）→ 原探测三件套兜底：
+   * group 证据=群消息缓存或群注册表；chat 证据=单聊消息缓存或 C2C 开关记录。
+   * null=两侧均无。
    */
   detectSessionKind(botId: string, id: string): "group" | "chat" | null {
+    const hit = this.sessionKindStmt.get(botId, id) as
+      | { kind: string }
+      | undefined;
+    if (hit !== undefined) {
+      return hit.kind === "chat" ? "chat" : "group";
+    }
     const inGroup =
       this.detectGroupMsgStmt.get(botId, id) !== undefined ||
       this.detectGroupRegStmt.get(botId, id) !== undefined;

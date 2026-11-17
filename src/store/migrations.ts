@@ -3,8 +3,8 @@
 // 新结构一律追加新版本，禁止修改历史迁移（已应用的版本按 version 跳过）。
 // M2 的业务表（groups/members/messages/messages_fts/c2c/sends/quota_daily）作为 version 2 追加。
 
-import { normalizeMessage } from "../normalize";
-import type { MsgScope } from "../normalize/types";
+import { normalizeQqMessage } from "@qsense/connector-qq";
+import type { MsgScope } from "@qsense/connector-sdk";
 import type { DB } from "./db";
 
 export interface Migration {
@@ -377,10 +377,11 @@ export const migrations: Migration[] = [
           });
           return;
         }
-        // 正常行：从 raw_json 全量重演（normalize 新管线产出 text/quote/records/干净 content）
+        // 正常行：从 raw_json 全量重演（QQ parser 新管线产出 text/quote/records/干净 content；
+        // parser 已下沉 connector-qq（契约 v2），此处命名导出复用同一实现）
         let m = null;
         try {
-          m = normalizeMessage({
+          m = normalizeQqMessage({
             type:
               scope === "group" ? "GROUP_MESSAGE_CREATE" : "C2C_MESSAGE_CREATE",
             botId: row.bot_id,
@@ -571,6 +572,114 @@ export const migrations: Migration[] = [
     up: `
       ALTER TABLE bots ADD COLUMN receive_enabled INTEGER NOT NULL DEFAULT 1;
       ALTER TABLE bots ADD COLUMN mcp_enabled INTEGER NOT NULL DEFAULT 1;
+    `,
+  },
+  {
+    version: 11,
+    name: "connector-registry",
+    // P2 分仓+声明制（2026-11-15）：connector 声明表——启用了哪些平台、用哪个包、
+    // 平台配置（config_json，P3 起接 BotConfigSnapshot 权威）。宿主启动读本表
+    // enabled=1 行 → loadModule(包名) 动态 import → sdkRange 校验 → 注册。
+    // 包安装拓扑（node_modules / file: 依赖）属部署层，env 不承担任何平台语义。
+    // QQ 是基座平台：INSERT OR IGNORE 播种一行（新库/存量库都保证声明存在）。
+    up: `
+      CREATE TABLE connectors(
+        platform TEXT PRIMARY KEY,
+        package TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT OR IGNORE INTO connectors(platform, package, enabled, config_json, created_at, updated_at)
+      VALUES ('qq', '@qsense/connector-qq', 1, '{}',
+              CAST(strftime('%s','now') AS INTEGER) * 1000,
+              CAST(strftime('%s','now') AS INTEGER) * 1000);
+    `,
+  },
+  {
+    version: 12,
+    name: "multi-platform-bots",
+    // P3 存储/工具面中立化（2026-11-16）：
+    // - bots 表加 platform 列（缺省 'qq'）+ credentials_json（凭据 JSON 化，形状由各
+    //   连接器 credentialSchema 权威：QQ={appid,secret}）。存量 QQ 行由 run 步骤原地
+    //   回填 JSON；appid/secret 物理列保留（追加式迁移不删列），appid 列语义扩展为
+    //   「平台账号 id」（仍是主键——QQ appid / 各平台唯一账号标识，假定跨平台不撞）。
+    // - 新增 sessions 显式会话注册表：(bot_id, session_id) → kind。ingest 入库即登记，
+    //   detectSessionKind 先查注册表、原探测三件套降级为兜底——消除对「群 openid 与
+    //   用户 openid 命名空间互斥」这一 QQ 保证的依赖（其他平台同值 id 可能群/私并存）。
+    // - P1 迁移债清算：旧物理键 gw:session:{botId} 平移进 connector:qq:{botId}:gw:session
+    //   （StatePort 统一命名空间），宿主 kvStatePort 的键名 shim 随之拆除。
+    //   平移保生产 RESUME 连续性（重启凭旧会话补发断线事件，不丢消息）。
+    up: `
+      ALTER TABLE bots ADD COLUMN platform TEXT NOT NULL DEFAULT 'qq';
+      ALTER TABLE bots ADD COLUMN credentials_json TEXT NOT NULL DEFAULT '{}';
+
+      CREATE TABLE sessions(
+        bot_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        updated_at INTEGER,
+        PRIMARY KEY(bot_id, session_id)
+      );
+    `,
+    run: (db: DB): void => {
+      // ① 存量 QQ 行凭据回填：appid/secret 列 → credentials_json（原地兼容）
+      db.exec(
+        "UPDATE bots SET credentials_json = json_object('appid', appid, 'secret', secret)",
+      );
+
+      // ② gw:session 旧物理键平移（P1 shim 拆除的前置）
+      const kvRows = db
+        .prepare("SELECT k, v FROM kv WHERE k LIKE 'gw:session:%'")
+        .all() as Array<{ k: string; v: string }>;
+      const kvUpsert = db.prepare(
+        "INSERT INTO kv(k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+      );
+      const kvDel = db.prepare("DELETE FROM kv WHERE k = ?");
+      for (const row of kvRows) {
+        const botId = row.k.slice("gw:session:".length);
+        if (botId === "") continue;
+        kvUpsert.run(`connector:qq:${botId}:gw:session`, row.v);
+        kvDel.run(row.k);
+      }
+
+      // ③ 会话注册表回填（历史数据登记；此后的登记走 ingest 写路径）：
+      //    messages（权威缓存，含群/单聊 scope）+ groups 注册表 + c2c 开关键
+      db.exec(`
+        INSERT OR IGNORE INTO sessions(bot_id, session_id, kind, updated_at)
+        SELECT bot_id, scope_id, scope, MAX(ts) FROM messages
+        GROUP BY bot_id, scope_id, scope
+      `);
+      db.exec(`
+        INSERT OR IGNORE INTO sessions(bot_id, session_id, kind, updated_at)
+        SELECT bot_id, group_openid, 'group', NULL FROM groups
+      `);
+      const c2cRows = db
+        .prepare("SELECT k FROM kv WHERE k LIKE 'c2c:switch:%'")
+        .all() as Array<{ k: string }>;
+      const insSession = db.prepare(
+        "INSERT OR IGNORE INTO sessions(bot_id, session_id, kind, updated_at) VALUES (?, ?, 'chat', NULL)",
+      );
+      for (const row of c2cRows) {
+        // 键格式：c2c:switch:{botId}:{userOpenid}
+        const rest = row.k.slice("c2c:switch:".length);
+        const i = rest.indexOf(":");
+        if (i <= 0) continue;
+        insSession.run(rest.slice(0, i), rest.slice(i + 1));
+      }
+    },
+  },
+  {
+    version: 13,
+    name: "connectors-toml",
+    // P5 决策 #9（2026-11-17）部署拓扑归位：connectors 表（v11）退役——「插件从
+    // 哪里加载」是部署拓扑，权威迁 config.toml [connectors.*] 声明（package/range/
+    // source）。存量声明行（qq / telegram）由部署侧平移进 config.toml（本仓已带
+    // 样例，含全文件凭据红线：凭据唯一权威仍在 bots.credentials_json）。
+    // bots.platform 改为声明名外键：声明缺失由启动期 fail-fast 拒启（显态失败）。
+    up: `
+      DROP TABLE IF EXISTS connectors;
     `,
   },
 ];

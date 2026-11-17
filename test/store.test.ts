@@ -43,7 +43,9 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
     // WAL 生效
     assert.equal(db.pragma("journal_mode", { simple: true }), "wal");
 
-    // 版本已记录（…/ v7 msg_idx / v8 存储重构：messages 合一+users+records+FTS 换源）
+    // 版本已记录（…/ v7 msg_idx / v8 存储重构：messages 合一+users+records+FTS 换源 /
+    // v12 多平台中立化：bots platform+凭据 JSON 化、sessions 注册表、gw:session 键平移 /
+    // v13 connectors 表退役：部署拓扑归 config.toml）
     const rows = db
       .prepare("SELECT version, name FROM schema_migrations")
       .all();
@@ -58,6 +60,9 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
       { version: 8, name: "storage-refactor" },
       { version: 9, name: "cursor-rebase" },
       { version: 10, name: "bot-toggles" },
+      { version: 11, name: "connector-registry" },
+      { version: 12, name: "multi-platform-bots" },
+      { version: 13, name: "connectors-toml" },
     ]);
     // 幂等：重跑不报错、不重复记录
     runMigrations(db, migrations);
@@ -67,7 +72,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
           n: number;
         }
       ).n,
-      10,
+      13,
     );
 
     db.close();
@@ -105,10 +110,58 @@ test("追加迁移只执行增量", () => {
       { version: 8 },
       { version: 9 },
       { version: 10 },
+      { version: 11 },
+      { version: 12 },
+      { version: 13 },
       { version: 99 },
     ]);
     // 新表可用
     db.prepare("INSERT INTO future_t(k) VALUES ('x')").run();
+    db.close();
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("v13 connectors 表退役：v12 声明行平移 config.toml 后删表（升级路径演练）", () => {
+  const dir = tempDbDir();
+  try {
+    const db = openDatabase(dir);
+    // 演练 v12 终态：手工构造 connectors 表 + qq/telegram 两行（v11 播种形状），
+    // 然后只追加 v13 增量——表删除、bots 等业务表不受影响。
+    db.exec(`
+      CREATE TABLE connectors(
+        platform TEXT PRIMARY KEY,
+        package TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO connectors(platform, package, enabled, config_json, created_at, updated_at)
+      VALUES ('qq', '@qsense/connector-qq', 1, '{}', 0, 0),
+             ('telegram', '@qsense/connector-telegram', 1, '{}', 0, 0);
+      CREATE TABLE bots(
+        appid TEXT PRIMARY KEY, name TEXT NOT NULL, secret TEXT NOT NULL,
+        agent_token TEXT NOT NULL UNIQUE, allow_groups TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO bots(appid, name, secret, agent_token, allow_groups, created_at)
+        VALUES ('10001', 't', 's', 'tok', '[]', 0);
+    `);
+    runMigrations(db, [
+      migrations.find((m) => m.version === 13)!,
+    ]);
+    // connectors 表已退役
+    const tables = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='connectors'",
+      )
+      .all();
+    assert.deepEqual(tables, []);
+    // 业务表原样保留
+    const bot = db.prepare("SELECT appid FROM bots").get() as { appid: string };
+    assert.equal(bot.appid, "10001");
     db.close();
   } finally {
     cleanupDir(dir);
@@ -256,6 +309,142 @@ test("openDatabase 自动创建数据目录", () => {
     db.close();
   } finally {
     cleanupDir(parent);
+  }
+});
+
+test("v12 升级路径：bots 凭据回填 / gw:session 键平移 / sessions 历史登记", () => {
+  const dir = tempDbDir();
+  try {
+    const db = openDatabase(dir);
+    // 手工构造「v11 已应用」状态：DDL 到 v11 + 版本记录 + 存量数据
+    db.exec(
+      migrations
+        .slice(0, 11)
+        .map((m) => m.up)
+        .join("\n"),
+    );
+    db.exec(
+      `CREATE TABLE schema_migrations(
+         version INTEGER PRIMARY KEY,
+         name TEXT NOT NULL,
+         applied_at INTEGER
+       )`,
+    );
+    const ins = db.prepare(
+      "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+    );
+    migrations.slice(0, 11).forEach((m, i) => ins.run(m.version, m.name, i));
+
+    // 存量 QQ bot（v11 列形状；无 platform/credentials_json）
+    db.exec(
+      `INSERT INTO bots(appid, name, secret, agent_token, allow_groups, auth_level, created_at)
+       VALUES ('B9', '存量bot', 'sk-legacy', 'tok-legacy', '[]', 'certified', 1)`,
+    );
+    // P1 时代的 gw:session 物理键 + C2C 开关键
+    const kv = db.prepare("INSERT INTO kv(k, v) VALUES (?, ?)");
+    kv.run("gw:session:B9", '{"sessionId":"sess-1","lastSeq":7}');
+    kv.run("c2c:switch:B9:U1", "1");
+    // 存量消息（群 GA / 单聊 UC）+ 群注册表
+    db.exec(
+      `INSERT INTO messages(bot_id, scope, scope_id, msg_id, ts, text, content, records_count, direction) VALUES
+       ('B9','group','GA','a1',1,'x','x',0,0),
+       ('B9','chat','UC','c1',3,'x','x',0,0)`,
+    );
+    db.exec(
+      `INSERT INTO groups(bot_id, group_openid, full_msg_enabled) VALUES ('B9','G_REG',1)`,
+    );
+
+    runMigrations(db, migrations); // 应用 v12 增量
+
+    // ① bots：platform 缺省 qq + 凭据 JSON 原地回填
+    const bot = db
+      .prepare(
+        "SELECT platform, credentials_json, secret FROM bots WHERE appid = 'B9'",
+      )
+      .get() as { platform: string; credentials_json: string; secret: string };
+    assert.equal(bot.platform, "qq");
+    assert.deepEqual(JSON.parse(bot.credentials_json), {
+      appid: "B9",
+      secret: "sk-legacy",
+    });
+    assert.equal(bot.secret, "sk-legacy"); // 历史列原样保留（追加式迁移不删改）
+
+    // ② gw:session 旧物理键平移进 connector: 命名空间（RESUME 连续性）
+    const moved = db
+      .prepare("SELECT v FROM kv WHERE k = 'connector:qq:B9:gw:session'")
+      .get() as { v: string } | undefined;
+    assert.equal(moved?.v, '{"sessionId":"sess-1","lastSeq":7}');
+    assert.equal(
+      (
+        db.prepare("SELECT COUNT(*) AS n FROM kv WHERE k LIKE 'gw:session:%'")
+          .get() as { n: number }
+      ).n,
+      0,
+    );
+
+    // ③ sessions 历史登记：messages 权威缓存 + groups + C2C 开关
+    const sessions = db
+      .prepare("SELECT session_id, kind FROM sessions ORDER BY session_id")
+      .all() as Array<{ session_id: string; kind: string }>;
+    assert.deepEqual(sessions, [
+      { session_id: "GA", kind: "group" },
+      { session_id: "G_REG", kind: "group" },
+      { session_id: "U1", kind: "chat" },
+      { session_id: "UC", kind: "chat" },
+    ]);
+    db.close();
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("sessions 注册表：ingest 即登记；detectSessionKind 注册表先行（探测降级兜底）", () => {
+  const dir = tempDbDir();
+  try {
+    const db = openDatabase(dir);
+    runMigrations(db, migrations);
+    const repo = new Repo(db);
+
+    // ① saveMessage 登记（群）；C2C 开关事件登记（单聊可先于首条消息）
+    const base = {
+      mentions: [],
+      attachments: [],
+      records: [],
+      quote: null,
+      raw: {},
+      ts: Date.now(),
+    };
+    repo.saveMessage({
+      ...base,
+      botId: "B",
+      scope: "group",
+      scopeId: "GA",
+      msgId: "a1",
+      authorOpenid: "u1",
+      text: "x",
+      content: "x",
+    });
+    assert.equal(repo.detectSessionKind("B", "GA"), "group");
+    repo.setC2cSwitch("B", "U1", true);
+    assert.equal(repo.detectSessionKind("B", "U1"), "chat"); // 无消息也裁决
+    assert.equal(repo.detectSessionKind("B", "NONE"), null);
+
+    // ② 注册表优先于探测兜底：U1 已登记为 chat（开关事件），再给 groups 表塞入
+    //    同 id 的群证据（探测兜底会判 group 的场景）→ 权威源裁决仍为 chat
+    //    （其他平台同值 id 群/私并存的场景）
+    db.prepare(
+      "INSERT INTO groups(bot_id, group_openid, full_msg_enabled) VALUES ('B','U1',1)",
+    ).run();
+    assert.equal(repo.detectSessionKind("B", "U1"), "chat");
+
+    // ③ 注册表未命中 → 探测兜底仍可达（群注册表证据，历史数据路径）
+    db.prepare(
+      "INSERT INTO groups(bot_id, group_openid, full_msg_enabled) VALUES ('B','GA_REG',1)",
+    ).run();
+    assert.equal(repo.detectSessionKind("B", "GA_REG"), "group");
+    db.close();
+  } finally {
+    cleanupDir(dir);
   }
 });
 
