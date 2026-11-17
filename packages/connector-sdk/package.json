@@ -1,0 +1,16 @@
+{
+  "name": "@qsense/connector-sdk",
+  "version": "1.0.0",
+  "description": "QSense 连接器契约 SDK：声明面/网络面/宿主面三面契约 + 闸门 + conformance harness",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "private": true,
+  "license": "MIT"
+}
