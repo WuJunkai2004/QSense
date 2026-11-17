@@ -3,6 +3,9 @@
 // 演进：M7 = QQ_APPS env 基座 + kv 动态列表；M8 = env/旧 kv 降级为「首次播种源」；
 // M9 起（用户定案）播种彻底退役——bot 只能经 register_bot（MCP）或 WebUI 添加/移除，
 // 重启后以 bots 表为准连接全部 bot，env 里不再有任何 bot 相关字段。
+// P3 多平台中立化（2026-11-16，迁移 v12）：bots 表加 platform 列 + 凭据 JSON 化——
+// 凭据形状由各连接器 credentialSchema 权威（QQ={appid,secret}），宿主不感知具体键；
+// appid 列语义扩展为「平台账号 id」（仍是主键，跨平台假定唯一）。
 //
 // - 每个 bot 一个 agent_token（明文落库，用户拍板不做加密）：/mcp Bearer 按表反查绑定 bot；
 //   轮换后旧 token 立即失效，新值只返回一次，由调用方（智能体/WebUI）自行保存。
@@ -10,26 +13,43 @@
 // - 每 bot 独立认证等级 auth_level（M9 落库，原 env QQ_AUTH_LEVEL 全局档位退役）：
 //   决定主动消息频控预算 certified=60qpm / uncertified=30qpm，缺省未认证（保守）。
 // - 纪律：本模块不 log 任何 secret/token（logger 兜底剥离仅是最后防线，源头不打）；
-// - add 必过 verify（生产=TokenService 拉真 access_token + 网关地址探测），未验证不入库。
+// - add 必过 verify（平台连接器 hooks.verifyCredential），未验证不入库。
 
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { AuthLevel, BotApp } from "./config";
+import type { AuthLevel } from "./utils/config";
 import type { DB } from "./store/db";
 
 type Stmt<P extends unknown[] = unknown[]> = Database.Statement<P>;
 
 export interface BotRegistryDeps {
   db: DB;
-  /** 添加时的凭据校验；缺省=跳过校验（仅测试用） */
-  verify?: (app: BotApp) => Promise<void>;
+  /**
+   * 添加时的凭据校验（按平台解析到连接器 hooks.verifyCredential）；缺省=跳过校验（仅测试用）。
+   * 宿主装配（index.ts）注入：plugins.get(platform)?.hooks?.verifyCredential，未加载即抛。
+   */
+  verify?: (
+    platform: string,
+    credentials: Record<string, string>,
+  ) => Promise<void>;
 }
 
 /** add/remove/rotate 的校验错误：消息可操作（提示去哪核对） */
 export class BotRegistryError extends Error {}
 
+/** 平台中立的 bot 记录（bots 表行投影；凭据键值对形状由连接器声明权威） */
+export interface BotRecord {
+  /** 平台账号 id（bots 表主键；QQ=appid，其他平台为各自唯一账号标识） */
+  botId: string;
+  platform: string;
+  name: string;
+  /** 平台凭据（QQ={appid, secret}；密钥不落日志） */
+  credentials: Record<string, string>;
+}
+
 export interface RegisteredBot {
-  app: BotApp;
+  /** 注册完成的 bot 记录（调用方据此拉起连接） */
+  bot: BotRecord;
   /** 明文 agent token：仅在注册/轮换返回中出现一次，调用方必须立即保存 */
   agentToken: string;
 }
@@ -40,6 +60,8 @@ interface BotRow {
   secret: string;
   allow_groups: string;
   auth_level: string;
+  platform: string;
+  credentials_json: string;
 }
 
 /** 认证等级白名单校验：非法值报可操作错误 */
@@ -64,12 +86,46 @@ function parseAuthLevelColumn(raw: string): AuthLevel {
   return raw === "certified" ? "certified" : "uncertified"; // 坏数据按保守档处理
 }
 
-function rowToApp(row: Pick<BotRow, "appid" | "name" | "secret">): BotApp {
-  return { appid: row.appid, secret: row.secret, name: row.name };
+/** 凭据 JSON 解析：只保留字符串值键；坏数据按空凭据处理（读路径安全默认） */
+function parseCredentials(raw: string): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return {};
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v === "string") out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function rowToRecord(row: {
+  appid: string;
+  name: string;
+  platform: string;
+  credentials_json: string;
+}): BotRecord {
+  return {
+    botId: row.appid,
+    platform: row.platform,
+    name: row.name,
+    credentials: parseCredentials(row.credentials_json),
+  };
 }
 
 export class BotRegistry {
-  private readonly verify: (app: BotApp) => Promise<void>;
+  private readonly verify: (
+    platform: string,
+    credentials: Record<string, string>,
+  ) => Promise<void>;
   /**
    * 热路径读 stmt 缓存（对齐 repo.ts 的既定模式）：appIdByToken=每 MCP 请求必经；
    * allowGroupsOf=发送门禁+侧别探测兜底；agentTokenOf=资产票据签发/校验；authLevelOf=quota。
@@ -107,20 +163,42 @@ export class BotRegistry {
   // —— 运行时读写（全部走表） ——
 
   /** 全量列表（注册序：created_at 升序，展示顺序稳定） */
-  list(): BotApp[] {
+  list(): BotRecord[] {
     const rows = this.deps.db
       .prepare(
-        "SELECT appid, name, secret FROM bots ORDER BY created_at, appid",
+        "SELECT appid, name, platform, credentials_json FROM bots ORDER BY created_at, appid",
       )
-      .all() as Array<Pick<BotRow, "appid" | "name" | "secret">>;
-    return rows.map(rowToApp);
+      .all() as Array<{
+      appid: string;
+      name: string;
+      platform: string;
+      credentials_json: string;
+    }>;
+    return rows.map(rowToRecord);
   }
 
-  get(appid: string): BotApp | undefined {
+  get(appid: string): BotRecord | undefined {
     const row = this.deps.db
-      .prepare("SELECT appid, name, secret FROM bots WHERE appid = ?")
-      .get(appid) as Pick<BotRow, "appid" | "name" | "secret"> | undefined;
-    return row === undefined ? undefined : rowToApp(row);
+      .prepare(
+        "SELECT appid, name, platform, credentials_json FROM bots WHERE appid = ?",
+      )
+      .get(appid) as
+      | {
+          appid: string;
+          name: string;
+          platform: string;
+          credentials_json: string;
+        }
+      | undefined;
+    return row === undefined ? undefined : rowToRecord(row);
+  }
+
+  /** 平台归属（bot 不存在=null）；runtime 按 platform 选连接器插件 */
+  platformOf(appid: string): string | null {
+    const row = this.deps.db
+      .prepare("SELECT platform FROM bots WHERE appid = ?")
+      .get(appid) as { platform: string } | undefined;
+    return row?.platform ?? null;
   }
 
   /** 所有 bot 均由运行时注册管理；保留方法名以兼容 UI 的来源展示 */
@@ -130,82 +208,106 @@ export class BotRegistry {
 
   /**
    * 注册新 bot：参数校验 → 查重 → verify 凭据（失败不落库）→ 落库 + 生成 agent token。
-   * 不负责启动连接——调用方拿到返回值后自行触发网关接入。
+   * 平台缺省 qq（基座）；凭据形状由该平台连接器 credentialSchema 权威（QQ={appid, secret}）。
+   * 不负责启动连接——调用方拿到返回值后自行触发接入。
    */
   async add(input: {
-    appid: string;
-    secret: string;
+    /** 平台 id（缺省 qq） */
+    platform?: string;
+    /** 平台凭据键值对（QQ={appid, secret}） */
+    credentials: Record<string, string>;
     name?: string;
     /** 初始发送白名单（缺省=空：发送默认关，需在 WebUI 设置页放开） */
     allowGroups?: string[];
     /** 认证等级（缺省 uncertified：主动消息 30 条/分钟的保守预算） */
     authLevel?: AuthLevel;
   }): Promise<RegisteredBot> {
-    const appid = input.appid.trim();
-    const secret = input.secret.trim();
-    const name = input.name?.trim() || appid;
-    if (appid === "" || secret === "") {
+    const platform = input.platform ?? "qq";
+    const credentials = input.credentials;
+    if (credentials === null || typeof credentials !== "object") {
       throw new BotRegistryError(
-        "参数无效：appid 与 secret 均不能为空（appid 在 q.qq.com 开发设置，secret 为对应 AppSecret）。",
+        "参数无效：credentials 必须是键值对对象（各平台凭据字段见其连接器声明；QQ=appid+secret）。",
       );
     }
+    // 平台账号 id：凭据中的身份键（QQ=appid；其他平台约定 appid 或 id 键承载）
+    const accountId = (credentials["appid"] ?? credentials["id"] ?? "").trim();
+    if (accountId === "") {
+      throw new BotRegistryError(
+        "参数无效：credentials 缺少账号标识键（appid/id 均未提供）。QQ 平台请传 {appid, secret}。",
+      );
+    }
+    const name = input.name?.trim() || accountId;
     const authLevel = input.authLevel
       ? parseAuthLevel(input.authLevel)
       : "uncertified";
-    if (this.get(appid) !== undefined) {
+    if (this.get(accountId) !== undefined) {
       throw new BotRegistryError(
-        `注册失败：appid=${appid} 已存在。重复注册请走 WebUI 设置页轮换 token 或管理 bot。`,
+        `注册失败：bot ${accountId} 已存在。重复注册请走 WebUI 设置页轮换 token 或管理 bot。`,
       );
     }
-    const app: BotApp = { appid, secret, name };
     try {
-      await this.verify(app);
+      await this.verify(platform, credentials);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
+      // 平台专属核对提示由连接器 verifyCredential 自带（QQ=q.qq.com/11298 白名单提示）；
+      // 宿主包装只承担统一前缀与通用指引。
       throw new BotRegistryError(
-        `凭据校验失败：官方接口拒绝（${reason}）。请核对 appid 与 AppSecret（q.qq.com → 开发设置）；` +
-          "若报「接口访问源IP不在白名单」（code 11298），需在该机器人管理端关闭 IP 白名单或把本机公网 IP 加入白名单。",
+        `凭据校验失败（平台 ${platform}）：官方接口拒绝（${reason}）。请核对该平台凭据——字段定义见 WebUI「添加机器人」表单。`,
       );
     }
     const agentToken = newAgentToken();
     this.deps.db
       .prepare(
-        `INSERT INTO bots(appid, name, secret, agent_token, allow_groups, auth_level, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO bots(appid, name, secret, agent_token, allow_groups, auth_level, created_at, platform, credentials_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        appid,
+        accountId,
         name,
-        secret,
+        "", // 旧物理列退役：凭据权威在 credentials_json（v12），列仅为追加式迁移保留
         agentToken,
         JSON.stringify(input.allowGroups ?? []),
         authLevel,
         Date.now(),
+        platform,
+        JSON.stringify(credentials),
       );
-    return { app, agentToken };
+    return {
+      bot: { botId: accountId, platform, name, credentials },
+      agentToken,
+    };
   }
 
   /**
    * 移除 bot（bots 表是唯一来源，任何 bot 均可移除）。
    * 不负责断连接/清会话，调用方自行处理。
    */
-  remove(appid: string): BotApp {
+  remove(appid: string): BotRecord {
     const row = this.deps.db
-      .prepare("DELETE FROM bots WHERE appid = ? RETURNING appid, name, secret")
-      .get(appid) as Pick<BotRow, "appid" | "name" | "secret"> | undefined;
+      .prepare(
+        "DELETE FROM bots WHERE appid = ? RETURNING appid, name, platform, credentials_json",
+      )
+      .get(appid) as
+      | {
+          appid: string;
+          name: string;
+          platform: string;
+          credentials_json: string;
+        }
+      | undefined;
     if (row === undefined) {
       throw new BotRegistryError(
-        `移除失败：appid=${appid} 不在注册表中。已注册：${
+        `移除失败：bot ${appid} 不在注册表中。已注册：${
           this.list()
-            .map((b) => b.appid)
+            .map((b) => b.botId)
             .join(", ") || "（无）"
         }。`,
       );
     }
-    return rowToApp(row);
+    return rowToRecord(row);
   }
 
-  /** 改备注名（WebUI 设置页）：空名回落 appid；仅本地展示与自发消息补记作者名，不触官方 */
+  /** 改备注名（WebUI 设置页）：空名回落账号 id；仅本地展示与自发消息补记作者名，不触平台 */
   rename(appid: string, name: string): Pick<BotRow, "appid" | "name"> {
     const trimmed = name.trim().slice(0, 32);
     const final = trimmed === "" ? appid : trimmed;
@@ -214,9 +316,9 @@ export class BotRegistry {
       .get(final, appid) as Pick<BotRow, "appid" | "name"> | undefined;
     if (row === undefined) {
       throw new BotRegistryError(
-        `改名失败：appid=${appid} 不在注册表中。已注册：${
+        `改名失败：bot ${appid} 不在注册表中。已注册：${
           this.list()
-            .map((b) => b.appid)
+            .map((b) => b.botId)
             .join(", ") || "（无）"
         }。`,
       );
@@ -236,7 +338,7 @@ export class BotRegistry {
       .prepare("UPDATE bots SET allow_groups = ? WHERE appid = ?")
       .run(JSON.stringify(groups.filter((g) => g !== "")), appid);
     if (r.changes !== 1) {
-      throw new BotRegistryError(`更新失败：appid=${appid} 不在注册表中。`);
+      throw new BotRegistryError(`更新失败：bot ${appid} 不在注册表中。`);
     }
   }
 
@@ -254,7 +356,7 @@ export class BotRegistry {
       .prepare("UPDATE bots SET auth_level = ? WHERE appid = ?")
       .run(parseAuthLevel(level), appid);
     if (r.changes !== 1) {
-      throw new BotRegistryError(`更新失败：appid=${appid} 不在注册表中。`);
+      throw new BotRegistryError(`更新失败：bot ${appid} 不在注册表中。`);
     }
   }
 
@@ -270,7 +372,7 @@ export class BotRegistry {
       .prepare("UPDATE bots SET receive_enabled = ? WHERE appid = ?")
       .run(enabled ? 1 : 0, appid);
     if (r.changes !== 1) {
-      throw new BotRegistryError(`更新失败：appid=${appid} 不在注册表中。`);
+      throw new BotRegistryError(`更新失败：bot ${appid} 不在注册表中。`);
     }
   }
 
@@ -286,7 +388,7 @@ export class BotRegistry {
       .prepare("UPDATE bots SET mcp_enabled = ? WHERE appid = ?")
       .run(enabled ? 1 : 0, appid);
     if (r.changes !== 1) {
-      throw new BotRegistryError(`更新失败：appid=${appid} 不在注册表中。`);
+      throw new BotRegistryError(`更新失败：bot ${appid} 不在注册表中。`);
     }
   }
 
@@ -294,7 +396,7 @@ export class BotRegistry {
   rotateToken(appid: string): string {
     if (this.get(appid) === undefined) {
       throw new BotRegistryError(
-        `轮换失败：appid=${appid} 不在注册表中。可用 register_bot 注册新 bot。`,
+        `轮换失败：bot ${appid} 不在注册表中。可用 register_bot 注册新 bot。`,
       );
     }
     const token = newAgentToken();
@@ -304,14 +406,14 @@ export class BotRegistry {
     return token;
   }
 
-  /** /mcp 鉴权：token → 绑定的 bot appid（未命中=null） */
+  /** /mcp 鉴权：token → 绑定的 bot 账号 id（未命中=null） */
   appIdByToken(token: string): string | null {
     const row = this.appIdByTokenStmt.get(token) as
       { appid: string } | undefined;
     return row?.appid ?? null;
   }
 
-  /** 资产上传票据签发/校验：appid → agent_token（bot 不存在或已轮换=null） */
+  /** 资产上传票据签发/校验：账号 id → agent_token（bot 不存在或已轮换=null） */
   agentTokenOf(appid: string): string | null {
     const row = this.agentTokenStmt.get(appid) as
       { agent_token: string } | undefined;

@@ -1,6 +1,7 @@
 // M8/M9 验收（注册表）：bots 表唯一存储、agent_token 生命周期（生成/轮换/反查）、
 // 每 bot 白名单、每 bot 认证等级（M9 落库）、注册制（M9 起无任何 env/kv 播种——
 // bot 只能经 add/WebUI 注册进表），register_bot 工具面与 token 绑定 bot 强校验。
+// P3 多平台中立化（2026-11-16）：platform 列 + 凭据 JSON 化（凭据形状由连接器声明权威）。
 // 注：token 轮换已收归 WebUI（2026-10-27 工具面缩窄），域层 rotateToken 保留、本文件直测。
 
 import { test } from "node:test";
@@ -14,7 +15,11 @@ import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
 import { runTool, type ToolContext } from "../src/tools/defs";
 
-const SEED = { appid: "10001", secret: "s1", name: "主bot" };
+const SEED_APPID = "10001";
+const SEED = {
+  credentials: { appid: SEED_APPID, secret: "s1" },
+  name: "主bot",
+};
 const GROUP_A = "GROUP_A";
 
 function setupDb(): { db: DB; close: () => void } {
@@ -41,7 +46,10 @@ function setupDb(): { db: DB; close: () => void } {
 
 function newRegistry(
   db: DB,
-  verify?: (app: { appid: string }) => Promise<void>,
+  verify?: (
+    platform: string,
+    credentials: Record<string, string>,
+  ) => Promise<void>,
 ): BotRegistry {
   return new BotRegistry({
     db,
@@ -53,10 +61,13 @@ function newRegistry(
 async function ctxOf(
   db: DB,
   reg: BotRegistry,
-  app: { appid: string; secret: string; name?: string } = SEED,
+  input: {
+    credentials: Record<string, string>;
+    name?: string;
+  } = SEED,
 ): Promise<ToolContext> {
-  await reg.add(app);
-  return { repo: new Repo(db), bots: reg, botId: app.appid };
+  await reg.add(input);
+  return { repo: new Repo(db), bots: reg, botId: input.credentials["appid"]! };
 }
 
 test("M9-B1 注册制：空表构造不播种，list 为空；重启后仍是表内数据", async () => {
@@ -69,7 +80,7 @@ test("M9-B1 注册制：空表构造不播种，list 为空；重启后仍是表
     assert.deepEqual(
       newRegistry(fx.db)
         .list()
-        .map((a) => a.appid),
+        .map((a) => a.botId),
       ["10001"], // 重启不丢、也不重复
     );
   } finally {
@@ -80,13 +91,17 @@ test("M9-B1 注册制：空表构造不播种，list 为空；重启后仍是表
 test("M8-B2 add：verify → 落库 + 生成 token（仅返回一次语义），重启恢复", async () => {
   const fx = setupDb();
   try {
-    const verified: string[] = [];
-    const reg = newRegistry(fx.db, async (app) => {
-      verified.push(app.appid);
+    const verified: Array<[string, string]> = [];
+    const reg = newRegistry(fx.db, async (platform, credentials) => {
+      verified.push([platform, credentials["appid"] ?? ""]);
     });
-    const added = await reg.add({ appid: "20002", secret: "s2", name: "二号" });
-    assert.deepEqual(verified, ["20002"]);
-    assert.equal(added.app.appid, "20002");
+    const added = await reg.add({
+      credentials: { appid: "20002", secret: "s2" },
+      name: "二号",
+    });
+    assert.deepEqual(verified, [["qq", "20002"]]);
+    assert.equal(added.bot.botId, "20002");
+    assert.equal(added.bot.platform, "qq"); // 缺省平台
     assert.match(added.agentToken, /^[0-9a-f]{48}$/); // 24 字节随机 hex
     assert.equal(reg.appIdByToken(added.agentToken), "20002");
     assert.deepEqual(reg.allowGroupsOf("20002"), []); // 新注册默认无白名单（安全默认）
@@ -94,21 +109,37 @@ test("M8-B2 add：verify → 落库 + 生成 token（仅返回一次语义），
 
     const reg2 = newRegistry(fx.db);
     assert.equal(reg2.get("20002")?.name, "二号");
+    // P3：凭据 JSON 化回读（secret 物理列退役，权威在 credentials_json）
+    assert.deepEqual(reg2.get("20002")?.credentials, {
+      appid: "20002",
+      secret: "s2",
+    });
+    assert.equal(
+      (
+        fx.db
+          .prepare("SELECT secret FROM bots WHERE appid = '20002'")
+          .get() as { secret: string }
+      ).secret,
+      "",
+    );
   } finally {
     fx.close();
   }
 });
 
-test("M8-B3 add：重复 appid / 空参数 / verify 失败 → 明确报错且不入库", async () => {
+test("M8-B3 add：重复账号 / 空凭据 / verify 失败 → 明确报错且不入库", async () => {
   const fx = setupDb();
   try {
     const reg = newRegistry(fx.db);
     await reg.add(SEED);
     await assert.rejects(
-      () => reg.add({ appid: "10001", secret: "x" }),
+      () => reg.add({ credentials: { appid: "10001", secret: "x" } }),
       /已存在/,
     );
-    await assert.rejects(() => reg.add({ appid: "", secret: "x" }), /不能为空/);
+    await assert.rejects(
+      () => reg.add({ credentials: { appid: "", secret: "x" } }),
+      /账号标识/,
+    );
     const bad = new BotRegistry({
       db: fx.db,
       verify: async () => {
@@ -116,10 +147,46 @@ test("M8-B3 add：重复 appid / 空参数 / verify 失败 → 明确报错且�
       },
     });
     await assert.rejects(
-      () => bad.add({ appid: "30003", secret: "s3" }),
+      () => bad.add({ credentials: { appid: "30003", secret: "s3" } }),
       /11298/,
     );
     assert.equal(reg.get("30003"), undefined); // 校验失败不入库
+  } finally {
+    fx.close();
+  }
+});
+
+test("P3 多平台：platform/credentials_json 落库回读、platformOf 解析", async () => {
+  const fx = setupDb();
+  try {
+    const reg = newRegistry(fx.db);
+    await reg.add({
+      platform: "telegram",
+      credentials: { id: "7123456", token: "7123456:AA-TEST-TOKEN" },
+      name: "tg-bot",
+    });
+    assert.equal(reg.platformOf("7123456"), "telegram");
+    assert.equal(reg.platformOf(SEED_APPID), null);
+    const rec = reg.get("7123456");
+    assert.equal(rec?.platform, "telegram");
+    assert.deepEqual(rec?.credentials, {
+      id: "7123456",
+      token: "7123456:AA-TEST-TOKEN",
+    });
+    assert.equal(rec?.botId, "7123456"); // 账号 id 键=凭据 id
+    // QQ 与非 QQ 并存：互不干扰（list 序按 created_at，本测试断言集合等价）
+    await reg.add(SEED);
+    assert.equal(reg.platformOf(SEED_APPID), "qq");
+    assert.deepEqual(
+      reg
+        .list()
+        .map((b) => [b.platform, b.botId])
+        .sort(),
+      [
+        ["qq", SEED_APPID],
+        ["telegram", "7123456"],
+      ].sort(),
+    );
   } finally {
     fx.close();
   }
@@ -130,8 +197,8 @@ test("M9-B3b add：auth_level 落库（缺省 uncertified），非法值拒绝",
   try {
     const reg = newRegistry(fx.db);
     await reg.add({ ...SEED, authLevel: "certified" });
-    assert.equal(reg.authLevelOf("10001"), "certified");
-    const b = await reg.add({ appid: "20002", secret: "s2" });
+    assert.equal(reg.authLevelOf(SEED_APPID), "certified");
+    const b = await reg.add({ credentials: { appid: "20002", secret: "s2" } });
     assert.equal(reg.authLevelOf("20002"), "uncertified");
     reg.setAuthLevel("20002", "certified");
     assert.equal(reg.authLevelOf("20002"), "certified");
@@ -140,8 +207,7 @@ test("M9-B3b add：auth_level 落库（缺省 uncertified），非法值拒绝",
     await assert.rejects(
       () =>
         reg.add({
-          appid: "30003",
-          secret: "s3",
+          credentials: { appid: "30003", secret: "s3" },
           authLevel: "gold" as never,
         }),
       (e: unknown) =>
@@ -159,7 +225,7 @@ test("M8-B4 轮换：旧 token 立即失效、新 token 反查命中；未注册
   const fx = setupDb();
   try {
     const reg = newRegistry(fx.db);
-    const added = await reg.add({ appid: "20002", secret: "s2" });
+    const added = await reg.add({ credentials: { appid: "20002", secret: "s2" } });
     const fresh = reg.rotateToken("20002");
     assert.notEqual(fresh, added.agentToken);
     assert.equal(reg.appIdByToken(added.agentToken), null);
@@ -174,11 +240,11 @@ test("M8-B5 白名单：setAllowGroups 即时生效，remove 后反查全空", a
   const fx = setupDb();
   try {
     const reg = newRegistry(fx.db);
-    const added = await reg.add({ appid: "20002", secret: "s2" });
+    const added = await reg.add({ credentials: { appid: "20002", secret: "s2" } });
     reg.setAllowGroups("20002", [GROUP_A, "GROUP_B"]);
     assert.deepEqual(reg.allowGroupsOf("20002"), [GROUP_A, "GROUP_B"]);
     const removed = reg.remove("20002");
-    assert.equal(removed.appid, "20002");
+    assert.equal(removed.botId, "20002");
     assert.equal(reg.appIdByToken(added.agentToken), null); // 移除连带 token 失效
     assert.deepEqual(reg.allowGroupsOf("20002"), []);
     assert.throws(() => reg.remove("20002"), /不在注册表中/);
@@ -212,6 +278,35 @@ test("M8-B7 register_bot：返回一次 token + 表内可反查；重复注册�
   }
 });
 
+test("P3 register_bot：platform+credentials 路径（QQ 兼容形参等价）", async () => {
+  const fx = setupDb();
+  try {
+    const reg = newRegistry(fx.db);
+    const ctx = await ctxOf(fx.db, reg);
+    const raw = await runTool(
+      "register_bot",
+      {
+        platform: "qq",
+        credentials: { appid: "60006", secret: "s6" },
+      },
+      ctx,
+    );
+    assert.equal(raw.isError, undefined);
+    assert.equal(reg.get("60006")?.platform, "qq");
+    assert.deepEqual(reg.get("60006")?.credentials, {
+      appid: "60006",
+      secret: "s6",
+    });
+    // 缺凭据 → 可操作错误，不入库
+    const missing = await runTool("register_bot", { name: "空" }, ctx);
+    assert.equal(missing.isError, true);
+    assert.match(missing.text, /参数缺失/);
+    assert.equal(reg.get("99999"), undefined);
+  } finally {
+    fx.close();
+  }
+});
+
 test("M9-B7b register_bot：auth_level 参数落库（certified 生效）", async () => {
   const fx = setupDb();
   try {
@@ -240,7 +335,7 @@ test("M8-B8 token 轮换（域层，MCP 工具面已收归 WebUI）：换发新 
   const fx = setupDb();
   try {
     const reg = newRegistry(fx.db);
-    const added = await reg.add({ appid: "20002", secret: "s2" });
+    const added = await reg.add({ credentials: { appid: "20002", secret: "s2" } });
     const fresh = reg.rotateToken("20002");
     assert.notEqual(fresh, added.agentToken);
     assert.equal(reg.appIdByToken(added.agentToken), null);
@@ -276,18 +371,18 @@ test("B10 每 bot 开关：接收消息 / MCP 访问缺省开、可独立落库�
     const reg = newRegistry(fx.db);
     await reg.add(SEED);
     // 迁移默认值：既有与新建 bot 均开启，升级不改行为
-    assert.equal(reg.receiveEnabledOf(SEED.appid), true);
-    assert.equal(reg.mcpEnabledOf(SEED.appid), true);
+    assert.equal(reg.receiveEnabledOf(SEED_APPID), true);
+    assert.equal(reg.mcpEnabledOf(SEED_APPID), true);
 
-    reg.setReceiveEnabled(SEED.appid, false);
-    assert.equal(reg.receiveEnabledOf(SEED.appid), false);
-    assert.equal(reg.mcpEnabledOf(SEED.appid), true); // 两把开关互不影响
+    reg.setReceiveEnabled(SEED_APPID, false);
+    assert.equal(reg.receiveEnabledOf(SEED_APPID), false);
+    assert.equal(reg.mcpEnabledOf(SEED_APPID), true); // 两把开关互不影响
 
     // 重启（新实例）后仍是禁用态
     const reg2 = newRegistry(fx.db);
-    assert.equal(reg2.receiveEnabledOf(SEED.appid), false);
-    reg2.setMcpEnabled(SEED.appid, false);
-    assert.equal(newRegistry(fx.db).mcpEnabledOf(SEED.appid), false);
+    assert.equal(reg2.receiveEnabledOf(SEED_APPID), false);
+    reg2.setMcpEnabled(SEED_APPID, false);
+    assert.equal(newRegistry(fx.db).mcpEnabledOf(SEED_APPID), false);
 
     assert.throws(
       () => reg.setMcpEnabled("99999", false),
