@@ -106,8 +106,7 @@ const renderPretty = (
   color: boolean,
 ): string => {
   /** 着色助手：color=false 时输出纯文本（管道/重定向不落转义符） */
-  const c = (code: string, s: string): string =>
-    color ? code + s + RESET : s;
+  const c = (code: string, s: string): string => (color ? code + s + RESET : s);
   const bar = color ? `${GRAY} | ${RESET}` : " | ";
   const fieldsOut = Object.entries(fields ?? {}).filter(
     ([, v]) => v !== undefined,
@@ -137,7 +136,9 @@ export function createLogger(
     fields?: Record<string, unknown>,
   ): void => {
     if (LEVELS[lvl] < threshold) return;
-    const clean = fields ? (redact(fields) as Record<string, unknown>) : undefined;
+    const clean = fields
+      ? (redact(fields) as Record<string, unknown>)
+      : undefined;
     const line =
       format === "json"
         ? JSON.stringify({
@@ -160,7 +161,7 @@ export function createLogger(
   };
 }
 
-export function levelFromEnv(
+export function levelFromRaw(
   raw: string | undefined,
   fallback: Level = "info",
 ): Level {
