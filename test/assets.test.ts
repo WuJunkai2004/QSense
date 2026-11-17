@@ -8,14 +8,16 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLogger } from "../src/logger";
+import { createLogger } from "../src/utils/logger";
 import {
   AssetStore,
   sniffAudioMime,
   sniffPathMime,
   uploadSig,
 } from "../src/assets";
-import { Sender, beijingDate } from "../src/sender";
+import { Sender } from "../src/sender";
+import { beijingDate, dailyCountOf } from "@qsense/connector-qq";
+import { MemoryStatePort } from "@qsense/connector-sdk";
 import { buildServer } from "../src/server/http";
 import { BotRegistry } from "../src/bots";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
@@ -99,27 +101,26 @@ function makeSender(
 ): Sender {
   return new Sender({
     log: createLogger("error"),
-    db: fx.db,
     repo: fx.repo,
-    tokenManager: {} as never,
     bots: fx.registry,
     assets: fx.assets,
-    apiFor: () => ({
-      sendRaw: async () => ({ id: "PROVIDER_MEDIA" }),
-      recallMessage: async () => {},
-      uploadMedia: async (_scope, _target, _creds, src, mediaType) => {
-        // 服务端资产应走 localPath（file 源）直通 SDK；类别按来源魔数判定
-        assert.equal(src.kind, "file", "asset: 引用应解析为 file 源");
+    transportFor: () => ({
+      reply: async () => ({ providerMsgId: "PROVIDER_MEDIA" }),
+      proactive: async () => ({ providerMsgId: "PROVIDER_MEDIA" }),
+      recall: async () => undefined,
+      uploadMedia: async (wire) => {
+        // 服务端资产应走 file 源（localPath）直通 SDK；类别按来源魔数判定
+        assert.equal(wire.source.kind, "file", "asset: 引用应解析为 file 源");
         assert.equal(
-          mediaType,
+          wire.kind,
           expectMediaType,
           `uploadMedia 类别应为 ${expectMediaType}`,
         );
-        const onDisk = readFileSync(src.path);
+        const onDisk = readFileSync(wire.source.path);
         if (expectMediaType === "image") {
           assert.ok(onDisk.subarray(0, 4).equals(PNG_BYTES.subarray(0, 4)));
         }
-        return uploadInfo.fileInfo;
+        return { handle: uploadInfo.fileInfo };
       },
     }),
   });
@@ -254,8 +255,8 @@ test("M4-17 PUT 数据端点：成功落盘/魔数拒绝/签名篡改/过期/重
       /资产不存在/,
     );
 
-    // ⑧ 日额度未被被动图污染（走的是 passive，不计 proactive）
-    assert.equal(fx.repo.proactiveCountFor(BOT, GROUP, beijingDate()), 0);
+    // ⑧ 日额度未被被动图污染（走的是 passive，不计 proactive；记账在 QQ 插件 StatePort 计数器）
+    assert.equal(await dailyCountOf(new MemoryStatePort(), beijingDate(), GROUP), 0);
   } finally {
     fx.cleanup();
   }

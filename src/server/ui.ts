@@ -2,6 +2,9 @@
 // - 静态托管：ui/dist（git submodule qqbot-webui 的构建产物）；未构建时 503 给出可操作提示
 // - JSON API：/ui/api/*，Bearer 复用 MCP_TOKEN（sha256 + timingSafeEqual，同 /mcp）
 // - 写入口（添加/移除 bot、发送消息）与 MCP 工具共享同一套硬门禁与账本，无旁路
+// - 插件化（P1 收口，2026-11-15）：GET /connectors 声明端点（表单/面板按声明渲染）+
+//   /platforms/:id/* 插件 webui 路由挂载（admin 鉴权沿用、错误规范化、插件拿不到 fastify
+//   reply）；旧 /qr-bind/*、/quota 过渡期保留并委托 QQ 插件路由（P5 切声明端点后收口）
 //
 // 安全说明：静态资源不含敏感数据（纯 JS 壳）；所有数据经 /ui/api 鉴权后读取；
 // token 由前端存 localStorage 并以 Authorization 头携带（非 cookie，无 CSRF 面）。
@@ -9,12 +12,17 @@
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { FastifyInstance, FastifyReply } from "fastify";
+import {
+  ConnectorError,
+  type ConnectorRegistry,
+  type PluginWebuiRequest,
+  type PluginWebuiRoute,
+  type WebuiMethod,
+} from "@qsense/connector-sdk";
+import { QrBindError } from "@qsense/connector-qq";
 import { BotRegistryError, type BotRegistry } from "../bots";
-import type { GatewayStatus, GatewaySupervisor } from "../gateway";
-import { kvSessionPort } from "../gateway/session-store";
-import type { TokenService } from "../gateway/token";
-import type { Logger } from "../logger";
-import { QrBindError, createQrBindTask, pollQrBind, type QrBindDeps } from "../qrbind";
+import type { ConnectorRuntime, GatewayStatus } from "../connectors/runtime";
+import type { Logger } from "../utils/logger";
 import { TtsError, synthesizeSpeech, type TtsDeps, type TtsFormat } from "../tts";
 import type { Sender } from "../sender";
 import type { DB } from "../store/db";
@@ -27,16 +35,18 @@ export interface UiDeps {
   repo: Repo;
   version: string;
   registry: BotRegistry;
-  supervisor: GatewaySupervisor;
-  tokens: TokenService;
+  /** 连接器运行时（P1 收口，原 GatewaySupervisor）：接入/摘除 bot + 插件上下面解析 */
+  supervisor: ConnectorRuntime;
+  /** 平台插件声明面注册表（GET /connectors 与 /platforms/:id/* 挂载用） */
+  connectors: ConnectorRegistry;
   /** 各 bot 网关状态快照（bootstrap 展示用） */
   botStatuses: () => GatewayStatus[];
   /** 发送器：POST /send 用；缺省=发送端点硬拒绝（与 MCP requireSender 同语义） */
   sender?: Sender;
-  /** 扫码绑定上游依赖（fetch/host 注入；缺省=直连 q.qq.com），测试注入假端点 */
-  qrBind?: QrBindDeps;
   /** TTS 合成依赖（fetch 注入；缺省=直连），测试注入假端点 */
   ttsDeps?: TtsDeps;
+  /** WebUI 静态产物目录（config.toml ui_dist_dir；缺省 ./ui/dist；env UI_DIST_DIR 已退役） */
+  uiDistDir?: string;
 }
 
 const MIME: Record<string, string> = {
@@ -52,15 +62,14 @@ const MIME: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
-const distDir = (): string => process.env.UI_DIST_DIR?.trim() || "./ui/dist";
-
-/** 统一错误映射：BotRegistryError（含参数类错误）→ 400，QrBindError（上游扫码接口）→ 502，
- *  TtsError（TTS 上游）→ 502，其余 → 500（记日志） */
+/** 统一错误映射：BotRegistryError（含参数类错误）→ 400，ConnectorError（插件声明 status）
+ *  透传，QrBindError（上游扫码接口）→ 502，TtsError（TTS 上游）→ 502，其余 → 500（记日志） */
 function mapError(
   log: Logger,
   e: unknown,
 ): { status: number; message: string } {
   if (e instanceof BotRegistryError) return { status: 400, message: e.message };
+  if (e instanceof ConnectorError) return { status: e.status, message: e.message };
   if (e instanceof QrBindError) return { status: 502, message: e.message };
   if (e instanceof TtsError) return { status: 502, message: e.message };
   const message = e instanceof Error ? e.message : String(e);
@@ -69,8 +78,10 @@ function mapError(
 }
 
 export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
-  const { log, repo, registry, supervisor, tokens, version } = deps;
+  const { log, repo, registry, supervisor, connectors, version } = deps;
   const uiLog = log.child("ui");
+  // WebUI 静态产物根（config.toml ui_dist_dir；env UI_DIST_DIR 已退役）
+  const distRoot = deps.uiDistDir?.trim() || "./ui/dist";
 
   // —— 静态托管（无鉴权：纯前端壳，不含数据） ——
 
@@ -89,7 +100,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
   }
 
   async function serveIndex(reply: FastifyReply): Promise<void> {
-    const root = resolve(distDir());
+    const root = resolve(distRoot);
     try {
       await stat(join(root, "index.html"));
     } catch {
@@ -108,7 +119,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
   app.get("/ui", async (_req, reply) => serveIndex(reply));
   app.get("/ui/", async (_req, reply) => serveIndex(reply));
   app.get("/ui/*", async (req, reply) => {
-    const root = resolve(distDir());
+    const root = resolve(distRoot);
     let rel: string;
     try {
       rel = decodeURIComponent((req.params as { "*": string })["*"]);
@@ -160,16 +171,16 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         const asked =
           typeof raw === "string" && raw.trim() !== "" ? raw.trim() : undefined;
         if (asked !== undefined) {
-          if (!bots.some((b) => b.appid === asked)) {
+          if (!bots.some((b) => b.botId === asked)) {
             throw new BotRegistryError(
-              `bot 不存在：${asked}。已注册：${bots.map((b) => b.appid).join(", ") || "（无）"}。`,
+              `bot 不存在：${asked}。已注册：${bots.map((b) => b.botId).join(", ") || "（无）"}。`,
             );
           }
           return asked;
         }
-        if (bots.length === 1) return bots[0].appid;
+        if (bots.length === 1) return bots[0].botId;
         throw new BotRegistryError(
-          `当前注册了多个 bot（${bots.map((b) => b.appid).join(", ")}），请用 bot 参数指定。`,
+          `当前注册了多个 bot（${bots.map((b) => b.botId).join(", ")}），请用 bot 参数指定。`,
         );
       };
 
@@ -204,15 +215,15 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           uptime_s: Math.round(process.uptime()),
           send_enabled: deps.repo.getSendEnable(),
           bots: registry.list().map((a) => {
-            const st = statuses.get(a.appid);
+            const st = statuses.get(a.botId);
             return {
-              appid: a.appid,
+              appid: a.botId,
               name: a.name,
-              allow_groups: registry.allowGroupsOf(a.appid),
-              auth_level: registry.authLevelOf(a.appid),
-              tts_enabled: deps.repo.getTtsEnabled(a.appid),
-              receive_enabled: registry.receiveEnabledOf(a.appid),
-              mcp_enabled: registry.mcpEnabledOf(a.appid),
+              allow_groups: registry.allowGroupsOf(a.botId),
+              auth_level: registry.authLevelOf(a.botId),
+              tts_enabled: deps.repo.getTtsEnabled(a.botId),
+              receive_enabled: registry.receiveEnabledOf(a.botId),
+              mcp_enabled: registry.mcpEnabledOf(a.botId),
               gateway: st?.state ?? "unknown",
               detail: st?.detail,
             };
@@ -240,17 +251,17 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               ? body.auth_level
               : undefined;
           const registered = await registry.add({
-            appid,
-            secret,
+            platform: "qq",
+            credentials: { appid, secret },
             name,
             authLevel,
           });
-          supervisor.addBot(registered.app);
-          uiLog.info("bot added via ui", { appid: registered.app.appid });
+          supervisor.addBot(registered.bot);
+          uiLog.info("bot added via ui", { appid: registered.bot.botId });
           // M8：agent_token 仅此一次返回——WebUI 弹窗提示"立即保存"，服务端不留展示通道
           return {
             ok: true,
-            bot: { appid: registered.app.appid, name: registered.app.name },
+            bot: { appid: registered.bot.botId, name: registered.bot.name },
             agent_token: registered.agentToken,
             note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换。",
           };
@@ -260,25 +271,222 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         }
       });
 
-      // —— 扫码绑定（q.qq.com lite）：bind_key 只在本进程，浏览器只见 task_id ——
-      // 内存态任务表：task_id → 密钥 + 时间戳（TTL 10 分钟；进程重启即失效，前端重开任务即可）
-      const qrTasks = new Map<string, { bindKey: string; createdAt: number }>();
-      const QR_TASK_TTL_MS = 10 * 60_000;
+      // —— 插件化 API（P1 收口，2026-11-15）——
+      // GET /connectors：平台声明面（表单/面板按声明渲染，前端 P2/P5 消费）
+      plugin.get("/connectors", async () => ({
+        connectors: connectors.list().map((p) => ({
+          id: p.id,
+          title: p.title,
+          caps: p.caps,
+          credential_schema: p.credentialSchema,
+          credential_secrets: p.credentialSecrets,
+          login: p.login ?? { kind: "secret" },
+          webui: (p.webui ?? []).map((r) => ({
+            method: r.method,
+            path: r.path,
+            summary: r.summary,
+          })),
+        })),
+      }));
+
+      /** 插件 webui 路由匹配："：param" 段捕获（method+段数+字面段全等） */
+      const matchRoute = (
+        routes: PluginWebuiRoute[],
+        method: string,
+        path: string,
+      ): { route: PluginWebuiRoute; params: Record<string, string> } | null => {
+        const parts = path.split("/").filter((s) => s !== "");
+        for (const route of routes) {
+          if (route.method !== method) continue;
+          const rparts = route.path.split("/").filter((s) => s !== "");
+          if (rparts.length !== parts.length) continue;
+          const params: Record<string, string> = {};
+          let ok = true;
+          for (let i = 0; i < rparts.length; i += 1) {
+            const rp = rparts[i]!;
+            const seg = parts[i]!;
+            if (rp.startsWith(":")) params[rp.slice(1)] = seg;
+            else if (rp !== seg) {
+              ok = false;
+              break;
+            }
+          }
+          if (ok) return { route, params };
+        }
+        return null;
+      };
+
+      /** 构造插件 webui 请求（宿主注入 configOf/stateOf；插件拿不到 fastify 原生对象） */
+      const webuiReq = (
+        over?: Partial<PluginWebuiRequest>,
+      ): PluginWebuiRequest => ({
+        method: "POST",
+        path: "/",
+        params: {},
+        query: {},
+        body: undefined,
+        configOf: (botId) => supervisor.configOf(botId),
+        stateOf: (botId) => supervisor.hostFor(botId).state,
+        ...over,
+      });
+
+      // 平台插件路由挂载：/ui/api/platforms/:id/*（admin 鉴权由本作用域统一覆盖）
+      // login=qr-pair 的平台：poll 路由由宿主中介——completed 时宿主执行注册
+      // （官方两级凭据校验 + 落库 + 拉起网关），凭据绝不透传浏览器；create 与
+      // 其余插件路由按声明透传（login 声明的路径从通用匹配中排除，防泄漏面）。
+      plugin.all("/platforms/:id/*", async (req, reply) => {
+        try {
+          const params = req.params as { id: string; "*": string };
+          const target = connectors.get(params.id);
+          if (target === undefined) {
+            reply.code(404).send({
+              error: `平台不存在：${params.id}。已注册：${
+                connectors.list().map((p) => p.id).join(", ") || "（无）"
+              }。`,
+            });
+            return;
+          }
+          const sub = `/${params["*"] ?? ""}`;
+          const query: Record<string, string> = {};
+          for (const [k, v] of Object.entries(
+            req.query as Record<string, unknown>,
+          )) {
+            if (typeof v === "string") query[k] = v;
+          }
+          const login =
+            target.login !== undefined && target.login.kind === "qr-pair"
+              ? target.login
+              : undefined;
+
+          // login=qr-pair：create 透传（task_id/connect_url 无敏感）、poll 宿主中介
+          // （completed → 宿主注册，返回与旧 /qr-bind/poll 一致的 created 形状，
+          // 凭据绝不透传浏览器）。非 POST 打到 login 路径 → 落通用匹配的 404。
+          if (
+            login !== undefined &&
+            req.method === "POST" &&
+            sub === login.create
+          ) {
+            const route = (target.webui ?? []).find(
+              (r) => r.method === "POST" && r.path === login.create,
+            );
+            if (route === undefined) {
+              reply.code(404).send({
+                error: `平台 ${params.id} 声明了 qr-pair 登录但缺少 ${login.create} 路由。`,
+              });
+              return;
+            }
+            reply.send(
+              await route.handler(
+                webuiReq({ method: "POST", path: sub, body: req.body, query }),
+              ),
+            );
+            return;
+          }
+          if (
+            login !== undefined &&
+            req.method === "POST" &&
+            sub === login.poll
+          ) {
+            const route = (target.webui ?? []).find(
+              (r) => r.method === "POST" && r.path === login.poll,
+            );
+            if (route === undefined) {
+              reply.code(404).send({
+                error: `平台 ${params.id} 声明了 qr-pair 登录但缺少 ${login.poll} 路由。`,
+              });
+              return;
+            }
+            const out = (await route.handler(
+              webuiReq({
+                method: "POST",
+                path: sub,
+                body: req.body,
+                query,
+              }),
+            )) as Record<string, unknown>;
+            const cred =
+              out.status === "completed" && out.credential !== null && typeof out.credential === "object"
+                ? (out.credential as Record<string, unknown>)
+                : undefined;
+            if (cred !== undefined) {
+              // 平台凭据键值对（credentialSchema 形状）；平台取路由 :id——同一处理路径服务多平台
+              const credentials: Record<string, string> = {};
+              for (const [k, v] of Object.entries(cred)) {
+                if (typeof v === "string" && v !== "") credentials[k] = v;
+              }
+              const registered = await registry.add({
+                platform: target.id,
+                credentials,
+              });
+              supervisor.addBot(registered.bot);
+              uiLog.info("bot added via platform qr login", {
+                platform: target.id,
+                appid: registered.bot.botId,
+              });
+              reply.send({
+                status: "created",
+                bot: { appid: registered.bot.botId, name: registered.bot.name },
+                agent_token: registered.agentToken,
+                note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换。",
+              });
+              return;
+            }
+            reply.send(out);
+            return;
+          }
+
+          // 通用插件路由：login 声明的 create/poll 不进通用匹配（凭据面只走宿主中介）
+          const routes = (target.webui ?? []).filter(
+            (r) =>
+              login === undefined ||
+              (r.path !== login.create && r.path !== login.poll),
+          );
+          const hit = matchRoute(routes, req.method, sub);
+          if (hit === null) {
+            reply.code(404).send({
+              error: `路由不存在：${req.method} ${sub}（平台 ${params.id}）。`,
+            });
+            return;
+          }
+          const out = await hit.route.handler(
+            webuiReq({
+              method: req.method as WebuiMethod,
+              path: sub,
+              params: hit.params,
+              query,
+              body: req.body,
+            }),
+          );
+          reply.send(out);
+        } catch (e) {
+          const m = mapError(uiLog, e);
+          reply.code(m.status).send({ error: m.message });
+        }
+      });
+
+      // —— 扫码绑定（q.qq.com lite，经 QQ 插件 webui 路由）——
+      // 旧路由过渡保留（P5 切声明端点后收口）；bind_key 在插件进程内，浏览器只见 task_id。
+      const qqRoute = (
+        method: WebuiMethod,
+        path: string,
+      ): PluginWebuiRoute | undefined => {
+        const p = connectors.get("qq");
+        return p === undefined ? undefined : matchRoute(p.webui ?? [], method, path)?.route;
+      };
 
       plugin.post("/qr-bind/create", async (_req, reply) => {
         try {
-          const now = Date.now();
-          for (const [k, v] of qrTasks) {
-            if (now - v.createdAt > QR_TASK_TTL_MS) qrTasks.delete(k);
+          const route = qqRoute("POST", "/login/qr/create");
+          if (route === undefined) {
+            throw new QrBindError(
+              "QQ 连接器未注册，扫码绑定不可用。可改用手动方式添加（appid + AppSecret）。",
+            );
           }
-          const task = await createQrBindTask(deps.qrBind);
-          qrTasks.set(task.taskId, { bindKey: task.bindKey, createdAt: now });
-          uiLog.info("qr bind task created", { taskId: task.taskId });
-          return {
-            task_id: task.taskId,
-            connect_url: task.connectUrl,
-            interval_s: 2,
+          const out = (await route.handler(webuiReq())) as {
+            task_id?: string;
           };
+          uiLog.info("qr bind task created", { taskId: out.task_id });
+          reply.send(out);
         } catch (e) {
           const m = mapError(uiLog, e);
           reply.code(m.status).send({ error: m.message });
@@ -290,30 +498,33 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const body = (req.body ?? {}) as Record<string, unknown>;
           const taskId =
             typeof body.task_id === "string" ? body.task_id.trim() : "";
-          const task = qrTasks.get(taskId);
-          if (task === undefined) {
-            // 任务不存在 / 已过期清理 / 进程重启：前端据此重开任务
+          const route = qqRoute("POST", "/login/qr/poll");
+          if (route === undefined) {
+            // 任务态不可用：前端据此重开任务或走手动添加
             return { status: "expired" };
           }
-          const r = await pollQrBind(
-            { taskId, bindKey: task.bindKey },
-            deps.qrBind,
-          );
-          if (r.status !== "pending") qrTasks.delete(taskId);
-          if (r.status !== "completed") return r;
-          // 完成 → 直接走既有注册管线（官方两级凭据校验 + 落库 + 拉起网关），
-          // AppSecret 全程不出本进程；agent_token 与手动添加同样仅此一次返回
+          const out = (await route.handler(
+            webuiReq({ body: { task_id: taskId } }),
+          )) as Record<string, unknown>;
+          if (out.status !== "completed") return out;
+          // 完成 → 既有注册管线（官方两级凭据校验 + 落库 + 拉起网关）；
+          // AppSecret 全程不出本进程，凭据绝不下发浏览器
+          const cred = out.credential as
+            | { appid?: unknown; secret?: unknown }
+            | undefined;
+          const appid = typeof cred?.appid === "string" ? cred.appid : "";
+          const secret = typeof cred?.secret === "string" ? cred.secret : "";
           const registered = await registry.add({
-            appid: r.appid,
-            secret: r.secret,
+            platform: "qq",
+            credentials: { appid, secret },
           });
-          supervisor.addBot(registered.app);
+          supervisor.addBot(registered.bot);
           uiLog.info("bot added via qr bind", {
-            appid: registered.app.appid,
+            appid: registered.bot.botId,
           });
           return {
             status: "created",
-            bot: { appid: registered.app.appid, name: registered.app.name },
+            bot: { appid: registered.bot.botId, name: registered.bot.name },
             agent_token: registered.agentToken,
             note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换。",
           };
@@ -346,15 +557,15 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       const settingsPayload = () => ({
         send_enabled: deps.repo.getSendEnable(),
         bots: registry.list().map((a) => ({
-          appid: a.appid,
+          appid: a.botId,
           name: a.name,
-          allow_groups: registry.allowGroupsOf(a.appid),
-          auth_level: registry.authLevelOf(a.appid),
-          tts_enabled: deps.repo.getTtsEnabled(a.appid),
-          receive_enabled: registry.receiveEnabledOf(a.appid),
-          mcp_enabled: registry.mcpEnabledOf(a.appid),
+          allow_groups: registry.allowGroupsOf(a.botId),
+          auth_level: registry.authLevelOf(a.botId),
+          tts_enabled: deps.repo.getTtsEnabled(a.botId),
+          receive_enabled: registry.receiveEnabledOf(a.botId),
+          mcp_enabled: registry.mcpEnabledOf(a.botId),
           gateway:
-            deps.botStatuses().find((st) => st.botId === a.appid)?.state ??
+            deps.botStatuses().find((st) => st.botId === a.botId)?.state ??
             "unknown",
         })),
       });
@@ -584,10 +795,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         try {
           const appid = (req.params as { appid: string }).appid;
           const removed = registry.remove(appid); // env 基座抛错 → 400
-          supervisor.removeBot(appid);
-          kvSessionPort(deps.db, appid).clear(); // 会话与 token 缓存一并清理（重加即全新 IDENTIFY）
-          tokens.clear(removed);
-          uiLog.info("bot removed via ui", { appid });
+          supervisor.removeBot(appid); // 会话与 token 缓存一并清理（runtime 内联，重加即全新 IDENTIFY）
+          uiLog.info("bot removed via ui", { appid: removed.botId });
           return { ok: true, appid };
         } catch (e) {
           const m = mapError(uiLog, e);
@@ -880,16 +1089,18 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       plugin.get("/quota", async (req, reply) => {
         try {
           const botId = resolveBot((req.query as Record<string, unknown>).bot);
-          const date = new Date().toISOString().slice(0, 10);
-          return {
-            bot: botId,
-            send_enabled: repo.getSendEnable(),
-            auth_level: registry.authLevelOf(botId),
-            proactive_sent_today: repo.proactiveSentToday(botId, date),
-            ...(deps.sender !== undefined
-              ? { buckets: deps.sender.snapshot(botId) }
-              : {}),
-          };
+          // 额度水位是平台语义（QQ）：委托 QQ 插件 webui 路由（形状与旧实现一致）
+          const route = qqRoute("GET", "/quota");
+          if (route === undefined) {
+            throw new Error("QQ 连接器未注册，额度水位不可用。");
+          }
+          return await route.handler(
+            webuiReq({
+              method: "GET",
+              path: "/quota",
+              query: { bot: botId },
+            }),
+          );
         } catch (e) {
           const m = mapError(uiLog, e);
           reply.code(m.status).send({ error: m.message });
@@ -944,7 +1155,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               content: text,
               ts: Date.now(),
               authorName:
-                registry.list().find((b) => b.appid === botId)?.name ?? null,
+                registry.list().find((b) => b.botId === botId)?.name ?? null,
             });
           } catch (pe) {
             const pm = pe instanceof Error ? pe.message : String(pe);

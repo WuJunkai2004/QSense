@@ -8,47 +8,49 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotRegistry } from "../src/bots";
-import type { GatewaySupervisor } from "../src/gateway";
-import type { TokenService } from "../src/gateway/token";
-import { createLogger } from "../src/logger";
-import { Sender, type SendApi } from "../src/sender";
+import { createLogger } from "../src/utils/logger";
+import { Sender } from "../src/sender";
 import { buildServer } from "../src/server/http";
 import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
+import { makeFakeRuntime } from "./helpers/qq-runtime";
+import type { ConnectorNet, ProactiveWire, ReplyWire } from "@qsense/connector-sdk";
 
 const TOKEN = "m7-test-token-0123456789abcdef";
 const BOT = "10001";
 const GROUP = "G1";
 
-interface MockApi {
-  calls: Array<{
-    scope: string;
-    targetId: string;
-    body: Record<string, unknown>;
-  }>;
+interface MockNet {
+  replies: ReplyWire[];
+  proactives: ProactiveWire[];
 }
 
-function makeApiMock(): MockApi & SendApi {
-  const calls: MockApi["calls"] = [];
+/** 发送原语假件（ConnectorNet 形状）：记录 reply/proactive wire，回执 PROVIDER_N */
+function makeNetMock(): MockNet & ConnectorNet {
+  const replies: ReplyWire[] = [];
+  const proactives: ProactiveWire[] = [];
   return {
-    calls,
-    async sendRaw(
-      scope: "group" | "chat",
-      targetId: string,
-      _creds: { appId: string; clientSecret: string },
-      body: Record<string, unknown>,
-    ) {
-      calls.push({ scope, targetId, body });
-      return { id: `PROVIDER_${calls.length}` };
+    replies,
+    proactives,
+    async reply(wire) {
+      replies.push(wire);
+      return { providerMsgId: `PROVIDER_${replies.length + proactives.length}` };
     },
-    async recallMessage() {},
-  } as never;
+    async proactive(wire) {
+      proactives.push(wire);
+      return { providerMsgId: `PROVIDER_${replies.length + proactives.length}` };
+    },
+    async recall() {},
+    async uploadMedia() {
+      return { handle: "FILEINFO_1" };
+    },
+  };
 }
 
 interface Fixture {
   baseUrl: string;
-  api: MockApi & SendApi;
+  net: MockNet;
   db: import("../src/store/db").DB;
   repo: Repo;
   agentToken: string;
@@ -93,45 +95,27 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
   repo.setSendEnable(true);
   const registry = new BotRegistry({
     db,
-    verify: async (app) => {
-      if (app.secret === "bad") throw new Error("401 invalid credentials");
+    verify: async (_platform, credentials) => {
+      if (credentials["secret"] === "bad") throw new Error("401 invalid credentials");
     },
   });
   await registry.add({
-    appid: BOT,
-    secret: "s1",
+    credentials: { appid: BOT, secret: "s1" },
     name: "基座",
     allowGroups: [GROUP],
   });
   // 已有 bot 的 token 反查（MCP 开关测试用）：轮换接口不回显旧值，从域层取当前值
   const agentToken = registry.agentTokenOf(BOT) ?? "";
 
-  const api = makeApiMock();
+  const api = makeNetMock();
   const sender = new Sender({
     log: createLogger("error"),
-    db,
     repo,
     bots: registry,
-    tokenManager: {} as never,
-    apiFor: () => api,
+    transportFor: () => api,
   });
 
-  const added: string[] = [];
-  const removed: string[] = [];
-  const cleared: string[] = [];
-  const supervisor = {
-    addBot: (app: { appid: string }) => {
-      added.push(app.appid);
-    },
-    removeBot: (appid: string) => {
-      removed.push(appid);
-    },
-  } as unknown as GatewaySupervisor;
-  const tokens = {
-    clear: (app: { appid: string }) => {
-      cleared.push(app.appid);
-    },
-  } as unknown as TokenService;
+  const fxRuntime = makeFakeRuntime({ db, repo, registry });
 
   // 假 UI 产物：index.html + assets/app.js
   const uiDir = join(dir, "fake-ui");
@@ -141,7 +125,6 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
     "<!doctype html><title>m7-fake-ui</title>",
   );
   writeFileSync(join(uiDir, "assets", "app.js"), "console.log('m7');\n");
-  process.env.UI_DIST_DIR = uiDir;
 
   const app = buildServer({
     log: createLogger("error"),
@@ -150,9 +133,9 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
     sender,
     version: "0.2.0",
     registry,
-    supervisor,
-    tokens,
+    connectors: fxRuntime.runtime,
     botStatuses: () => [{ botId: BOT, state: "ready" }],
+    uiDistDir: uiDir,
   });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const addr = app.server.address();
@@ -160,15 +143,14 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
 
   return {
     baseUrl: `http://127.0.0.1:${port}`,
-    api,
+    net: api,
     db,
     repo,
     agentToken,
-    added,
-    removed,
-    cleared,
+    added: fxRuntime.added,
+    removed: fxRuntime.removed,
+    cleared: fxRuntime.cleared,
     close: async () => {
-      delete process.env.UI_DIST_DIR;
       await app.close();
       db.close();
       try {
@@ -635,8 +617,8 @@ test("M7-U9 send：被动回复走账本（msg_seq=1、status sent）；非白�
     };
     assert.equal(body.result.status, "sent");
     assert.equal(body.result.msg_seq, 1);
-    assert.equal(fx.api.calls.length, 1);
-    assert.equal(fx.api.calls[0].targetId, GROUP);
+    assert.equal(fx.net.replies.length, 1);
+    assert.equal(fx.net.replies[0]?.target, GROUP);
 
     // 外发消息补记：messages 里出现 out=true 行，作者=机器人名（不进成员名册）
     const msgs = (await (
@@ -677,6 +659,45 @@ test("M7-U9 send：被动回复走账本（msg_seq=1、status sent）；非白�
     });
     assert.equal(gated.status, 400);
     assert.match(((await gated.json()) as { error: string }).error, /白名单/);
+  } finally {
+    await fx.close();
+  }
+});
+
+test("M7-U11 connectors 声明端点：平台声明面（caps/credentialSchema/login/webui 路由表）", async () => {
+  const fx = await setupServer();
+  try {
+    const res = await get(fx.baseUrl, "/ui/api/connectors", authHeaders());
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as {
+      connectors: Array<{
+        id: string;
+        title: string;
+        caps: { scopes: string[]; quota: boolean };
+        credential_schema: {
+          required: string[];
+          properties: Record<string, unknown>;
+        };
+        credential_secrets: string[];
+        login: { kind: string; create?: string; poll?: string };
+        webui: Array<{ method: string; path: string }>;
+      }>;
+    };
+    const qq = body.connectors.find((c) => c.id === "qq");
+    assert.ok(qq !== undefined, "QQ 平台声明应在列");
+    assert.equal(qq.title, "QQ 官方机器人");
+    // credentialSchema 驱动「添加机器人」表单（P2 前端消费的字段源）
+    assert.deepEqual(qq.credential_schema.required, ["appid", "secret"]);
+    assert.ok(qq.credential_schema.properties["appid"] !== undefined);
+    assert.deepEqual(qq.credential_secrets, ["secret"]);
+    assert.equal(qq.login.kind, "qr-pair");
+    assert.equal(qq.login.create, "/login/qr/create");
+    assert.equal(qq.login.poll, "/login/qr/poll");
+    assert.ok(qq.webui.some((r) => r.path === "/login/qr/create"));
+    assert.equal(qq.caps.quota, true);
+    // 无鉴权 401
+    const anon = await fetch(`${fx.baseUrl}/ui/api/connectors`);
+    assert.equal(anon.status, 401);
   } finally {
     await fx.close();
   }
@@ -798,7 +819,7 @@ test("M10 UI 单聊：type=all 合并会话（名字=users 权威）+ type=chat 
     );
     assert.equal(msgs.messages[0].author.name, "Venti");
 
-    // ③ 发送：type=chat → 官方调用 scope=c2c（C2 在 60 分钟被动窗内，免 opt-in）
+    // ③ 发送：type=chat → wire scope=chat（连接器映射官方 c2c scope；C2 在 60 分钟被动窗内，免 opt-in）
     const ok = await fetch(`${fx.baseUrl}/ui/api/send`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
@@ -811,9 +832,9 @@ test("M10 UI 单聊：type=all 合并会话（名字=users 权威）+ type=chat 
       }),
     });
     assert.equal(ok.status, 200);
-    assert.equal(fx.api.calls.length, 1);
-    assert.equal(fx.api.calls[0].scope, "c2c");
-    assert.equal(fx.api.calls[0].targetId, USER);
+    assert.equal(fx.net.replies.length, 1);
+    assert.equal(fx.net.replies[0]?.scope, "chat");
+    assert.equal(fx.net.replies[0]?.target, USER);
 
     // ④ 外发补记落 c2c_messages（direction=1），消息流可见
     const after = (await (

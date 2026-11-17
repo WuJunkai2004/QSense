@@ -3,7 +3,7 @@
 //   空文本/超长拒绝、上游 500/非音频响应的可操作错误
 // - HTTP 集成（buildServer + 假 TTS fetch）：config 保存/打码回显/空 key 保留旧值、
 //   test 试听（草稿优先/回退/上游 502）、settings 的 tts_enabled 批量开关
-// - 工具层集成（runTool + 真 Sender + apiFor mock）：send_media "tts:<文本>" 全链路
+// - 工具层集成（runTool + 真 Sender + net mock）：send_media "tts:<文本>" 全链路
 //   （双闸门：未配置/未启用的可操作拒绝；合成产物按语音条上传发送）
 
 import { test } from "node:test";
@@ -12,9 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotRegistry } from "../src/bots";
-import type { GatewaySupervisor } from "../src/gateway";
-import type { TokenService } from "../src/gateway/token";
-import { createLogger } from "../src/logger";
+import { createLogger } from "../src/utils/logger";
 import { Sender } from "../src/sender";
 import { buildServer } from "../src/server/http";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
@@ -22,6 +20,7 @@ import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
 import { TtsError, synthesizeSpeech, ttsEndpoint } from "../src/tts";
 import { runTool } from "../src/tools/defs";
+import { makeFakeRuntime } from "./helpers/qq-runtime";
 
 const BOT = "10001";
 const GROUP = "G1";
@@ -171,19 +170,19 @@ async function setupHttp(): Promise<HttpFixture> {
   repo.ensureRuntime();
   repo.setAdminToken(TOKEN);
   const registry = new BotRegistry({ db });
-  await registry.add({ appid: BOT, secret: "s1", name: "tts-bot" });
+  await registry.add({ credentials: { appid: BOT, secret: "s1" }, name: "tts-bot" });
   // 假上游按请求的 response_format 回对应格式（魔数校验按格式分支，须一致）
   const tts = fakeTts((_url, body) =>
     body.response_format === "mp3" ? okMp3() : okWav(),
   );
+  const fxRuntime = makeFakeRuntime({ db, repo, registry });
   const app = buildServer({
     log: createLogger("error"),
     db,
     repo,
     version: "0.2.0",
     registry,
-    supervisor: {} as unknown as GatewaySupervisor,
-    tokens: {} as unknown as TokenService,
+    connectors: fxRuntime.runtime,
     botStatuses: () => [],
     ttsDeps: { fetchImpl: tts as unknown as typeof fetch },
   });
@@ -338,15 +337,15 @@ test("tts 集成：test 试听（草稿优先/回退已存/未配置 400/上游 
       voice: "v",
     });
     const registry = new BotRegistry({ db });
-    await registry.add({ appid: BOT, secret: "s", name: "n" });
+    await registry.add({ credentials: { appid: BOT, secret: "s" }, name: "n" });
+    const fxRuntime = makeFakeRuntime({ db, repo, registry });
     const app = buildServer({
       log: createLogger("error"),
       db,
       repo,
       version: "0.2.0",
       registry,
-      supervisor: {} as unknown as GatewaySupervisor,
-      tokens: {} as unknown as TokenService,
+      connectors: fxRuntime.runtime,
       botStatuses: () => [],
       ttsDeps: {
         fetchImpl: fakeTts(() => new Response("boom", { status: 500 })) as unknown as typeof fetch,
@@ -408,7 +407,7 @@ test("tts 集成：settings 的 tts_enabled 批量开关（回读 + 无效项 40
   }
 });
 
-// —— 工具层集成：send_media "tts:<文本>"（runTool + 真 Sender + apiFor mock）——
+// —— 工具层集成：send_media "tts:<文本>"（runTool + 真 Sender + net mock）——
 
 interface ToolFixture {
   db: DB;
@@ -416,7 +415,7 @@ interface ToolFixture {
   registry: BotRegistry;
   sender: Sender;
   uploads: Array<{ mediaType: string; srcKind: string }>;
-  calls: Array<{ scope: string; targetId: string; body: Record<string, unknown> }>;
+  sends: Array<{ scope: string; target: string; media: boolean }>;
   close: () => void;
 }
 
@@ -433,38 +432,35 @@ function setupTool(): ToolFixture {
   repo.setSendEnable(true);
   const registry = new BotRegistry({ db });
   const uploads: ToolFixture["uploads"] = [];
-  const calls: ToolFixture["calls"] = [];
+  const sends: ToolFixture["sends"] = [];
   const mock = {
-    async sendRaw(
-      scope: "group" | "chat",
-      targetId: string,
-      _creds: unknown,
-      body: Record<string, unknown>,
-    ) {
-      calls.push({ scope, targetId, body });
-      return { id: `PROVIDER_${calls.length}` };
+    async reply(wire: { content?: unknown; media?: unknown }) {
+      sends.push({
+        scope: String((wire as { scope?: string }).scope ?? ""),
+        target: String((wire as { target?: string }).target ?? ""),
+        media: wire.media !== undefined,
+      });
+      return { providerMsgId: `PROVIDER_${sends.length}` };
     },
-    async recallMessage() {},
-    async uploadMedia(
-      scope: "group" | "chat",
-      targetId: string,
-      _creds: unknown,
-      src: { kind: string },
-      mediaType: string,
-    ) {
-      uploads.push({ mediaType, srcKind: src.kind });
-      void scope;
-      void targetId;
-      return "FILEINFO_1";
+    async proactive(wire: { content?: unknown; media?: unknown }) {
+      sends.push({
+        scope: String((wire as { scope?: string }).scope ?? ""),
+        target: String((wire as { target?: string }).target ?? ""),
+        media: wire.media !== undefined,
+      });
+      return { providerMsgId: `PROVIDER_${sends.length}` };
+    },
+    async recall() {},
+    async uploadMedia(wire: { kind: string; source: { kind: string } }) {
+      uploads.push({ mediaType: wire.kind, srcKind: wire.source.kind });
+      return { handle: "FILEINFO_1" };
     },
   };
   const sender = new Sender({
     log: createLogger("error"),
-    db,
     repo,
-    tokenManager: {} as never,
     bots: registry,
-    apiFor: () => mock as never,
+    transportFor: () => mock as never,
   });
   return {
     db,
@@ -472,7 +468,7 @@ function setupTool(): ToolFixture {
     registry,
     sender,
     uploads,
-    calls,
+    sends,
     close: () => {
       db.close();
       try {
@@ -515,7 +511,7 @@ test("tts 工具层：send_media tts: 全链路（合成→语音条上传→发
     assert.equal(fx.uploads.length, 1);
     assert.equal(fx.uploads[0]!.mediaType, "voice", "TTS 产物应按语音条上传");
     assert.equal(fx.uploads[0]!.srcKind, "b64");
-    assert.equal(fx.calls.length, 1, "应发出一条消息");
+    assert.equal(fx.sends.length, 1, "应发出一条消息");
   } finally {
     fx.close();
   }
@@ -556,7 +552,7 @@ test("tts 工具层：双闸门可操作拒绝（未配置 / 未启用）", asyn
     );
     assert.equal(r2.isError, true);
     assert.match(r2.text, /未启用语音/);
-    assert.ok(fx.uploads.length === 0 && fx.calls.length === 0, "拒绝时不得有副作用");
+    assert.ok(fx.uploads.length === 0 && fx.sends.length === 0, "拒绝时不得有副作用");
 
     // TTS 上游失败 → 错误透传（含 TTS 字样），不发送
     fx.repo.setTtsEnabled(BOT, true);
@@ -568,7 +564,7 @@ test("tts 工具层：双闸门可操作拒绝（未配置 / 未启用）", asyn
     );
     assert.equal(r3.isError, true);
     assert.match(r3.text, /TTS/);
-    assert.equal(fx.calls.length, 0);
+    assert.equal(fx.sends.length, 0);
   } finally {
     fx.close();
   }

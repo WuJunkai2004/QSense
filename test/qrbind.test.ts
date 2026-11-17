@@ -11,20 +11,19 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotRegistry } from "../src/bots";
-import type { GatewaySupervisor } from "../src/gateway";
-import type { TokenService } from "../src/gateway/token";
-import { createLogger } from "../src/logger";
+import { createLogger } from "../src/utils/logger";
 import {
   QrBindError,
   createQrBindTask,
   decryptBindSecret,
   pollQrBind,
   type QrBindDeps,
-} from "../src/qrbind";
+} from "@qsense/connector-qq";
 import { buildServer } from "../src/server/http";
 import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
+import { makeFakeRuntime } from "./helpers/qq-runtime";
 
 const TOKEN = "qr-test-admin-token-0123456789abcdef";
 
@@ -155,25 +154,17 @@ async function setupQrServer(seedAppid?: string): Promise<QrFixture> {
   repo.setAdminToken(TOKEN_ADMIN);
   const registry = new BotRegistry({
     db,
-    verify: async (app) => {
-      if (app.secret === "bad") throw new Error("401 invalid credentials");
+    verify: async (_platform, credentials) => {
+      if (credentials["secret"] === "bad") throw new Error("401 invalid credentials");
     },
   });
   if (seedAppid !== undefined) {
     await registry.add({
-      appid: seedAppid,
-      secret: "already-there",
+      credentials: { appid: seedAppid, secret: "already-there" },
       name: "已有",
     });
   }
   const added: string[] = [];
-  const supervisor = {
-    addBot: (app: { appid: string }) => {
-      added.push(app.appid);
-    },
-    removeBot: () => {},
-  } as unknown as GatewaySupervisor;
-  const tokens = { clear: () => {} } as unknown as TokenService;
 
   // 有状态假上游：create 存 key；扫码置位后 poll 给 completed（真加密）
   const upstream = { key: "", scanned: false };
@@ -203,7 +194,14 @@ async function setupQrServer(seedAppid?: string): Promise<QrFixture> {
     join(uiDir, "index.html"),
     "<!doctype html><title>qr-ui</title>",
   );
-  process.env.UI_DIST_DIR = uiDir;
+
+  const fx = makeFakeRuntime({
+    db,
+    repo,
+    registry,
+    qrBind: { fetchImpl, host: "mock.invalid" },
+    onAdd: (appid) => added.push(appid),
+  });
 
   const app = buildServer({
     log: createLogger("error"),
@@ -211,10 +209,9 @@ async function setupQrServer(seedAppid?: string): Promise<QrFixture> {
     repo,
     version: "0.2.0",
     registry,
-    supervisor,
-    tokens,
+    connectors: fx.runtime,
     botStatuses: () => [],
-    qrBind: { fetchImpl, host: "mock.invalid" },
+    uiDistDir: uiDir,
   });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const addr = app.server.address();
@@ -225,7 +222,6 @@ async function setupQrServer(seedAppid?: string): Promise<QrFixture> {
     added,
     upstream,
     close: async () => {
-      delete process.env.UI_DIST_DIR;
       await app.close();
       db.close();
       try {
@@ -318,6 +314,63 @@ test("qrbind 集成：扫码→pending→created 全流程（注册落库 + 任�
   }
 });
 
+test("qrbind 平台路由（P2 声明制）：/platforms/qq/login/qr/* 同语义，凭据绝不下发浏览器", async () => {
+  const fx = await setupQrServer();
+  try {
+    // create 经声明路径透传：connect_url 可用
+    const createRes = await fetch(
+      `${fx.baseUrl}/ui/api/platforms/qq/login/qr/create`,
+      { method: "POST", headers: auth(), body: "{}" },
+    );
+    assert.equal(createRes.status, 200);
+    const created = (await createRes.json()) as { task_id: string };
+
+    // 未扫码 → pending（原样透传）
+    const poll1 = await fetch(
+      `${fx.baseUrl}/ui/api/platforms/qq/login/qr/poll`,
+      {
+        method: "POST",
+        headers: auth(),
+        body: JSON.stringify({ task_id: created.task_id }),
+      },
+    );
+    assert.deepEqual(await poll1.json(), { status: "pending" });
+
+    // 扫码确认 → 宿主中介注册：created 形状与旧 /qr-bind/poll 一致，
+    // 且响应体绝不含 credential/secret（AppSecret 不出本进程）
+    fx.upstream.scanned = true;
+    const poll2 = await fetch(
+      `${fx.baseUrl}/ui/api/platforms/qq/login/qr/poll`,
+      {
+        method: "POST",
+        headers: auth(),
+        body: JSON.stringify({ task_id: created.task_id }),
+      },
+    );
+    assert.equal(poll2.status, 200);
+    const raw = await poll2.text();
+    assert.doesNotMatch(raw, /credential|secret/i, "凭据字段不得出现在响应");
+    const done = JSON.parse(raw) as {
+      status: string;
+      bot: { appid: string };
+      agent_token: string;
+    };
+    assert.equal(done.status, "created");
+    assert.equal(done.bot.appid, "30001");
+    assert.equal(done.agent_token.length, 48);
+    assert.deepEqual(fx.added, ["30001"]);
+
+    // 未知平台 → 404 可操作错误
+    const ghost = await fetch(
+      `${fx.baseUrl}/ui/api/platforms/weixin/login/qr/create`,
+      { method: "POST", headers: auth(), body: "{}" },
+    );
+    assert.equal(ghost.status, 404);
+  } finally {
+    await fx.close();
+  }
+});
+
 test("qrbind 集成：扫码添加重复 appid → 400 可操作错误，不落库不拉起", async () => {
   const fx = await setupQrServer("30001"); // 预注册，扫码完成的 appid 与之重复
   try {
@@ -351,21 +404,25 @@ test("qrbind 集成：上游不可达 → 502 且提示可手动添加", async (
     repo.ensureRuntime();
     repo.setAdminToken(TOKEN_ADMIN);
     const registry = new BotRegistry({ db });
-    const app = buildServer({
-      log: createLogger("error"),
+    const fxRuntime = makeFakeRuntime({
       db,
       repo,
-      version: "0.2.0",
       registry,
-      supervisor: {} as unknown as GatewaySupervisor,
-      tokens: {} as unknown as TokenService,
-      botStatuses: () => [],
       qrBind: {
         fetchImpl: (async () => {
           throw new Error("ECONNREFUSED");
         }) as unknown as typeof fetch,
         host: "mock.invalid",
       },
+    });
+    const app = buildServer({
+      log: createLogger("error"),
+      db,
+      repo,
+      version: "0.2.0",
+      registry,
+      connectors: fxRuntime.runtime,
+      botStatuses: () => [],
     });
     await app.listen({ port: 0, host: "127.0.0.1" });
     const addr = app.server.address();

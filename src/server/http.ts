@@ -5,15 +5,13 @@
 import Fastify from "fastify";
 import type { AssetStore } from "../assets";
 import type { BotRegistry } from "../bots";
-import type { GatewayStatus, GatewaySupervisor } from "../gateway";
-import type { TokenService } from "../gateway/token";
-import type { Logger } from "../logger";
+import type { ConnectorRuntime, GatewayStatus } from "../connectors/runtime";
+import type { Logger } from "../utils/logger";
 import type { Sender } from "../sender";
 import type { DB } from "../store/db";
 import { Repo } from "../store/repo";
 import { createMcpHandler } from "../tools/mcp";
 import { registerUiRoutes } from "./ui";
-import type { QrBindDeps } from "../qrbind";
 import type { TtsDeps } from "../tts";
 
 const ASSET_MAX_BYTES = 20 * 1024 * 1024;
@@ -27,17 +25,17 @@ export interface ServerDeps {
   version: string;
   /** —— WebUI 依赖（齐备才挂载 /ui 与 /ui/api）—— */
   registry?: BotRegistry;
-  supervisor?: GatewaySupervisor;
-  tokens?: TokenService;
+  /** 连接器运行时（P1 收口，原 supervisor）：/ui 装配条件 + 运行时接入/摘除 */
+  connectors?: ConnectorRuntime;
   botStatuses?: () => GatewayStatus[];
   /** MCP 工具执行全局并发上限（测试注入口；缺省 8，语义见 mcp.ts McpDeps） */
   maxConcurrent?: number;
   /** 资产存储（request_upload 票据 + PUT /assets 数据端点 + asset: 引用）；缺省=未装配 */
   assets?: AssetStore;
-  /** 扫码绑定上游依赖（透传 UiDeps.qrBind；缺省=直连 q.qq.com），测试注入假端点 */
-  qrBind?: QrBindDeps;
   /** TTS 合成依赖（透传 UiDeps.ttsDeps；缺省=直连），测试注入假端点 */
   ttsDeps?: TtsDeps;
+  /** WebUI 静态产物目录（config.toml ui_dist_dir；缺省 ./ui/dist） */
+  uiDistDir?: string;
 }
 
 /** Authorization: Bearer <token> 提取；无效返回 null */
@@ -89,7 +87,7 @@ export function buildServer(deps: ServerDeps) {
     repo,
     sender: deps.sender,
     bots: deps.registry,
-    supervisor: deps.supervisor,
+    supervisor: deps.connectors,
     assets: deps.assets,
     agentTokenOf:
       deps.assets !== undefined && deps.registry !== undefined
@@ -97,6 +95,14 @@ export function buildServer(deps: ServerDeps) {
         : undefined,
     maxConcurrent: deps.maxConcurrent,
     version,
+    plugins: deps.connectors?.plugins,
+    pluginContext:
+      deps.connectors !== undefined
+        ? (botId) => ({
+            host: deps.connectors!.hostFor(botId),
+            config: deps.connectors!.configOf(botId),
+          })
+        : undefined,
   });
   app.route({
     method: ["GET", "POST", "DELETE"],
@@ -198,11 +204,10 @@ export function buildServer(deps: ServerDeps) {
     }
   });
 
-  // WebUI（M7）：registry+supervisor+tokens 齐备才挂载（缺省=测试旧行为，不挂 /ui）
+  // WebUI（M7）：registry+connectors+botStatuses 齐备才挂载（缺省=测试旧行为，不挂 /ui）
   if (
     deps.registry !== undefined &&
-    deps.supervisor !== undefined &&
-    deps.tokens !== undefined &&
+    deps.connectors !== undefined &&
     deps.botStatuses !== undefined
   ) {
     registerUiRoutes(app, {
@@ -211,12 +216,12 @@ export function buildServer(deps: ServerDeps) {
       repo,
       version,
       registry: deps.registry,
-      supervisor: deps.supervisor,
-      tokens: deps.tokens,
+      supervisor: deps.connectors,
+      connectors: deps.connectors.plugins,
       botStatuses: deps.botStatuses,
       sender: deps.sender,
-      qrBind: deps.qrBind,
       ttsDeps: deps.ttsDeps,
+      uiDistDir: deps.uiDistDir,
     });
   }
 
