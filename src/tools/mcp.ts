@@ -13,9 +13,16 @@ import {
   ListToolsRequestSchema,
   isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { BotApp } from "../config";
-import type { BotRegistry } from "../bots";
-import type { Logger } from "../logger";
+import {
+  BASE_TOOL_NAMES,
+  ToolRouter,
+  callPluginTool,
+  type ConnectorRegistry,
+  type HostApi,
+  type BotConfigSnapshot,
+} from "@qsense/connector-sdk";
+import type { BotRecord, BotRegistry } from "../bots";
+import type { Logger } from "../utils/logger";
 import type { Sender } from "../sender";
 import type { Repo } from "../store/repo";
 import { TOOLS, runTool } from "./defs";
@@ -27,8 +34,8 @@ export interface McpDeps {
   sender?: Sender;
   /** 机器人注册表（bots 表域层）：注册/轮换/白名单解析 */
   bots?: BotRegistry;
-  /** 网关接入器：register_bot 后立即接入新 bot；缺省=测试环境不接入 */
-  supervisor?: { addBot: (app: BotApp) => void };
+  /** 连接器运行时：register_bot 后立即接入新 bot；缺省=测试环境不接入 */
+  supervisor?: { addBot: (bot: BotRecord) => void };
   /** 资产存储（request_upload / send_media asset: 引用）；缺省=资产功能未装配 */
   assets?: import("../assets").AssetStore;
   /** agent_token 反查（request_upload 票据密钥取自绑定 bot 的 agent_token）；缺省=票据不可签发 */
@@ -36,6 +43,12 @@ export interface McpDeps {
   /** MCP 工具执行全局并发上限（M6 限流）：SQLite 同步查询毫秒级、写工具 API 调用秒级，8 足够且防打爆 */
   maxConcurrent?: number;
   version: string;
+  /** 平台插件声明面注册表（P1 收口）：扩展工具经 ToolRouter 聚合；缺省=仅基座 14 */
+  plugins?: ConnectorRegistry;
+  /** 插件工具上下面解析（host+config 按 bot）；缺省=插件工具不可用 */
+  pluginContext?: (
+    botId: string,
+  ) => { host: HostApi; config: BotConfigSnapshot } | undefined;
 }
 /** sha256 摘要比较：长度差异不影响常数时间性（/ui/api admin token 在用） */
 export function bearerOk(
@@ -90,6 +103,21 @@ export function createMcpHandler(
   }
   const sessions = new Map<string, Session>();
 
+  // 工具路由（P1 收口 → P5 跨平台过滤，2026-11-17）：基座 14（保留名）+ 该 bot
+  // 平台的插件声明扩展。同一服务多平台 bot 并存时，每个 bot 的工具面只含本平台
+  // 扩展工具（Telegram bot 看不到 QQ 的 quota——平台语义隔离是工具面结构性的，
+  // 不靠调用时报错兜底）。bot 的 platform 不可变（bots 表），会话期内路由表稳定。
+  // 插件工具调用经 callPluginTool（错误规范化 + 与基座一致的并发闸/鉴权管线——
+  // 顶部的 active 闸对两类工具同等生效）。
+  const baseByName = new Map(TOOLS.map((tool) => [tool.name, tool]));
+  const routerForSession = (botId: string): { router: ToolRouter; platform: string | null } => {
+    const router = new ToolRouter(BASE_TOOL_NAMES);
+    const platform = deps.bots?.platformOf(botId) ?? null;
+    const plugin = platform !== null ? deps.plugins?.get(platform) : undefined;
+    if (plugin !== undefined) router.registerPlugin(plugin);
+    return { router, platform };
+  };
+
   const createContext = (session: Session) => ({
     repo,
     sender: deps.sender,
@@ -110,12 +138,24 @@ export function createMcpHandler(
       { name: "qq-gateway", version },
       { capabilities: { tools: {} } },
     );
+    const { router, platform } = routerForSession(botId);
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: TOOLS.map((t) => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: t.inputSchema,
-      })),
+      tools: router.names().map((name) => {
+        const base = baseByName.get(name);
+        if (base !== undefined) {
+          return {
+            name: base.name,
+            description: base.description,
+            inputSchema: base.inputSchema,
+          };
+        }
+        const decl = router.resolve(name)?.tool;
+        return {
+          name,
+          description: decl?.description ?? "",
+          inputSchema: decl?.inputSchema ?? { type: "object", properties: {} },
+        };
+      }),
     }));
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const name = req.params.name;
@@ -135,13 +175,56 @@ export function createMcpHandler(
       }
       active += 1;
       try {
-        const result = await runTool(name, args, createContext(session));
+        const route = router.resolve(name);
+        let result: { isError?: boolean; text: string; content?: unknown[] };
+        if (route === null) {
+          // 跨平台可操作性：工具名存在于其他平台的扩展声明时，明确指出归属
+          //（如 telegram bot 调 quota——它在 QQ 平台的工具面上）
+          const owner = (deps.plugins?.list() ?? []).find((p) =>
+            (p.tools ?? []).some((t) => t.name === name),
+          );
+          result =
+            owner !== undefined
+              ? {
+                  isError: true,
+                  text: `工具 ${name} 是平台 ${owner.id} 的扩展工具；当前 bot（${platform ?? "未知"}）的工具面不含它。请用该平台 bot 的 agent_token 访问 /mcp。`,
+                }
+              : {
+                  isError: true,
+                  text: `未知工具：${name}。可用：${router.names().join(", ")}`,
+                };
+        } else if (route.source === "base") {
+          result = await runTool(name, args, createContext(session));
+        } else {
+          const pctx = deps.pluginContext?.(session.botId);
+          if (pctx === undefined || route.plugin === undefined) {
+            result = {
+              isError: true,
+              text: `平台扩展工具 ${name} 未装配（服务端未连接对应平台连接器）。`,
+            };
+          } else {
+            const payload = await callPluginTool(
+              route.plugin,
+              name,
+              args,
+              { host: pctx.host, botId: session.botId, config: pctx.config },
+            );
+            result = {
+              content: payload.content,
+              ...(payload.isError === true ? { isError: true } : {}),
+              text: payload.content[0]?.text ?? "",
+            };
+          }
+        }
         mcpLog.debug("tool call", {
           tool: name,
           error: result.isError === true,
         });
         return {
-          content: result.content ?? [{ type: "text", text: result.text }],
+          content:
+            result.content !== undefined
+              ? (result.content as never)
+              : [{ type: "text", text: result.text }],
           ...(result.isError === true ? { isError: true } : {}),
         };
       } finally {

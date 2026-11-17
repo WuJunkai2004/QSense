@@ -1,16 +1,18 @@
-// MCP 工具面定义：以"人类操作QQ"为隐喻组织——
+// MCP 工具面定义：以"人类操作IM"为隐喻组织——
 //   列表层 list_all/list_new（消息列表视角；list_all 的 type 参数作结果过滤）→
 //   读取层 get_new/browse/search/context（会话侧别由 id 自动探测，repo.detectSessionKind）→
-//   名册与额度 list_members/quota →
+//   名册 list_members →
 //   写工具 send/send_media/request_upload/recall（双重门禁）→ 管理 register_bot。
+// P1 收口（2026-11-15）：基座恒定 14 工具；quota 等平台扩展工具由连接器插件声明
+// （QQ=connector-qq 的 quota 工具），经 ToolRouter 在 MCP 层聚合，名单不变（14+1=15）。
 // 已读水位（拉取即已读）与整群删除（原 forget，迁 WebUI）为服务端内部状态/管理操作，不在 agent 工具面。
 // token 轮换收归 WebUI（2026-10-27 工具面缩窄）：调用即自毁凭证且新值落进对话上下文，属人的运维决策。
 // 写工具经 Sender（真实官方API）：发送总开关（SQLite）开启且群在该 bot allow_groups 内才生效，否则硬拒绝。
 // 多机器人：token 绑定制，一个 agent_token 只属于一个 bot；
 // `bot` 参数已全工具面退役（绑定关系在 HTTP 层 Bearer→bot 完成，agent 无需感知 bot 维度）。
 
-import type { AuthLevel, BotApp } from "../config";
-import type { BotRegistry } from "../bots";
+import type { AuthLevel } from "../utils/config";
+import type { BotRecord, BotRegistry } from "../bots";
 import type { Sender } from "../sender";
 import { synthesizeSpeech } from "../tts";
 import type { MsgRow, Repo } from "../store/repo";
@@ -57,8 +59,8 @@ export interface ToolContext {
   bots?: BotRegistry;
   /** M8：本请求 Bearer token 绑定的 bot（一个 token 只属一个 bot）；缺省=未认证 */
   botId?: string;
-  /** 网关接入器：register_bot 注册成功后立即拉起连接；缺省=测试环境不接 */
-  supervisor?: { addBot: (app: BotApp) => void };
+  /** 连接器运行时：register_bot 注册成功后立即拉起连接；缺省=测试环境不接 */
+  supervisor?: { addBot: (bot: BotRecord) => void };
   /** 资产存储（request_upload 票据签发 / send_media asset: 引用）；缺省=未装配 */
   assets?: import("../assets").AssetStore;
   /** TTS 合成依赖（fetch 注入，测试用）；缺省=直连 OpenAI 兼容服务 */
@@ -207,17 +209,17 @@ function scopeIdArg(args: Record<string, unknown>): string {
   const legacy = optStr(args, "group");
   if (legacy !== undefined) {
     throw new ToolError(
-      '参数 group 已更名 id（与 list_all 返回的 conversations[].id 对齐）：请传 id:"会话openid"（群聊=群 openid；私聊=对方 user_openid）。会话侧别由服务端自动探测，无需声明。',
+      '参数 group 已更名 id（与 list_all 返回的 conversations[].id 对齐）：请传 id:"会话 id"。会话侧别由服务端自动探测，无需声明。',
     );
   }
-  return str(args, "id", "会话 id（群聊=群 openid；私聊=对方 user_openid）");
+  return str(args, "id", "会话 id（list_all/list_new 返回的 conversations[].id）");
 }
 
 /**
  * 会话侧别自动探测（读写工具的 type 参数已退役——id 从 list_all/list_new 拿，
- * 返回条目自带类型，调用方再传一遍是冗余）：openid 是权威定位标识（群 openid 与
- * 用户 openid 命名空间互斥，不可能同值），按缓存归属唯一裁决。群侧证据=群消息缓存/
- * 群注册表/bot 白名单；单聊侧证据=单聊消息缓存。均未命中给可操作错误。
+ * 返回条目自带类型，调用方再传一遍是冗余）：P3 起权威源 = sessions 显式注册表
+ * （不依赖「命名空间互斥」的平台保证）；注册表未命中走缓存/白名单兜底，
+ * 均未命中给可操作错误。
  */
 function detectKind(
   ctx: ToolContext,
@@ -298,25 +300,39 @@ export const TOOLS: ToolDef[] = [
   {
     name: "register_bot",
     description:
-      "【管理操作】注册新机器人：直接传 appid 与 secret（q.qq.com 开发设置页获取）。" +
-      "服务端校验凭据后落库，并生成随机 agent_token——它只在本次返回中出现一次，必须立即保存。" +
+      "【管理操作】注册新机器人：传 platform 与 credentials（平台凭据键值对，形状由该平台连接器声明定义；" +
+      "缺省 platform=qq，此时也可直接传兼容形参 appid+secret）。" +
+      "服务端经该平台连接器校验凭据（未过官方校验绝不入库）后落库，并生成随机 agent_token——" +
+      "它只在本次返回中出现一次，必须立即保存。" +
       "此后本服务所有工具连接时都应使用该 token（一个 token 只绑定这一个 bot）。" +
       "token 丢失时在 WebUI 设置页重置。",
     inputSchema: {
       type: "object",
-      required: ["appid", "secret"],
       properties: {
+        platform: {
+          type: "string",
+          description:
+            "平台 id（缺省 qq；可用平台见 WebUI 添加机器人面板的平台声明）",
+        },
+        credentials: {
+          type: "object",
+          description:
+            "平台凭据键值对（字段由平台连接器声明；QQ={appid, secret}。传了 credentials 时 appid/secret 形参忽略）",
+        },
         appid: {
           type: "string",
-          description: "开放平台 AppID（q.qq.com → 开发设置）",
+          description: "QQ 平台凭据（兼容形参）：开放平台 AppID（q.qq.com → 开发设置）",
         },
-        secret: { type: "string", description: "对应的 AppSecret" },
-        name: { type: "string", description: "备注名（缺省用 appid）" },
+        secret: {
+          type: "string",
+          description: "QQ 平台凭据（兼容形参）：对应的 AppSecret",
+        },
+        name: { type: "string", description: "备注名（缺省用账号 id）" },
         auth_level: {
           type: "string",
           enum: ["certified", "uncertified"],
           description:
-            "认证等级：主动消息频控预算 certified=60条/分、uncertified=30条/分（缺省未认证）",
+            "认证等级（QQ 平台语义）：主动消息频控预算 certified=60条/分、uncertified=30条/分（缺省未认证）",
         },
       },
     },
@@ -324,8 +340,38 @@ export const TOOLS: ToolDef[] = [
       if (ctx.bots === undefined) {
         throw new ToolError("机器人注册表未装配（服务端配置缺失）。");
       }
-      const appid = str(args, "appid", "开放平台 AppID");
-      const secret = str(args, "secret", "AppSecret");
+      const platform = optStr(args, "platform") ?? "qq";
+      // 凭据解析：credentials 键值对优先；否则回落 QQ 兼容形参 appid+secret（存量调用模式自愈）
+      let credentials: Record<string, string> | undefined;
+      const credRaw = args["credentials"];
+      if (credRaw !== undefined && credRaw !== null) {
+        if (
+          typeof credRaw !== "object" ||
+          Array.isArray(credRaw as unknown)
+        ) {
+          throw new ToolError(
+            "参数 credentials 必须是键值对对象（如 {\"appid\":\"…\",\"secret\":\"…\"}）。",
+          );
+        }
+        credentials = {};
+        for (const [k, v] of Object.entries(credRaw as Record<string, unknown>)) {
+          if (typeof v === "string" && v !== "") credentials[k] = v;
+        }
+      }
+      if (credentials === undefined) {
+        const appid = optStr(args, "appid");
+        const secret = optStr(args, "secret");
+        if (appid !== undefined && secret !== undefined) {
+          credentials = { appid, secret };
+        }
+      }
+      if (credentials === undefined || Object.keys(credentials).length === 0) {
+        throw new ToolError(
+          platform === "qq"
+            ? '参数缺失：传 appid 与 secret（QQ 凭据，q.qq.com → 开发设置获取），或传 credentials 键值对。'
+            : "参数缺失：传 credentials 键值对（字段定义见该平台连接器声明/WebUI 添加机器人表单）。",
+        );
+      }
       const name = optStr(args, "name");
       const authLevelRaw = optStr(args, "auth_level");
       let authLevel: AuthLevel | undefined;
@@ -337,10 +383,15 @@ export const TOOLS: ToolDef[] = [
         }
         authLevel = authLevelRaw;
       }
-      const registered = await ctx.bots.add({ appid, secret, name, authLevel });
-      ctx.supervisor?.addBot(registered.app);
+      const registered = await ctx.bots.add({
+        platform,
+        credentials,
+        name,
+        authLevel,
+      });
+      ctx.supervisor?.addBot(registered.bot);
       return {
-        bot: { appid: registered.app.appid, name: registered.app.name },
+        bot: { appid: registered.bot.botId, name: registered.bot.name },
         agent_token: registered.agentToken,
         note: "agent_token 仅本次返回：请立即保存。再次获取请在 WebUI 设置页重置。",
       };
@@ -350,7 +401,7 @@ export const TOOLS: ToolDef[] = [
     name: "list_all",
     description:
       "列出全部会话（群聊+私聊）：含未读数与最后消息时间，按最近消息倒序。" +
-      "人类视角：打开QQ看到的完整消息列表。",
+      "人类视角：打开机器人的完整消息列表。",
     inputSchema: {
       type: "object",
       properties: {
@@ -381,7 +432,7 @@ export const TOOLS: ToolDef[] = [
       type: "object",
       required: ["id"],
       properties: {
-        id: { type: "string", description: "群 id（即群 openid）" },
+        id: { type: "string", description: "群 id（list_all 返回的 type=group 条目）" },
         limit: {
           type: "number",
           description: "返回上限 1-500，默认 100（按活跃度排序）",
@@ -425,7 +476,7 @@ export const TOOLS: ToolDef[] = [
       properties: {
         id: {
           type: "string",
-          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+          description: "会话 id（list_all/list_new 返回的 conversations[].id；侧别自动探测）",
         },
         limit: { type: "number", description: "返回上限 1-500，默认 100" },
       },
@@ -467,7 +518,7 @@ export const TOOLS: ToolDef[] = [
       properties: {
         id: {
           type: "string",
-          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+          description: "会话 id（list_all/list_new 返回的 conversations[].id；侧别自动探测）",
         },
         msg_id: { type: "string", description: "锚点消息 id（可选）" },
         mode: {
@@ -541,7 +592,7 @@ export const TOOLS: ToolDef[] = [
       properties: {
         id: {
           type: "string",
-          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+          description: "会话 id（list_all/list_new 返回的 conversations[].id；侧别自动探测）",
         },
         query: { type: "string", description: "关键词（1-100 字符）" },
         limit: { type: "number", description: "返回上限 1-50，默认 30" },
@@ -572,7 +623,7 @@ export const TOOLS: ToolDef[] = [
       properties: {
         id: {
           type: "string",
-          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+          description: "会话 id（list_all/list_new 返回的 conversations[].id；侧别自动探测）",
         },
         msg_id: { type: "string", description: "锚点消息 id" },
         radius: { type: "number", description: "前后各取 1-50 条，默认 5" },
@@ -607,7 +658,7 @@ export const TOOLS: ToolDef[] = [
       properties: {
         id: {
           type: "string",
-          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+          description: "会话 id（list_all/list_new 返回的 conversations[].id；侧别自动探测）",
         },
         msg_id: { type: "string", description: "聊天记录消息 id" },
       },
@@ -670,7 +721,7 @@ export const TOOLS: ToolDef[] = [
       properties: {
         id: {
           type: "string",
-          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+          description: "会话 id（list_all/list_new 返回的 conversations[].id；侧别自动探测）",
         },
         msg_id: { type: "string", description: "消息 id" },
         n: {
@@ -742,33 +793,6 @@ export const TOOLS: ToolDef[] = [
       );
     },
   },
-  {
-    name: "quota",
-    description:
-      "主动消息额度水位（只读）：发送开关、认证等级、令牌桶余量、当日已发、官方限额常量。",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-    handler: (_args, ctx) => {
-      const botId = resolveBotId(ctx);
-      const date = new Date().toISOString().slice(0, 10);
-      return {
-        send_enabled: ctx.repo.getSendEnable(),
-        auth_level: ctx.bots?.authLevelOf(botId) ?? "uncertified",
-        proactive_sent_today: ctx.repo.proactiveSentToday(botId, date),
-        ...(ctx.sender !== undefined
-          ? { buckets: ctx.sender.snapshot(botId) }
-          : {}),
-        limits: {
-          per_group_daily: 1000,
-          qpm: "认证 bot 60 / 未认证 30（群聊主动消息）；单关系 20",
-          passive_note:
-            "被动回复不计额度：群 5 分钟内 5 次 / 单聊 60 分钟内 4 次",
-        },
-      };
-    },
-  },
   // —— M4 写工具（发送总开关 + 会话级条件双门禁，均 WebUI 设置页管理） ——
   {
     name: "send",
@@ -780,7 +804,7 @@ export const TOOLS: ToolDef[] = [
       properties: {
         id: {
           type: "string",
-          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+          description: "会话 id（list_all/list_new 返回的 conversations[].id；侧别自动探测）",
         },
         text: { type: "string", description: "消息文本（≤5000字符）" },
         quote_msg_id: {
@@ -812,7 +836,7 @@ export const TOOLS: ToolDef[] = [
       properties: {
         id: {
           type: "string",
-          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+          description: "会话 id（list_all/list_new 返回的 conversations[].id；侧别自动探测）",
         },
         media: {
           type: "string",
@@ -908,7 +932,7 @@ export const TOOLS: ToolDef[] = [
       properties: {
         id: {
           type: "string",
-          description: "会话 id：群聊=群 openid；私聊=对方 user_openid",
+          description: "会话 id（list_all/list_new 返回的 conversations[].id；侧别自动探测）",
         },
         msg_id: { type: "string", description: "要撤回的官方消息ID" },
       },

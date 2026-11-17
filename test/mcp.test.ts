@@ -9,9 +9,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ConnectorRegistry } from "@qsense/connector-sdk";
+import { createQqConnector } from "@qsense/connector-qq";
+import { createTelegramConnector } from "@qsense/connector-telegram";
 import { buildServer } from "../src/server/http";
-import { createLogger } from "../src/logger";
+import { createLogger } from "../src/utils/logger";
 import { Sender } from "../src/sender";
+import {
+  ConnectorRuntime,
+} from "../src/connectors/runtime";
+import { createBotHost, configSnapshotOf } from "../src/connectors/host";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { BotRegistry } from "../src/bots";
@@ -23,6 +30,8 @@ const GROUP = "GROUP_OPENID_G1";
 interface Fixture {
   baseUrl: string;
   agentToken: string;
+  /** telegramBot 模式下第二个 bot 的 agent_token（跨平台工具过滤用例） */
+  tgAgentToken: string | null;
   db: DB;
   /** hangSend 模式下解锁挂起的 sendRaw（幂等；其余模式为 no-op） */
   hang: { release: () => void };
@@ -36,6 +45,8 @@ interface SetupOpts {
   maxConcurrent?: number;
   /** 注入「挂起的发送器」：sendRaw 阻塞到 hang.release()，供并发闸测试占用并发槽 */
   hangSend?: boolean;
+  /** 额外注册 telegram 平台（插件 + bot）：跨平台工具过滤用例用 */
+  telegramBot?: boolean;
 }
 
 async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
@@ -115,14 +126,24 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
   if (opts.sendEnabled === true) repo.setSendEnable(true);
   const registry = new BotRegistry({ db });
   await registry.add({
-    appid: "10001",
-    secret: "s",
+    credentials: { appid: "10001", secret: "s" },
     name: "t",
     allowGroups: [GROUP],
   });
   const agentToken = registry.rotateToken("10001");
 
-  // 可选：挂起的发送器——sendRaw 阻塞到 release()，供 M6-14 并发闸测试占住并发槽
+  // 跨平台过滤用例：telegram bot 入表（verify 未注入=跳过官方校验，入参即落库）
+  let tgAgentToken: string | null = null;
+  if (opts.telegramBot === true) {
+    await registry.add({
+      platform: "telegram",
+      credentials: { id: "9167497677", token: "dummy-tg-token" },
+      name: "柔嘉",
+    });
+    tgAgentToken = registry.rotateToken("9167497677");
+  }
+
+  // 可选：挂起的发送器——net.reply 阻塞到 release()，供 M6-14 并发闸测试占住并发槽
   let releaseHang: () => void = () => {};
   let sender: Sender | undefined;
   if (opts.hangSend === true) {
@@ -131,20 +152,51 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
     });
     sender = new Sender({
       log: createLogger("error"),
-      db,
       repo,
-      tokenManager: {} as never,
       bots: registry,
-      apiFor: () =>
+      transportFor: () =>
         ({
-          async sendRaw() {
+          reply: async () => {
             await gate;
-            return { id: "PROVIDER_HUNG" };
+            return { providerMsgId: "PROVIDER_HUNG" };
           },
-          async recallMessage() {},
+          proactive: async () => {
+            await gate;
+            return { providerMsgId: "PROVIDER_HUNG" };
+          },
+          recall: async () => {
+            await gate;
+          },
+          uploadMedia: async () => {
+            await gate;
+            return { handle: "HANG" };
+          },
         }) as never,
     });
   }
+
+  // 平台扩展工具（quota）声明面：真 QQ 插件注册（M3-2 名单 15 锚点依赖）
+  const plugins = new ConnectorRegistry();
+  plugins.register(createQqConnector({ log: createLogger("error") }));
+  if (opts.telegramBot === true) {
+    plugins.register(createTelegramConnector({ log: createLogger("error") }));
+  }
+  const connectors = {
+    plugins,
+    addBot: () => undefined,
+    removeBot: () => undefined,
+    hostFor: (botId: string) =>
+      createBotHost({
+        log: createLogger("error"),
+        db,
+        platform: "qq",
+        botId,
+        ingest: () => undefined,
+        onStatus: () => undefined,
+      }),
+    configOf: (botId: string) => configSnapshotOf(repo, registry, botId),
+    statuses: () => [],
+  } as unknown as ConnectorRuntime;
 
   const app = buildServer({
     log: createLogger("debug"),
@@ -154,6 +206,7 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
     version: "0.1.0",
     sender,
     maxConcurrent: opts.maxConcurrent,
+    connectors,
   });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const addr = app.server.address();
@@ -162,6 +215,7 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     agentToken,
+    tgAgentToken,
     db,
     hang: { release: releaseHang },
     close: async () => {
@@ -273,6 +327,43 @@ test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", a
     );
   } finally {
     // 关闭顺序（踩坑#3）：断言失败也不能跳过 client.close，否则 app.close() 等 SSE 挂死
+    try {
+      await client?.close();
+    } catch {
+      /* 已关闭则忽略 */
+    }
+    await fx.close();
+  }
+});
+
+test("跨平台工具过滤（P5）：telegram bot 工具面无 quota，跨平台调用报归属", async () => {
+  const fx = await setupServer({ telegramBot: true });
+  let client: Client | null = null;
+  try {
+    client = await connectClient(fx.baseUrl, fx.tgAgentToken!);
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name).sort();
+    assert.equal(names.length, 14, "telegram bot 工具面 = 基座 14（无平台扩展）");
+    assert.ok(
+      !names.includes("quota"),
+      "quota 是 QQ 平台扩展工具，telegram bot 不可见",
+    );
+    // 跨平台调用 quota → 可操作报错（指出归属平台与本 bot 平台）
+    const denied = (await client.callTool({
+      name: "quota",
+      arguments: {},
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(denied.isError, true);
+    assert.match(denied.content[0]!.text, /平台 qq 的扩展工具/);
+    assert.match(denied.content[0]!.text, /telegram/);
+    // 未知工具仍报可用名单（本平台过滤后的）
+    const unknown = (await client.callTool({
+      name: "no_such_tool",
+      arguments: {},
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(unknown.isError, true);
+    assert.match(unknown.content[0]!.text, /未知工具/);
+  } finally {
     try {
       await client?.close();
     } catch {
