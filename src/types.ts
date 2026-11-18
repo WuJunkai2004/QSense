@@ -223,3 +223,30 @@ export interface SendResult {
   provider_msg_id?: string;
   detail?: string;
 }
+
+// —— P2 声明制（2026-11-15）：GET /ui/api/connectors 平台声明面 ——
+
+/** credentialSchema（JSON Schema 子集）：「添加机器人」表单按它渲染 */
+export interface ConnectorCredSchema {
+  type: string;
+  required?: string[];
+  properties?: Record<string, { type: string; description?: string }>;
+}
+
+export interface ConnectorDecl {
+  id: string;
+  title: string;
+  caps: {
+    scopes: string[];
+    media: Record<string, boolean>;
+    recall: boolean;
+    passiveWindow: boolean;
+    quota: boolean;
+  };
+  credential_schema: ConnectorCredSchema;
+  /** 密钥键：password 渲染（服务端日志/错误同步脱敏） */
+  credential_secrets: string[];
+  /** 登录流声明：qr-pair → create/poll 路径拼 /platforms/:id/* 调用 */
+  login: { kind: "secret" | "qr-pair"; create?: string; poll?: string };
+  webui: Array<{ method: string; path: string; summary: string }>;
+}
