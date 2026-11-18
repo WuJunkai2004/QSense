@@ -36,6 +36,8 @@ export interface TelegramInstanceDeps {
   host: HostApi;
   botId: string;
   api: TelegramApi;
+  /** 身份回传：轮询启动时 getMe 一次性获取（id+username），插件缓存供 atMe 判定 */
+  onIdentity?: (identity: { id: number; username?: string }) => void;
   /** 测试注入：轮询间隔/缩略图开关（缺省全走真实通道） */
   overrides?: {
     /** 覆写单条 update 的摄取前处理（缩略图富化）；缺省=真实 getFile+下载 */
@@ -300,6 +302,14 @@ export function createTelegramInstance(
       (await host.state.get<number>("poll:offset")) ?? 0;
     let backoffMs = 1000;
     let firstSuccess = false;
+    // 自身身份一次性获取（atMe 判定依据）：失败只降级 atMe 精度（wait 层从宽
+    // 兜底），不阻塞轮询主循环
+    try {
+      const me = await api.call<{ id: number; username?: string }>("getMe");
+      deps.onIdentity?.({ id: me.id, username: me.username });
+    } catch {
+      /* 身份未知 → atMe 省略；群 mention 过滤按未知从宽 */
+    }
     while (!signal.aborted) {
       try {
         const updates = await api.call<TelegramUpdate[]>(
