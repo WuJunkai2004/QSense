@@ -56,6 +56,10 @@ export function createTelegramConnector(
 ): ConnectorPlugin {
   void (opts.log ?? noopLog()); // 当前无插件级共享服务；占位对齐 connector-qq 形态
 
+  // 自身身份缓存（botId → getMe 产物）：实例启动时回传，normalize 据此精确判 atMe。
+  // 未知（未回传前）→ atMe 省略，wait 层 mention 过滤按未知从宽。
+  const identities = new Map<string, { id: number; username?: string }>();
+
   return {
     id: "telegram",
     sdkRange: "^2.0.0",
@@ -76,7 +80,11 @@ export function createTelegramConnector(
       ) {
         return null;
       }
-      return normalizeTelegramInbound(botId, payload as TelegramInboundPayload);
+      return normalizeTelegramInbound(
+        botId,
+        payload as TelegramInboundPayload,
+        identities.get(botId),
+      );
     },
     credentialSchema: {
       type: "object",
@@ -138,6 +146,7 @@ export function createTelegramConnector(
         host,
         botId: creds.botId,
         api,
+        onIdentity: (identity) => identities.set(creds.botId, identity),
       });
     },
   };

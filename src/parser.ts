@@ -58,6 +58,31 @@ function parseMentions(
   return out;
 }
 
+/** 自身身份（getMe；atMe 判定依据） */
+export interface TelegramSelf {
+  id: number;
+  username?: string;
+}
+
+/** 群消息是否 @ 本 bot：text_mention 比对数字 id；mention 实体比对 @username（大小写不敏感） */
+function mentionedSelf(msg: TelegramMessage, self: TelegramSelf): boolean {
+  const text = msg.text ?? "";
+  for (const e of msg.entities ?? []) {
+    const type = typeof e["type"] === "string" ? e["type"] : "";
+    if (type === "text_mention") {
+      const user = e["user"] as TelegramUser | undefined;
+      if (user !== undefined && user.id === self.id) return true;
+    } else if (type === "mention" && self.username !== undefined) {
+      const offset = typeof e["offset"] === "number" ? e["offset"] : -1;
+      const length = typeof e["length"] === "number" ? e["length"] : -1;
+      if (offset < 0 || length <= 0 || offset + length > text.length) continue;
+      const slice = text.slice(offset, offset + length);
+      if (slice.toLowerCase() === `@${self.username.toLowerCase()}`) return true;
+    }
+  }
+  return false;
+}
+
 /** 附件 → ![附件n] 约定（url=摄取期缩略图 data:URL；缺失时空串——get_media 给可操作错误） */
 function parseAttachments(
   msg: TelegramMessage,
@@ -158,6 +183,7 @@ function serviceTextOf(msg: TelegramMessage): string | null {
 export function normalizeTelegramUpdate(
   botId: string,
   payload: TelegramInboundPayload,
+  self?: TelegramSelf,
 ): NormalizedMessage | null {
   const msg = payload.update.message;
   if (msg === undefined) return null;
@@ -239,6 +265,10 @@ export function normalizeTelegramUpdate(
     records: [],
     mentions: parseMentions(msg),
     attachments,
+    // @本bot 精确判定（身份可得时）；未知（getMe 未回）省略 → wait 层从宽兜底
+    ...(scope === "group" && self !== undefined
+      ? { atMe: mentionedSelf(msg, self) }
+      : {}),
     raw: payload.update,
   };
 }
@@ -252,8 +282,9 @@ export function normalizeTelegramUpdate(
 export function normalizeTelegramInbound(
   botId: string,
   payload: TelegramInboundPayload,
+  self?: TelegramSelf,
 ): NormalizedInbound | null {
-  const m = normalizeTelegramUpdate(botId, payload);
+  const m = normalizeTelegramUpdate(botId, payload, self);
   if (m === null) return null;
   return {
     messages: [m],
