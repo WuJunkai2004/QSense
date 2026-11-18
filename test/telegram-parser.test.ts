@@ -255,3 +255,60 @@ test("ingest 管线（表驱动）：telegram / qq 信封各归各的插件 norm
     }
   }
 });
+
+test("TG-atMe：mention 实体比对 getMe 身份（精确 true/false；身份未知省略；私聊不标）", () => {
+  // @roujia_bot 命中自身 username → true
+  const m = normalizeTelegramUpdate("TG", payloadOf(GROUP_TEXT), {
+    id: 777,
+    username: "roujia_bot",
+  });
+  assert.equal(m?.atMe, true);
+  // 其他 username 被提到 → false（权威否定，wait 层严格排除）
+  const m2 = normalizeTelegramUpdate("TG", payloadOf(GROUP_TEXT), {
+    id: 777,
+    username: "other_bot",
+  });
+  assert.equal(m2?.atMe, false);
+  // 身份未知（getMe 未回）→ atMe 省略，wait 层从宽兜底
+  const m3 = normalizeTelegramUpdate("TG", payloadOf(GROUP_TEXT));
+  assert.equal(m3?.atMe, undefined);
+  // text_mention 数字 id 比对
+  const upd = {
+    update_id: 2,
+    message: {
+      ...GROUP_TEXT.message,
+      message_id: 43,
+      text: "abc",
+      entities: [
+        {
+          type: "text_mention",
+          offset: 1,
+          length: 1,
+          user: { id: 777, first_name: "柔嘉", is_bot: true },
+        },
+      ],
+    },
+  };
+  const m4 = normalizeTelegramUpdate("TG", payloadOf(upd), {
+    id: 777,
+    username: "roujia_bot",
+  });
+  assert.equal(m4?.atMe, true);
+  // 私聊恒不标 atMe（mention 过滤的私聊命中走 scope 语义）
+  const priv = {
+    update_id: 3,
+    message: {
+      message_id: 44,
+      from: { id: 888, first_name: "Venti" },
+      chat: { id: 888, type: "private", first_name: "Venti" },
+      date: 1700000000,
+      text: "@roujia_bot 你好",
+      entities: [{ type: "mention", offset: 0, length: 11 }],
+    },
+  };
+  const m5 = normalizeTelegramUpdate("TG", payloadOf(priv), {
+    id: 777,
+    username: "roujia_bot",
+  });
+  assert.equal(m5?.atMe, undefined);
+});
