@@ -205,6 +205,12 @@ export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
     attachments: collector.list,
     ark: extractArk(r),
     msgIdx: extMsgIdx,
+    // @本bot 权威判定：仅 AT 事件盖章（官方事件类型语义）；全量群消息
+    // （GROUP_MESSAGE_CREATE）官方不区分 @ 归属，省略=未知——wait 层 mention
+    // 过滤对未知+含@ 从宽兜底（不漏叫醒优先）。
+    ...(scope === "group" && event.type === "GROUP_AT_MESSAGE_CREATE"
+      ? { atMe: true }
+      : {}),
     raw: r,
   };
 }
