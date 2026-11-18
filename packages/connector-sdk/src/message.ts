@@ -96,6 +96,13 @@ export interface NormalizedMessage {
   ark?: unknown;
   /** 平台引用令牌（他人引用本消息时的锚；缺失时 undefined） */
   msgIdx?: string;
+  /**
+   * 群消息「@ 本 bot」权威判定（平台语义，插件权威）：true=确定是@本bot；
+   * false=确定不是；省略=平台无法权威判定（如 QQ 全量群消息 GROUP_MESSAGE_CREATE
+   * 不区分 @ 归属）。单聊消息恒省略。消费端（wait 层 mention 过滤）按
+   * 「true 或 未知且含任意 @」从宽兜底——不漏叫醒优先。
+   */
+  atMe?: boolean;
   /** 平台事件原始载荷（受 LOG_CONTENT 约束，仅入库不进日志） */
   raw: unknown;
   /** 本机外发标记：1=发送成功后本地补记（省略=网关接收） */
@@ -168,6 +175,12 @@ export function assertNormalizedMessage(m: unknown, label = "message"): void {
   }
   if (msg["quote"] !== null && msg["quote"] !== undefined) {
     assertPlainObject(msg["quote"], `${label}.quote`);
+  }
+  if (
+    msg["atMe"] !== undefined &&
+    typeof msg["atMe"] !== "boolean"
+  ) {
+    throw new Error(`${label}.atMe：省略或布尔（true/@本bot，false/确定不是）`);
   }
   assertPlainObject(msg["raw"], `${label}.raw（平台原始载荷）`);
 }

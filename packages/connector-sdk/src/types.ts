@@ -15,7 +15,7 @@
 import type { NormalizedInbound } from "./message";
 
 /** SDK 契约版本：宿主加载插件时用 satisfiesRange(SDK_VERSION, plugin.sdkRange) 校验 */
-export const SDK_VERSION = "2.0.0";
+export const SDK_VERSION = "2.1.0";
 
 // ---------------------------------------------------------------------------
 // 基座工具保留名（14）：插件工具不得与之重名（加载即硬失败）。quota 等平台
