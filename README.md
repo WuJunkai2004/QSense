@@ -74,6 +74,10 @@ config.toml 是服务配置的唯一权威（2026-11-17 起 env/`.env` 已退役
 
 工具面以"人类操作IM"为隐喻组织：list 系 = 打开消息列表，get_new/browse/search/context = 点开 会话翻记录，get_records = 展开聊天记录，reply/send = 说话。返回体为同构 JSON：会话条目 `{type, id, unread, last_msg_ts}`，消息条目 `{msg_id, ts, author, content, quote_msg?, records_count?, mentions?, attachments?, ark?}`（无任何会话回显；`content` 为 markdown，媒体以 `![附件n]` 占位符内联保序；引用以 `quote_msg` 结构化字段呈现——`{id: 被引作者, msg_id: 被引消息, content: 被引正文首行 ≤50 字符}`；聊天记录只留 `[聊天记录·N条]` 标记 + `records_count`，想看内容调 `get_records`——转发内容不与当前讨论混淆）；信封统一 `{messages, count, has_more}` / `{conversations, count}`，无管理面字段（全量开关/成员数只在 WebUI 可见）。
 
+## /wait 长轮询事件端点（宿主唤醒面）
+
+`POST /wait`（Bearer **agent_token**，与 /mcp 同一把）：长轮询「有事才醒」——新消息命中过滤器即返回 `{timeout:false, events, unread 快照}`，否则 hold 到点 `{timeout:true}`。**解耦红线：网关只吐事件+快照，绝不拉起智能体**——谁消费（curl 守护脚本 / 宿主内部后台命令接力）、何时唤醒，全是宿主侧的事；消费仍走 `get_new` 水位（at-most-once），与 10 分钟定时兜底天然共存。filter 四谓词：`scope` / `sessions`（会话 id）/ `authors`（作者 openid）/ `mention`（@本bot 或私聊；QQ 全量群 @ 归属官方不可判，从宽兜底）。**完整调用契约（curl 配方、真值表、宿主集成两模式）见 `GET /docs`（text/markdown，AI 可直接读取自举）**。非 MCP 工具，不计入工具面清单。设计详见 DESIGN.md §3.7。
+
 ## WebUI（/ui）
 
 QQ 桌面版风格、**智能体视角**的客户端：`http://<host>:<port>/ui`，粘贴 **admin token** 登录（仅管理端通 `/ui/api`；`/mcp` 只认各 bot 的 agent_token）。
