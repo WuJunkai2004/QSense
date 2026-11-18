@@ -15,6 +15,7 @@ import { t } from "./i18n";
 import { createLogger } from "./utils/logger";
 import { Sender } from "./sender";
 import { buildServer } from "./server/http";
+import { WaitHub } from "./server/wait";
 import { openDatabase, runMigrations } from "./store/db";
 import { migrations } from "./store/migrations";
 import { Repo } from "./store/repo";
@@ -105,7 +106,26 @@ async function main(): Promise<void> {
 
   // core ingest 管线（契约 v2 表驱动）：connector 上行信封 → payload.platform
   // 路由插件 normalize → 消息级去重 → 入库/效应落地（语义经插件解读，落地全在 core）
-  const ingest = createIngestPipeline({ repo, log, plugins });
+  // /wait 发布侧：去重后的入站消息逐条进事件中枢（本机外发补记 direction=1 不是事件）
+  const waitHub = new WaitHub({ repo, log });
+  const ingest = createIngestPipeline({
+    repo,
+    log,
+    plugins,
+    tap: ({ messages }) => {
+      for (const m of messages) {
+        if (m.direction === 1) continue;
+        waitHub.publish({
+          botId: m.botId,
+          scope: m.scope,
+          scopeId: m.scopeId,
+          atMe: m.atMe,
+          mentionCount: m.mentions.length,
+          authorOpenid: m.authorOpenid,
+        });
+      }
+    },
+  });
 
   // 连接器运行时：逐 bot 创建纯网络实例 + 状态聚合 + 插件上下面解析
   const statuses = new Map<string, GatewayStatus>();
@@ -150,6 +170,7 @@ async function main(): Promise<void> {
     botStatuses: () => [...statuses.values()],
     assets,
     uiDistDir: config.uiDistDir,
+    wait: waitHub,
   });
 
   const gatewayStart = connectors.start();

@@ -12,6 +12,13 @@ import type { DB } from "../store/db";
 import { Repo } from "../store/repo";
 import { createMcpHandler } from "../tools/mcp";
 import { registerUiRoutes } from "./ui";
+import { DOCS_MARKDOWN } from "./docs";
+import {
+  TIMEOUT_RESPONSE,
+  validateWaitBody,
+  type WaitHub,
+  type WaitResponse,
+} from "./wait";
 import type { TtsDeps } from "../tts";
 
 const ASSET_MAX_BYTES = 20 * 1024 * 1024;
@@ -36,6 +43,8 @@ export interface ServerDeps {
   ttsDeps?: TtsDeps;
   /** WebUI 静态产物目录（config.toml ui_dist_dir；缺省 ./ui/dist） */
   uiDistDir?: string;
+  /** /wait 长轮询事件中枢（宿主唤醒面；缺省=端点 501 不装配） */
+  wait?: WaitHub;
 }
 
 /** Authorization: Bearer <token> 提取；无效返回 null */
@@ -147,6 +156,77 @@ export function buildServer(deps: ServerDeps) {
     },
   });
 
+  // —— 文档面：AI 自举入口（调用契约全量在案，无密钥内容，不鉴权）——
+  app.get("/docs", async (_req, reply) => {
+    reply.type("text/markdown; charset=utf-8");
+    return DOCS_MARKDOWN;
+  });
+
+  // —— 宿主唤醒面：/wait 长轮询（Bearer agent_token，与 /mcp 同源同闸）——
+  // 解耦契约：网关只吐事件+快照，绝不拉起智能体；消费仍走 get_new 水位。
+  app.post("/wait", async (req, reply) => {
+    if (deps.wait === undefined || deps.registry === undefined) {
+      return reply.code(501).send({ error: "/wait 未装配。" });
+    }
+    const bearer = bearerOf(req.headers.authorization);
+    const botId =
+      bearer === null ? null : deps.registry.appIdByToken(bearer);
+    if (botId === null) {
+      return reply.code(401).send({
+        error:
+          "Unauthorized：token 无效或未绑定 bot。请用 register_bot 返回的 agent_token（与 /mcp 同一把）。",
+      });
+    }
+    if (!deps.registry.mcpEnabledOf(botId)) {
+      return reply.code(403).send({
+        error: `Forbidden：bot ${botId} 的 MCP 访问已在 WebUI 设置页禁用（同闸覆盖 /wait）。`,
+      });
+    }
+    let parsed;
+    try {
+      parsed = validateWaitBody(req.body);
+    } catch (e) {
+      return reply
+        .code(400)
+        .send({ error: e instanceof Error ? e.message : String(e) });
+    }
+    let handle;
+    try {
+      handle = deps.wait.wait(botId, parsed.filter, parsed.hold * 1000);
+    } catch (e) {
+      httpLog.warn("wait rejected", { botId, reason: String(e) });
+      return reply
+        .code(429)
+        .send({ error: e instanceof Error ? e.message : String(e) });
+    }
+    // 长轮询 hold：hijack 后手写原生 res（/mcp 同技巧）；每 15s 写一个换行字节——
+    // 保活 NAT/代理空闲计时器 + 把「静默断链」变成写时即时察觉；JSON 前导空白合法。
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.socket?.setNoDelay(true);
+    res.on("error", () => {}); // 断链写错误不进未捕获异常（close 钩子统一清理）
+    const heartbeat = setInterval(() => {
+      try {
+        res.write("\n");
+      } catch {
+        /* 断链写失败：close 钩子统一清理 */
+      }
+    }, 15_000);
+    let finished = false;
+    const finish = (payload: WaitResponse): void => {
+      if (finished) return;
+      finished = true;
+      clearInterval(heartbeat);
+      handle.cancel(); // 幂等结算（已结算为 noop），防 waiter 泄漏
+      if (!res.writableEnded) res.end(JSON.stringify(payload));
+    };
+    // 客户端主动断开（FIN/RST）或响应结束后连接关闭 → 即时清理（ServerResponse
+    // 'close'：响应完成或连接提前终止都会触发；finished 幂等挡住正常路径）
+    res.on("close", () => finish(TIMEOUT_RESPONSE));
+    handle.done.then(finish, () => finish(TIMEOUT_RESPONSE));
+  });
+
   // 数据平面：资产直传端点（票据自鉴权，不走 Bearer）。字节从执行环境流到此落盘，
   // 不经过 MCP 消息与模型上下文（控制平面/数据平面分离）。
   app.put("/assets/:botId/:assetId", async (req, reply) => {
@@ -222,6 +302,14 @@ export function buildServer(deps: ServerDeps) {
       sender: deps.sender,
       ttsDeps: deps.ttsDeps,
       uiDistDir: deps.uiDistDir,
+    });
+  }
+
+  // /wait 关停钩子：app.close() 前结算全部挂起 waiter（防测试/生产关停挂死连接）
+  if (deps.wait !== undefined) {
+    const hub = deps.wait;
+    app.addHook("onClose", async () => {
+      hub.abortAll();
     });
   }
 
