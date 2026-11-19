@@ -449,6 +449,8 @@ test("W-15 ingest tap 端到端：真 QQ 插件 normalize AT 事件 → hub 唤�
         }
       },
     });
+    // 真机形状（2026-11-19 实证）：官方 mentions[].is_you 是 @归属权威判定，
+    // AT 事件与全量事件一致——@本bot is_you=true；@他人（含别的bot）false。
     const atEvent = {
       platform: "qq",
       type: "GROUP_AT_MESSAGE_CREATE",
@@ -456,17 +458,62 @@ test("W-15 ingest tap 端到端：真 QQ 插件 normalize AT 事件 → hub 唤�
         id: "AT_MSG_1",
         group_openid: GROUP,
         member_openid: "U_AT",
-        content: "在吗",
+        content: "<@ME_OPENID> 在吗",
         timestamp: new Date().toISOString(),
+        mentions: [
+          {
+            bot: true,
+            id: "ME_OPENID",
+            is_you: true,
+            member_nickname: "雅南",
+            member_openid: "ME_OPENID",
+            member_role: "member",
+            scope: "single",
+            username: "雅南",
+          },
+        ],
       },
     };
     const pending = waitOf(fx, { filter: { scope: "group", mention: true }, hold: 5 });
     pipeline({ botId: APPID, payload: atEvent });
     const resp = await pending;
     const body = await responseJson(resp);
-    assert.equal(body["timeout"], false, "AT 事件应命中 mention 过滤");
+    assert.equal(body["timeout"], false, "AT 事件（is_you=true）应命中 mention 过滤");
     const events = body["events"] as Array<Record<string, unknown>>;
     assert.equal(events[0]!["id"], GROUP);
+
+    // 姊妹断言（2026-11-19 bug 回归）：全量群消息 @他人（is_you=false）不得唤醒
+    // mention 过滤——旧 parser 漏读 is_you 导致 atMe=undefined 而误触发从宽兜底。
+    const notMeEvent = {
+      platform: "qq",
+      type: "GROUP_MESSAGE_CREATE",
+      data: {
+        id: "AT_MSG_2",
+        group_openid: GROUP,
+        member_openid: "U_OTHER",
+        content: "<@FRIEND_OPENID> 在哪的",
+        timestamp: new Date().toISOString(),
+        mentions: [
+          {
+            bot: false,
+            id: "FRIEND_OPENID",
+            is_you: false,
+            member_nickname: "Venti",
+            member_openid: "FRIEND_OPENID",
+            member_role: "admin",
+            scope: "single",
+            username: "Venti",
+          },
+        ],
+      },
+    };
+    const notMe = waitOf(fx, { filter: { mention: true }, hold: 1 });
+    pipeline({ botId: APPID, payload: notMeEvent });
+    assert.equal(
+      (await responseJson(await notMe))["timeout"],
+      true,
+      "@他人（is_you=false）不应命中 mention 过滤",
+    );
   } finally {
     await fx.close();
   }
