@@ -93,7 +93,7 @@ export function buildReplyBody(wire: ReplyWire): Record<string, unknown> {
   return { msg_type: 0, content: wire.content, ...base };
 }
 
-/** 主动消息线格式（无 msg_id/msg_seq；msg_type 7/0；引用块照常受理） */
+/** 主动消息线格式（无 msg_id/msg_seq；msg_type 7/2/0；引用块照常受理） */
 export function buildProactiveBody(
   wire: ProactiveWire,
 ): Record<string, unknown> {
@@ -104,6 +104,14 @@ export function buildProactiveBody(
       msg_type: 7,
       media: { file_info: wire.media.handle },
       content: wire.content,
+    };
+  }
+  if (wire.markdown === true) {
+    // 出站 AT 标签（<qqbot-at-user 等，官方「文本交互」页）仅 markdown 消息渲染
+    return {
+      msg_type: 2,
+      markdown: { content: wire.content },
+      ...(ref !== undefined ? { message_reference: ref } : {}),
     };
   }
   return {

@@ -15,7 +15,7 @@
 import type { NormalizedInbound } from "./message";
 
 /** SDK 契约版本：宿主加载插件时用 satisfiesRange(SDK_VERSION, plugin.sdkRange) 校验 */
-export const SDK_VERSION = "2.2.0";
+export const SDK_VERSION = "2.2.1";
 
 // ---------------------------------------------------------------------------
 // 基座工具保留名（13）：插件工具不得与之重名（加载即硬失败）。quota 等平台
@@ -175,6 +175,8 @@ export interface ProactiveWire {
   target: string;
   scope: SessionScope;
   content: string;
+  /** markdown 语义（QQ: msg_type=2；不支持的平台忽略），与 ReplyWire.markdown 同义 */
+  markdown?: boolean;
   quoteMsgId?: string;
   media?: MediaWire;
 }

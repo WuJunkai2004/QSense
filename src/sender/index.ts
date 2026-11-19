@@ -421,13 +421,15 @@ export class Sender {
     media?: OutgoingMedia,
     /** 会话类型（缺省群聊）；私聊主动消息额外要求用户已同意（C2C_MSG_RECEIVE） */
     kind: "group" | "chat" = "group",
+    /** markdown 语义（QQ: msg_type=2；出站 AT 标签自动置位，见 sendAuto） */
+    markdown = false,
   ): Promise<SendResult> {
     this.gate(botId, kind, targetId, true);
     const content = text === undefined ? "" : this.checkContent(text);
     const payloadHash =
       media !== undefined
         ? sha256(`img\0${media.handle}\0${content}`)
-        : sha256(`text\0${content}`);
+        : sha256(`${markdown ? "md" : "text"}\0${content}`);
     const repo = this.deps.repo;
 
     // 额度门禁/记账：平台插件钩子（QQ=日额度+令牌桶，拒绝时 reason 面向 AI/用户可操作）；
@@ -456,6 +458,7 @@ export class Sender {
         target: targetId,
         scope: kind,
         content,
+        markdown: markdown || undefined,
         quoteMsgId,
         media: mediaWire,
       });
@@ -508,6 +511,40 @@ export class Sender {
   // 不应暴露给智能体。路由全部落在已真机验证的形态上：
   //   A. 被动 + 绑定（引用可有可无，引用目标=绑定目标）——WebUI quote=true 同款
   //   B. 主动 + 引用块（目标任意时效）——2026-10-26 真机验证受理
+
+  /** 官方出站 AT 新格式直写检测（文档「消息交互→文本交互」）：
+   * `<qqbot-at-user id="…"/>` / `<qqbot-at-everyone/>` 仅 markdown 消息渲染 */
+  static #OUTBOUND_AT_RE = /<qqbot-at-(?:user|everyone)\b/;
+
+  /** 入站旧格式 AT 表示候选（官方事件 content 的 `<@openid>` 形态，agent 照抄即自然意图）。
+   * everyone 不在翻译范围：新格式 @everyone 需管理员身份+每群每日 1 次，自动升级风险大。 */
+  static #LEGACY_AT_RE = /<@([A-Za-z0-9]+)>/g;
+
+  /**
+   * 出站 AT 翻译（群聊限定）：`<@openid>` → `<qqbot-at-user id="openid"/>`。
+   * 只有命中该群成员名册（members 关系事实，消息流自建）的 openid 才替换——
+   * 正文里的字面量或陌生 id 原样保留，宁可发纯文本也不误升级 markdown。
+   * 有替换（或显式直写新格式标签）才升级 markdown，纯文本通道 AT 不渲染。
+   */
+  #translateLegacyAt(botId: string, groupOpenid: string, text: string): string {
+    if (!text.includes("<@")) return text; // 快速预检：无候选零查询
+    const candidates = new Set(
+      [...text.matchAll(Sender.#LEGACY_AT_RE)]
+        .map((m) => m[1])
+        .filter((id): id is string => id !== undefined && id !== "everyone"),
+    );
+    if (candidates.size === 0) return text;
+    const members = this.deps.repo.groupMemberIds(botId, groupOpenid);
+    let out = text;
+    let hit = false;
+    for (const id of candidates) {
+      if (!members.has(id)) continue;
+      out = out.replaceAll(`<@${id}>`, `<qqbot-at-user id="${id}"/>`);
+      hit = true;
+    }
+    return hit ? out : text;
+  }
+
   async sendAuto(
     botId: string,
     targetId: string,
@@ -516,7 +553,15 @@ export class Sender {
     quoteMsgId?: string,
     /** 会话类型（缺省群聊） */
     kind: "group" | "chat" = "group",
+    /** markdown 语义；缺省按内容自动识别（含可渲染 AT → markdown） */
+    markdown = false,
   ): Promise<SendResult> {
+    const rendered =
+      kind === "group" ? this.#translateLegacyAt(botId, targetId, text) : text;
+    const asMarkdown =
+      markdown ||
+      rendered !== text ||
+      Sender.#OUTBOUND_AT_RE.test(rendered);
     const { bindMsgId, quote } = this.resolveChannel(
       botId,
       kind,
@@ -528,14 +573,22 @@ export class Sender {
         botId,
         targetId,
         bindMsgId,
-        text,
-        false,
+        rendered,
+        asMarkdown,
         quote,
         undefined,
         kind,
       );
     }
-    return this.proactive(botId, targetId, text, quoteMsgId, undefined, kind);
+    return this.proactive(
+      botId,
+      targetId,
+      rendered,
+      quoteMsgId,
+      undefined,
+      kind,
+      asMarkdown,
+    );
   }
 
   /** send_media 工具入口：富媒体（图片/语音），通道自动路由（与 sendAuto 同款被动优先）。

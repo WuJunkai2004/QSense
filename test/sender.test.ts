@@ -788,6 +788,67 @@ test("M4-14 sendAuto 路由：quote 窗内 → 被动绑=引；quote 超窗 → 
   }
 });
 
+test("M4-14b sendAuto AT 翻译：<@openid> 命中成员名册 → 翻译 qqbot-at-user 且升级 markdown；陌生 id 字面保留纯文本；直写新格式标签同样升级", async () => {
+  const fx = setupDb();
+  try {
+    // seedInbound 的作者 U1 经 saveMessage 自动进 members 名册（群聊关系事实）
+    seedInbound(fx.repo, "M_AT", 30_000);
+
+    // 场景1：<@U1> 是群成员 → 翻译成出站新格式 + markdown 语义（msg_type=2 由线格式层映射）
+    const m1 = makeNetMock();
+    const r1 = await makeSender(fx, m1).sendAuto(BOT, GROUP, "叫一下 <@U1> 来看");
+    assert.equal(r1.channel, "passive");
+    assert.equal(m1.replies[0]!.markdown, true);
+    assert.equal(m1.replies[0]!.content, "叫一下 <qqbot-at-user id=\"U1\"/> 来看");
+
+    // 场景2：陌生 id / 字面量不替换，也不升级 markdown（宁可纯文本不误渲染）
+    const m2 = makeNetMock();
+    const r2 = await makeSender(fx, m2).sendAuto(BOT, GROUP, "这人 <@NOPE> 不在群里");
+    assert.equal(r2.channel, "passive");
+    assert.equal(m2.replies[0]!.markdown, undefined);
+    assert.equal(m2.replies[0]!.content, "这人 <@NOPE> 不在群里");
+
+    // 场景3：<@everyone> 不自动翻译（新格式 @everyone 需管理员+每日 1 次，自动升级风险大）
+    const m3 = makeNetMock();
+    await makeSender(fx, m3).sendAuto(BOT, GROUP, "<@everyone> 集合");
+    assert.equal(m3.replies[0]!.markdown, undefined);
+    assert.equal(m3.replies[0]!.content, "<@everyone> 集合");
+
+    // 场景4：agent 直写出站新格式标签 → 直接升级 markdown，内容原样
+    const m4 = makeNetMock();
+    await makeSender(fx, m4).sendAuto(
+      BOT,
+      GROUP,
+      "<qqbot-at-user id=\"U1\"/> 直写新格式",
+    );
+    assert.equal(m4.replies[0]!.markdown, true);
+    assert.equal(m4.replies[0]!.content, "<qqbot-at-user id=\"U1\"/> 直写新格式");
+
+    // 场景5：主动通道同样翻译+升级（全新 fixture，唯一窗内消息 M_ATW 被 5 次回复耗尽，
+    // latestBindable 无可绑 → 第六次走主动兜底）
+    const fx5 = setupDb();
+    try {
+      seedInbound(fx5.repo, "M_ATW", 30_000);
+      const m5 = makeNetMock();
+      const sender5 = makeSender(fx5, m5);
+      for (let i = 0; i < 5; i++) {
+        await sender5.reply(BOT, GROUP, "M_ATW", `第${i}次`);
+      }
+      const r5 = await sender5.sendAuto(BOT, GROUP, "主动 <@U1> 兜底");
+      assert.equal(r5.channel, "proactive");
+      assert.equal(m5.proactives[0]!.markdown, true);
+      assert.equal(
+        m5.proactives[0]!.content,
+        "主动 <qqbot-at-user id=\"U1\"/> 兜底",
+      );
+    } finally {
+      fx5.close();
+    }
+  } finally {
+    fx.close();
+  }
+});
+
 test("M4-15 sendAuto：quote 不在缓存 → 报错不发送；被动次数用尽 → 主动兜底", async () => {
   const fx = setupDb();
   try {

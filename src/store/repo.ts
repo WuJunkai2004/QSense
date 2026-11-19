@@ -678,6 +678,16 @@ export class Repo {
       .all(botId, groupOpenid, limit) as Array<Record<string, unknown>>;
   }
 
+  /** 群成员 openid 集合（出站 AT 翻译的成员校验源；members 关系事实，消息流自建） */
+  groupMemberIds(botId: string, groupOpenid: string): Set<string> {
+    const rows = this.db
+      .prepare(
+        "SELECT member_openid FROM members WHERE bot_id = ? AND group_openid = ?",
+      )
+      .all(botId, groupOpenid) as Array<{ member_openid: string }>;
+    return new Set(rows.map((r) => r.member_openid));
+  }
+
   // —— 会话列表（agent 视角，群/私聊统一） ——
 
   /**

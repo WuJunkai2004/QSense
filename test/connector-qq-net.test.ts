@@ -124,6 +124,30 @@ test("proactiveBody：主动消息无 msg_id/msg_seq；文本/媒体/引用块�
     content: "x",
     message_reference: { message_id: "M_OLD", ignore_get_message_error: true },
   });
+
+  // markdown 形态（出站 AT 标签仅 markdown 渲染；2026-11-19 官方「文本交互」页）
+  const md = buildProactiveBody({
+    botId: "1",
+    target: "G1",
+    scope: "group",
+    content: "<qqbot-at-user id=\"U1\"/> 早",
+    markdown: true,
+  });
+  assert.deepEqual(md, { msg_type: 2, markdown: { content: "<qqbot-at-user id=\"U1\"/> 早" } });
+
+  const mdQuoted = buildProactiveBody({
+    botId: "1",
+    target: "G1",
+    scope: "group",
+    content: "<qqbot-at-user id=\"U1\"/> 早",
+    markdown: true,
+    quoteMsgId: "M_OLD",
+  });
+  assert.deepEqual(mdQuoted, {
+    msg_type: 2,
+    markdown: { content: "<qqbot-at-user id=\"U1\"/> 早" },
+    message_reference: { message_id: "M_OLD", ignore_get_message_error: true },
+  });
 });
 
 test("scopeToApi：core 会话形态标签 → 官方 API scope（chat→c2c，group→group）", () => {
