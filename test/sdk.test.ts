@@ -278,11 +278,11 @@ describe("sdk/router", () => {
     assert.equal(router.resolve("nope"), null);
   });
 
-  it("names() = 基座 14 + 插件扩展，排序", () => {
+  it("names() = 基座 13 + 插件扩展，排序", () => {
     const router = new ToolRouter(BASE_TOOL_NAMES);
     router.registerPlugin(makePlugin());
     const names = router.names();
-    assert.equal(names.length, 15);
+    assert.equal(names.length, 14);
     assert.ok(names.includes("quota"));
     assert.deepEqual(names, [...names].sort());
   });

@@ -291,7 +291,7 @@ test("M3-1 未带 token / 错 token → 401", async () => {
   }
 });
 
-test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", async () => {
+test("M3-2 listTools = 基座 13 + quota；未开启发送时写工具硬拒绝", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
@@ -309,7 +309,6 @@ test("M3-2 listTools 含 14 个工具；未开启发送时写工具硬拒绝", a
       "list_new",
       "quota",
       "recall",
-      "register_bot",
       "request_upload",
       "search",
       "send",
@@ -343,7 +342,7 @@ test("跨平台工具过滤（P5）：telegram bot 工具面无 quota，跨平�
     client = await connectClient(fx.baseUrl, fx.tgAgentToken!);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    assert.equal(names.length, 14, "telegram bot 工具面 = 基座 14（无平台扩展）");
+    assert.equal(names.length, 13, "telegram bot 工具面 = 基座 13（无平台扩展）");
     assert.ok(
       !names.includes("quota"),
       "quota 是 QQ 平台扩展工具，telegram bot 不可见",

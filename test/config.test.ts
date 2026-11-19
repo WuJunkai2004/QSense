@@ -1,7 +1,7 @@
 // 配置校验验收（2026-11-17 env 退役）：config.toml 是服务配置唯一权威——
 // 服务参数 + 日志 + 连接器声明都从这里来；服务不读任何环境变量。
 // bot 注册（appid/secret）、admin token、发送开关、白名单仍以 SQLite 为权威
-//（WebUI / register_bot 管理），配置文件里根本没有这些键的容身之处。
+//（WebUI / POST /register 管理），配置文件里根本没有这些键的容身之处。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

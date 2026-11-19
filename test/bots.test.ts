@@ -1,6 +1,7 @@
 // M8/M9 验收（注册表）：bots 表唯一存储、agent_token 生命周期（生成/轮换/反查）、
 // 每 bot 白名单、每 bot 认证等级（M9 落库）、注册制（M9 起无任何 env/kv 播种——
-// bot 只能经 add/WebUI 注册进表），register_bot 工具面与 token 绑定 bot 强校验。
+// bot 只能经 add/注册端点进表）与 token 绑定 bot 强校验。注册入口的 HTTP 面验收
+// （POST /register）在 register.test.ts。
 // P3 多平台中立化（2026-11-16）：platform 列 + 凭据 JSON 化（凭据形状由连接器声明权威）。
 // 注：token 轮换已收归 WebUI（2026-10-27 工具面缩窄），域层 rotateToken 保留、本文件直测。
 
@@ -248,84 +249,6 @@ test("M8-B5 白名单：setAllowGroups 即时生效，remove 后反查全空", a
     assert.equal(reg.appIdByToken(added.agentToken), null); // 移除连带 token 失效
     assert.deepEqual(reg.allowGroupsOf("20002"), []);
     assert.throws(() => reg.remove("20002"), /不在注册表中/);
-  } finally {
-    fx.close();
-  }
-});
-
-test("M8-B7 register_bot：返回一次 token + 表内可反查；重复注册拒绝", async () => {
-  const fx = setupDb();
-  try {
-    const reg = newRegistry(fx.db);
-    const ctx = await ctxOf(fx.db, reg);
-    const raw = await runTool(
-      "register_bot",
-      { appid: "40004", secret: "s4", name: "四号" },
-      ctx,
-    );
-    assert.equal(raw.isError, undefined);
-    const out = JSON.parse(raw.text) as Record<string, unknown>;
-    assert.match(String(out.agent_token), /^[0-9a-f]{48}$/);
-    assert.equal(reg.appIdByToken(String(out.agent_token)), "40004");
-    const dup = await runTool(
-      "register_bot",
-      { appid: "40004", secret: "s4" },
-      ctx,
-    );
-    assert.equal(dup.isError, true);
-  } finally {
-    fx.close();
-  }
-});
-
-test("P3 register_bot：platform+credentials 路径（QQ 兼容形参等价）", async () => {
-  const fx = setupDb();
-  try {
-    const reg = newRegistry(fx.db);
-    const ctx = await ctxOf(fx.db, reg);
-    const raw = await runTool(
-      "register_bot",
-      {
-        platform: "qq",
-        credentials: { appid: "60006", secret: "s6" },
-      },
-      ctx,
-    );
-    assert.equal(raw.isError, undefined);
-    assert.equal(reg.get("60006")?.platform, "qq");
-    assert.deepEqual(reg.get("60006")?.credentials, {
-      appid: "60006",
-      secret: "s6",
-    });
-    // 缺凭据 → 可操作错误，不入库
-    const missing = await runTool("register_bot", { name: "空" }, ctx);
-    assert.equal(missing.isError, true);
-    assert.match(missing.text, /参数缺失/);
-    assert.equal(reg.get("99999"), undefined);
-  } finally {
-    fx.close();
-  }
-});
-
-test("M9-B7b register_bot：auth_level 参数落库（certified 生效）", async () => {
-  const fx = setupDb();
-  try {
-    const reg = newRegistry(fx.db);
-    const ctx = await ctxOf(fx.db, reg);
-    const raw = await runTool(
-      "register_bot",
-      { appid: "40004", secret: "s4", auth_level: "certified" },
-      ctx,
-    );
-    assert.equal(raw.isError, undefined);
-    assert.equal(reg.authLevelOf("40004"), "certified");
-    const bad = await runTool(
-      "register_bot",
-      { appid: "50005", secret: "s5", auth_level: "gold" },
-      ctx,
-    );
-    assert.equal(bad.isError, true); // runTool 将校验错误转 isError
-    assert.equal(reg.get("50005"), undefined);
   } finally {
     fx.close();
   }
