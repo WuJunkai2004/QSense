@@ -2,17 +2,19 @@
 //   列表层 list_all/list_new（消息列表视角；list_all 的 type 参数作结果过滤）→
 //   读取层 get_new/browse/search/context（会话侧别由 id 自动探测，repo.detectSessionKind）→
 //   名册 list_members →
-//   写工具 send/send_media/request_upload/recall（双重门禁）→ 管理 register_bot。
+//   写工具 send/send_media/request_upload/recall（双重门禁）。
 // P1 收口（2026-11-15）：基座恒定 14 工具；quota 等平台扩展工具由连接器插件声明
 // （QQ=connector-qq 的 quota 工具），经 ToolRouter 在 MCP 层聚合，名单不变（14+1=15）。
+// 基座 13（2026-11-19）：register_bot 退出 MCP 工具面——注册是管理面操作（返回
+// 一次性 agent_token），不该暴露给 agent；无 UI 场景改走 HTTP POST /register
+// （admin 鉴权，与 /ui/api 同源），/docs 有完整调用契约。
 // 已读水位（拉取即已读）与整群删除（原 forget，迁 WebUI）为服务端内部状态/管理操作，不在 agent 工具面。
 // token 轮换收归 WebUI（2026-10-27 工具面缩窄）：调用即自毁凭证且新值落进对话上下文，属人的运维决策。
 // 写工具经 Sender（真实官方API）：发送总开关（SQLite）开启且群在该 bot allow_groups 内才生效，否则硬拒绝。
 // 多机器人：token 绑定制，一个 agent_token 只属于一个 bot；
 // `bot` 参数已全工具面退役（绑定关系在 HTTP 层 Bearer→bot 完成，agent 无需感知 bot 维度）。
 
-import type { AuthLevel } from "../utils/config";
-import type { BotRecord, BotRegistry } from "../bots";
+import type { BotRegistry } from "../bots";
 import type { Sender } from "../sender";
 import { synthesizeSpeech } from "../tts";
 import type { MsgRow, Repo } from "../store/repo";
@@ -59,8 +61,6 @@ export interface ToolContext {
   bots?: BotRegistry;
   /** M8：本请求 Bearer token 绑定的 bot（一个 token 只属一个 bot）；缺省=未认证 */
   botId?: string;
-  /** 连接器运行时：register_bot 注册成功后立即拉起连接；缺省=测试环境不接 */
-  supervisor?: { addBot: (bot: BotRecord) => void };
   /** 资产存储（request_upload 票据签发 / send_media asset: 引用）；缺省=未装配 */
   assets?: import("../assets").AssetStore;
   /** TTS 合成依赖（fetch 注入，测试用）；缺省=直连 OpenAI 兼容服务 */
@@ -297,106 +297,6 @@ function conversationsOut(
 // —— 工具集 ——
 
 export const TOOLS: ToolDef[] = [
-  {
-    name: "register_bot",
-    description:
-      "【管理操作】注册新机器人：传 platform 与 credentials（平台凭据键值对，形状由该平台连接器声明定义；" +
-      "缺省 platform=qq，此时也可直接传兼容形参 appid+secret）。" +
-      "服务端经该平台连接器校验凭据（未过官方校验绝不入库）后落库，并生成随机 agent_token——" +
-      "它只在本次返回中出现一次，必须立即保存。" +
-      "此后本服务所有工具连接时都应使用该 token（一个 token 只绑定这一个 bot）。" +
-      "token 丢失时在 WebUI 设置页重置。",
-    inputSchema: {
-      type: "object",
-      properties: {
-        platform: {
-          type: "string",
-          description:
-            "平台 id（缺省 qq；可用平台见 WebUI 添加机器人面板的平台声明）",
-        },
-        credentials: {
-          type: "object",
-          description:
-            "平台凭据键值对（字段由平台连接器声明；QQ={appid, secret}。传了 credentials 时 appid/secret 形参忽略）",
-        },
-        appid: {
-          type: "string",
-          description: "QQ 平台凭据（兼容形参）：开放平台 AppID（q.qq.com → 开发设置）",
-        },
-        secret: {
-          type: "string",
-          description: "QQ 平台凭据（兼容形参）：对应的 AppSecret",
-        },
-        name: { type: "string", description: "备注名（缺省用账号 id）" },
-        auth_level: {
-          type: "string",
-          enum: ["certified", "uncertified"],
-          description:
-            "认证等级（QQ 平台语义）：主动消息频控预算 certified=60条/分、uncertified=30条/分（缺省未认证）",
-        },
-      },
-    },
-    handler: async (args, ctx) => {
-      if (ctx.bots === undefined) {
-        throw new ToolError("机器人注册表未装配（服务端配置缺失）。");
-      }
-      const platform = optStr(args, "platform") ?? "qq";
-      // 凭据解析：credentials 键值对优先；否则回落 QQ 兼容形参 appid+secret（存量调用模式自愈）
-      let credentials: Record<string, string> | undefined;
-      const credRaw = args["credentials"];
-      if (credRaw !== undefined && credRaw !== null) {
-        if (
-          typeof credRaw !== "object" ||
-          Array.isArray(credRaw as unknown)
-        ) {
-          throw new ToolError(
-            "参数 credentials 必须是键值对对象（如 {\"appid\":\"…\",\"secret\":\"…\"}）。",
-          );
-        }
-        credentials = {};
-        for (const [k, v] of Object.entries(credRaw as Record<string, unknown>)) {
-          if (typeof v === "string" && v !== "") credentials[k] = v;
-        }
-      }
-      if (credentials === undefined) {
-        const appid = optStr(args, "appid");
-        const secret = optStr(args, "secret");
-        if (appid !== undefined && secret !== undefined) {
-          credentials = { appid, secret };
-        }
-      }
-      if (credentials === undefined || Object.keys(credentials).length === 0) {
-        throw new ToolError(
-          platform === "qq"
-            ? '参数缺失：传 appid 与 secret（QQ 凭据，q.qq.com → 开发设置获取），或传 credentials 键值对。'
-            : "参数缺失：传 credentials 键值对（字段定义见该平台连接器声明/WebUI 添加机器人表单）。",
-        );
-      }
-      const name = optStr(args, "name");
-      const authLevelRaw = optStr(args, "auth_level");
-      let authLevel: AuthLevel | undefined;
-      if (authLevelRaw !== undefined) {
-        if (authLevelRaw !== "certified" && authLevelRaw !== "uncertified") {
-          throw new ToolError(
-            "auth_level 无效：只接受 certified（60条/分）或 uncertified（30条/分）。",
-          );
-        }
-        authLevel = authLevelRaw;
-      }
-      const registered = await ctx.bots.add({
-        platform,
-        credentials,
-        name,
-        authLevel,
-      });
-      ctx.supervisor?.addBot(registered.bot);
-      return {
-        bot: { appid: registered.bot.botId, name: registered.bot.name },
-        agent_token: registered.agentToken,
-        note: "agent_token 仅本次返回：请立即保存。再次获取请在 WebUI 设置页重置。",
-      };
-    },
-  },
   {
     name: "list_all",
     description:

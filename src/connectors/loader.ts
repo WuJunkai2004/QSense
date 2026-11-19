@@ -3,7 +3,7 @@
 // 原 connectors 表（v11）随迁移 v13 退役——部署拓扑归配置文件，SQLite 只留业务。
 //
 // 失败语义：单个平台装载失败不炸启动——记可操作错误 + failed 清单后继续起服务；
-// 后果由两道显态闸门兜底：bot 接入时 runtime 报「平台未注册」，register_bot /
+// 后果由两道显态闸门兜底：bot 接入时 runtime 报「平台未注册」，注册入口（POST /register /
 // WebUI 添加机器人时 verify 硬拒绝（绝不静默跳过凭据校验入库）；已注册 bot 的
 // 平台缺失则由启动期 fail-fast（missingPlatformBots）拒启。
 

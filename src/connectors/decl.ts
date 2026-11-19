@@ -8,7 +8,7 @@
 //
 // 三条红线（决策 #9）：
 // - 凭据不进 toml（credentials_json 在 bots 表的唯一权威不动）
-// - platform 不在声明 → 插件不装载 → register_bot/WebUI verify 硬拒绝
+// - platform 不在声明 → 插件不装载 → 注册入口（POST /register/WebUI）verify 硬拒绝
 // - 供应链信任边界：npmjs/github 来源须显式安装 + lockfile 钉版 + 首次人工确认；
 //   本加载器启动零隐式网络拉取（只 import 已安装的包说明符）
 //

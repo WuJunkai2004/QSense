@@ -5,8 +5,8 @@
 #   - 连接器声明：[connectors.<platform>] 存在即启用，整节删除/注释 = 平台下线
 #
 # 不需要填任何 bot 或凭据（凭据红线：绝不进 toml）——
-#   - bot：经 WebUI「添加机器人」或 MCP 工具 register_bot 注册（过平台官方校验），
-#     凭据唯一权威在 SQLite（data_dir 下）bots.credentials_json
+#   - bot：经 WebUI「添加机器人」或 HTTP POST /register（admin token）注册
+#     （过平台官方校验），凭据唯一权威在 SQLite（data_dir 下）bots.credentials_json
 #   - admin token：首次启动自动生成并打印一次（登录 WebUI 用）
 #   - 发送开关 / 白名单 / 认证等级：WebUI 设置页管理，即时落库生效
 #   - agent_token（OpenCode 连 /mcp 用）：注册 bot 时返回一次，配进 opencode.jsonc

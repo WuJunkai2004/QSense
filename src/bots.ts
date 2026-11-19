@@ -1,7 +1,8 @@
 // 机器人注册表：SQLite bots 表是唯一权威存储（2026-10-25 用户定案）。
 //
 // 演进：M7 = QQ_APPS env 基座 + kv 动态列表；M8 = env/旧 kv 降级为「首次播种源」；
-// M9 起（用户定案）播种彻底退役——bot 只能经 register_bot（MCP）或 WebUI 添加/移除，
+// M9 起（用户定案）播种彻底退役——bot 只能经注册入口（WebUI 添加 / HTTP POST /register，
+// 2026-11-19 起 register_bot 已退出 MCP 工具面）或 WebUI 添加/移除，
 // 重启后以 bots 表为准连接全部 bot，env 里不再有任何 bot 相关字段。
 // P3 多平台中立化（2026-11-16，迁移 v12）：bots 表加 platform 列 + 凭据 JSON 化——
 // 凭据形状由各连接器 credentialSchema 权威（QQ={appid,secret}），宿主不感知具体键；
@@ -396,7 +397,7 @@ export class BotRegistry {
   rotateToken(appid: string): string {
     if (this.get(appid) === undefined) {
       throw new BotRegistryError(
-        `轮换失败：bot ${appid} 不在注册表中。可用 register_bot 注册新 bot。`,
+        `轮换失败：bot ${appid} 不在注册表中。可经 WebUI「添加机器人」或 HTTP POST /register（admin token）注册新 bot。`,
       );
     }
     const token = newAgentToken();

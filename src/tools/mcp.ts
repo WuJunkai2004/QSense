@@ -21,7 +21,7 @@ import {
   type HostApi,
   type BotConfigSnapshot,
 } from "@qsense/connector-sdk";
-import type { BotRecord, BotRegistry } from "../bots";
+import type { BotRegistry } from "../bots";
 import type { Logger } from "../utils/logger";
 import type { Sender } from "../sender";
 import type { Repo } from "../store/repo";
@@ -34,8 +34,6 @@ export interface McpDeps {
   sender?: Sender;
   /** 机器人注册表（bots 表域层）：注册/轮换/白名单解析 */
   bots?: BotRegistry;
-  /** 连接器运行时：register_bot 后立即接入新 bot；缺省=测试环境不接入 */
-  supervisor?: { addBot: (bot: BotRecord) => void };
   /** 资产存储（request_upload / send_media asset: 引用）；缺省=资产功能未装配 */
   assets?: import("../assets").AssetStore;
   /** agent_token 反查（request_upload 票据密钥取自绑定 bot 的 agent_token）；缺省=票据不可签发 */
@@ -43,7 +41,7 @@ export interface McpDeps {
   /** MCP 工具执行全局并发上限（M6 限流）：SQLite 同步查询毫秒级、写工具 API 调用秒级，8 足够且防打爆 */
   maxConcurrent?: number;
   version: string;
-  /** 平台插件声明面注册表（P1 收口）：扩展工具经 ToolRouter 聚合；缺省=仅基座 14 */
+  /** 平台插件声明面注册表（P1 收口）：扩展工具经 ToolRouter 聚合；缺省=仅基座 13 */
   plugins?: ConnectorRegistry;
   /** 插件工具上下面解析（host+config 按 bot）；缺省=插件工具不可用 */
   pluginContext?: (
@@ -103,7 +101,7 @@ export function createMcpHandler(
   }
   const sessions = new Map<string, Session>();
 
-  // 工具路由（P1 收口 → P5 跨平台过滤，2026-11-17）：基座 14（保留名）+ 该 bot
+  // 工具路由（P1 收口 → P5 跨平台过滤，2026-11-17）：基座 13（保留名）+ 该 bot
   // 平台的插件声明扩展。同一服务多平台 bot 并存时，每个 bot 的工具面只含本平台
   // 扩展工具（Telegram bot 看不到 QQ 的 quota——平台语义隔离是工具面结构性的，
   // 不靠调用时报错兜底）。bot 的 platform 不可变（bots 表），会话期内路由表稳定。
@@ -122,7 +120,6 @@ export function createMcpHandler(
     repo,
     sender: deps.sender,
     bots: deps.bots,
-    supervisor: deps.supervisor,
     assets: deps.assets,
     baseUrl: session.baseUrl,
     agentToken: deps.agentTokenOf?.(session.botId) ?? undefined,

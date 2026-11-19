@@ -4,13 +4,14 @@
 
 import Fastify from "fastify";
 import type { AssetStore } from "../assets";
-import type { BotRegistry } from "../bots";
+import { BotRegistryError, parseAuthLevel, type BotRegistry } from "../bots";
+import type { AuthLevel } from "../utils/config";
 import type { ConnectorRuntime, GatewayStatus } from "../connectors/runtime";
 import type { Logger } from "../utils/logger";
 import type { Sender } from "../sender";
 import type { DB } from "../store/db";
 import { Repo } from "../store/repo";
-import { createMcpHandler } from "../tools/mcp";
+import { bearerOk, createMcpHandler } from "../tools/mcp";
 import { registerUiRoutes } from "./ui";
 import { DOCS_MARKDOWN } from "./docs";
 import {
@@ -96,7 +97,6 @@ export function buildServer(deps: ServerDeps) {
     repo,
     sender: deps.sender,
     bots: deps.registry,
-    supervisor: deps.connectors,
     assets: deps.assets,
     agentTokenOf:
       deps.assets !== undefined && deps.registry !== undefined
@@ -128,7 +128,7 @@ export function buildServer(deps: ServerDeps) {
           error: {
             code: -32001,
             message:
-              "Unauthorized：token 无效或未绑定 bot。请用 register_bot 返回的 agent_token，或在 WebUI 设置页重新生成。",
+              "Unauthorized：token 无效或未绑定 bot。请用注册（POST /register 或 WebUI 添加机器人）返回的 agent_token，或在 WebUI 设置页重新生成。",
           },
           id: null,
         });
@@ -162,6 +162,108 @@ export function buildServer(deps: ServerDeps) {
     return DOCS_MARKDOWN;
   });
 
+  // —— 管理面：POST /register（Bearer admin token，与 /ui/api 同源同闸）——
+  // 注册是管理操作（返回一次性 agent_token），2026-11-19 起退出 MCP 工具面；
+  // 无 UI 场景（宿主自举/脚本化部署）经本端点明确注册。与 WebUI「添加机器人」
+  // 同一条 registry.add 管线：官方凭据校验（连接器 verifyCredential，P5 平台
+  // 声明闸门同源——平台未在 config.toml 声明即硬拒）→ 落库 → 拉起网关。
+  // 旧 MCP 工具的 appid/secret 兼容形参不随迁：HTTP 契约只收 credentials 键值对。
+  app.post("/register", async (req, reply) => {
+    if (deps.registry === undefined || deps.connectors === undefined) {
+      return reply.code(501).send({ error: "注册功能未装配。" });
+    }
+    const admin = deps.repo.getAdminToken();
+    if (admin === null || !bearerOk(req.headers.authorization, admin)) {
+      return reply.code(401).send({
+        error:
+          "Unauthorized：/register 用 admin token（与 /ui/api 同一把），不是 agent_token——新 bot 注册前还没有 agent_token。admin token 首次启动打印在服务日志（仅一次）。",
+      });
+    }
+    const body: unknown = req.body;
+    if (
+      body === null ||
+      body === undefined ||
+      typeof body !== "object" ||
+      Buffer.isBuffer(body)
+    ) {
+      return reply.code(400).send({
+        error: "请求体必须是 JSON 对象（Content-Type: application/json）。",
+      });
+    }
+    const args = body as Record<string, unknown>;
+    const platform =
+      typeof args.platform === "string" && args.platform.trim() !== ""
+        ? args.platform.trim()
+        : "qq";
+    const credRaw = args.credentials;
+    let credentials: Record<string, string> = {};
+    if (credRaw !== undefined && credRaw !== null) {
+      if (typeof credRaw !== "object" || Array.isArray(credRaw)) {
+        return reply.code(400).send({
+          error:
+            '参数 credentials 必须是键值对对象（如 {"appid":"…","secret":"…"}）。',
+        });
+      }
+      for (const [k, v] of Object.entries(credRaw as Record<string, unknown>)) {
+        if (typeof v !== "string" || v === "") {
+          return reply.code(400).send({
+            error: `参数 credentials.${k} 必须是非空字符串（凭据值不得缺省或为其他类型）。`,
+          });
+        }
+        credentials[k] = v;
+      }
+    }
+    if (Object.keys(credentials).length === 0) {
+      return reply.code(400).send({
+        error:
+          '参数缺失：传 credentials 键值对（QQ={"appid","secret"}，q.qq.com → 开发设置获取；其他平台字段定义见该平台连接器声明/WebUI 添加机器人表单）。',
+      });
+    }
+    const name =
+      typeof args.name === "string" && args.name.trim() !== ""
+        ? args.name.trim()
+        : undefined;
+    let authLevel: AuthLevel | undefined;
+    if (args.auth_level !== undefined && args.auth_level !== null) {
+      try {
+        authLevel = parseAuthLevel(args.auth_level);
+      } catch (e) {
+        return reply
+          .code(400)
+          .send({ error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    try {
+      const registered = await deps.registry.add({
+        platform,
+        credentials,
+        name,
+        authLevel,
+      });
+      deps.connectors.addBot(registered.bot);
+      httpLog.info("bot registered via /register", {
+        appid: registered.bot.botId,
+        platform,
+      });
+      return {
+        ok: true,
+        bot: {
+          appid: registered.bot.botId,
+          platform,
+          name: registered.bot.name,
+        },
+        agent_token: registered.agentToken,
+        note: "agent_token 仅本次返回：请立即保存。再次获取请在 WebUI 设置页轮换。",
+      };
+    } catch (e) {
+      if (e instanceof BotRegistryError) {
+        return reply.code(400).send({ error: e.message });
+      }
+      httpLog.error("register failed", { reason: String(e).slice(0, 300) });
+      return reply.code(500).send({ error: "内部错误，请查看服务日志。" });
+    }
+  });
+
   // —— 宿主唤醒面：/wait 长轮询（Bearer agent_token，与 /mcp 同源同闸）——
   // 解耦契约：网关只吐事件+快照，绝不拉起智能体；消费仍走 get_new 水位。
   app.post("/wait", async (req, reply) => {
@@ -174,7 +276,7 @@ export function buildServer(deps: ServerDeps) {
     if (botId === null) {
       return reply.code(401).send({
         error:
-          "Unauthorized：token 无效或未绑定 bot。请用 register_bot 返回的 agent_token（与 /mcp 同一把）。",
+          "Unauthorized：token 无效或未绑定 bot。请用注册返回的 agent_token（与 /mcp 同一把）。",
       });
     }
     if (!deps.registry.mcpEnabledOf(botId)) {

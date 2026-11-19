@@ -48,7 +48,7 @@ curl http://127.0.0.1:8787/healthz
 
 ## 配置（config.toml）
 
-config.toml 是服务配置的唯一权威（2026-11-17 起 env/`.env` 已退役，服务不读任何环境变量）；文件缺失即拒启，模板见 `config.toml.example`（config.toml 本体已 gitignore）。**bot 注册（appid/secret）、admin token、发送开关、群白名单仍以 SQLite 为唯一权威**（WebUI 设置页 / `register_bot` 管理）——凭据绝不进 toml。
+config.toml 是服务配置的唯一权威（2026-11-17 起 env/`.env` 已退役，服务不读任何环境变量）；文件缺失即拒启，模板见 `config.toml.example`（config.toml 本体已 gitignore）。**bot 注册（appid/secret）、admin token、发送开关、群白名单仍以 SQLite 为唯一权威**（WebUI 设置页 / `POST /register` 管理）——凭据绝不进 toml。
 
 | 键                | 缺省          | 说明                                                          |
 | ----------------- | ------------- | ------------------------------------------------------------- |
@@ -60,11 +60,11 @@ config.toml 是服务配置的唯一权威（2026-11-17 起 env/`.env` 已退役
 | `log_format`      | `pretty`      | pretty（loguru 风格人类可读，缺省）/ json（采集端解析用）     |
 | `[connectors.*]`  | （无）        | 连接器声明（package/range/source），存在即启用，详见模板注释  |
 
-## MCP 工具面（基座 14 + 平台扩展）
+## MCP 工具面（基座 13 + 平台扩展）
 
 **参数命名（2026-11-07 硬切换）**：会话标识参数统一叫 **`id`**——与 `list_all`/`list_new` 返回的 `conversations[].id` 对齐；传旧名 `group` 报可操作更名提示。**会话侧别由服务端按 id 自动探测**（P3 起权威源 = sessions 显式注册表：ingest 入库/开关事件即登记 `(bot_id, session_id) → kind`；注册表未命中走缓存/开关证据兜底），读写工具无 `type` 参数（仅 `list_all` 保留 `type` 作结果过滤）。消息标识保留 `msg_id`/`quote_msg_id`；返回值成员标识统一 `id`/`member_id`（原 `openid`/`member_openid`）。
 
-**管理（自服务）**：`register_bot`（注册新 bot：`platform`+`credentials` 键值对——形状由该平台连接器声明权威，QQ 亦可直传兼容形参 `appid`/`secret`；官方凭据校验（平台连接器 verifyCredential）→ 落库 → 返回 agent_token 仅此一次；token 轮换收归 WebUI 设置页——调用即自毁凭证的操作不留给 agent）
+**注册（管理面，不在 agent 工具面）**：`register_bot` 已退出 MCP 工具面（2026-11-19——注册返回一次性 agent_token，属人的运维决策，不该暴露给智能体自助调用）。无 UI 场景走 **`POST /register`**（Bearer **admin token**，与 /ui/api 同一把）：`{platform?, credentials, name?, auth_level?}`（credentials 键值对形状由该平台连接器声明权威，QQ=`{appid, secret}`）→ 官方凭据校验（平台连接器 verifyCredential）→ 落库 → 自动拉起网关 → 返回 agent_token 仅此一次。完整调用契约在 `GET /docs`；token 轮换收归 WebUI 设置页。
 
 **只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数；`type` 参数过滤 group/chat——C2C 开通后即用此参数，无独立工具）· `list_new`（未读视图=红点）· `list_members`（名册，名字为 users 表 QQ 昵称）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索，源=本条文本列）· `context`（前后文）· `get_records`（展开聊天记录：消息条目 `records_count>0` 时拉取拍平子消息）· `get_media`（点开看图：按 ![附件n] 编号拉取图像内容，多模态模型直接读图）· `quota`（额度水位，**QQ 平台限定**——工具面按 bot 平台过滤，Telegram 等其他平台 bot 不可见）
 
@@ -76,7 +76,7 @@ config.toml 是服务配置的唯一权威（2026-11-17 起 env/`.env` 已退役
 
 ## /wait 长轮询事件端点（宿主唤醒面）
 
-`POST /wait`（Bearer **agent_token**，与 /mcp 同一把）：长轮询「有事才醒」——新消息命中过滤器即返回 `{timeout:false, events, unread 快照}`，否则 hold 到点 `{timeout:true}`。**解耦红线：网关只吐事件+快照，绝不拉起智能体**——谁消费（curl 守护脚本 / 宿主内部后台命令接力）、何时唤醒，全是宿主侧的事；消费仍走 `get_new` 水位（at-most-once），与 10 分钟定时兜底天然共存。filter 四谓词：`scope` / `sessions`（会话 id）/ `authors`（作者 openid）/ `mention`（@本bot 或私聊；QQ 全量群 @ 归属官方不可判，从宽兜底）。**完整调用契约（curl 配方、真值表、宿主集成两模式）见 `GET /docs`（text/markdown，AI 可直接读取自举）**。非 MCP 工具，不计入工具面清单。设计详见 DESIGN.md §3.7。
+`POST /wait`（Bearer **agent_token**，与 /mcp 同一把）：长轮询「有事才醒」——新消息命中过滤器即返回 `{timeout:false, events, unread 快照}`，否则 hold 到点 `{timeout:true}`。**解耦红线：网关只吐事件+快照，绝不拉起智能体**——谁消费（curl 守护脚本 / 宿主内部后台命令接力）、何时唤醒，全是宿主侧的事；消费仍走 `get_new` 水位（at-most-once），与 10 分钟定时兜底天然共存。filter 四谓词：`scope` / `sessions`（会话 id）/ `authors`（作者 openid）/ `mention`（群里 @本bot 或任何私聊；QQ 经官方 `mentions[].is_you` 权威判定 @ 归属，Telegram 经 getMe 身份比对）。**完整调用契约（curl 配方、真值表、宿主集成两模式）见 `GET /docs`（text/markdown，AI 可直接读取自举）**。非 MCP 工具，不计入工具面清单。设计详见 DESIGN.md §3.7。
 
 ## WebUI（/ui）
 

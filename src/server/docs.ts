@@ -1,6 +1,7 @@
 // GET /docs 返回的调用契约（text/markdown）。受众是 AI 智能体与写胶水脚本的
-// 人类：把 /wait 的完整调用方法（鉴权/参数/filter 真值表/响应/curl 配方/宿主
-// 集成两模式）放在网关自身，任何宿主拿到地址即可自举，无需外部文档。
+// 人类：把 /register（无 UI 注册）与 /wait 的完整调用方法（鉴权/参数/filter
+// 真值表/响应/curl 配方/宿主集成两模式）放在网关自身，任何宿主拿到地址即可
+// 自举，无需外部文档。
 
 export const DOCS_MARKDOWN = `# QSense Gateway API 文档
 
@@ -10,13 +11,61 @@ QQ/Telegram 官方机器人 → MCP 多平台网关。同一进程暴露：
 |---|---|---|
 | \`POST /mcp\` | MCP 工具面（Streamable HTTP）：list_all / get_new / send 等 | Bearer **agent_token**（每 bot 一把） |
 | \`POST /wait\` | 长轮询事件唤醒：新消息命中过滤器即返回（本页重点） | Bearer **agent_token**（与 /mcp 同一把） |
+| \`POST /register\` | 注册新 bot（无 UI 时的机器通道），返回一次性 agent_token | Bearer **admin token** |
 | \`GET /docs\` | 本文档 | 无 |
 | \`GET /healthz\` | 存活探针 | 无 |
 | \`/ui\` | 管理界面 | admin token（浏览器） |
 
-**双 token 纪律**：agent_token 只通 \`/mcp\` 与 \`/wait\`；admin token 只通 \`/ui/api\`。
-token 来源：\`register_bot\` 返回值，或 WebUI 设置页重新生成。bot 的「MCP 访问」开关
-关闭后，该 token 的 \`/mcp\` 与 \`/wait\` 一律 403。
+**双 token 纪律**：agent_token 只通 \`/mcp\` 与 \`/wait\`；admin token 只通 \`/ui/api\` 与
+\`/register\`。token 来源：注册响应返回值（\`POST /register\` 或 WebUI 添加机器人，
+**仅此一次**）；丢失请在 WebUI 设置页轮换。bot 的「MCP 访问」开关关闭后，该 token 的
+\`/mcp\` 与 \`/wait\` 一律 403。
+
+---
+
+## POST /register —— 注册新 bot（无 UI 时的机器通道）
+
+注册是**管理面操作**：MCP 工具面不含注册工具——智能体不应在对话里自助注册 bot
+（返回值是一次性 agent_token，属人的运维决策）。有 WebUI 时走「添加机器人」；
+无 UI 环境（VPS 首次部署、脚本化自举）用本端点。
+
+### 请求
+
+\`\`\`
+POST /register
+Authorization: Bearer <admin_token>
+Content-Type: application/json
+
+{ "platform": "qq", "credentials": { "appid": "…", "secret": "…" }, "name": "备注名", "auth_level": "uncertified" }
+\`\`\`
+
+| 字段 | 类型 | 缺省 | 说明 |
+|---|---|---|---|
+| \`platform\` | string | \`"qq"\` | 平台 id；可用平台 = config.toml \`[connectors.*]\` 声明（未声明的平台硬拒） |
+| \`credentials\` | 对象 | **必填** | 平台凭据键值对，字段由该平台连接器声明权威（QQ=\`{appid, secret}\`，q.qq.com → 开发设置获取） |
+| \`name\` | string | 账号 id | 备注名 |
+| \`auth_level\` | string | \`uncertified\` | QQ 平台语义：主动消息频控预算 \`certified\`=60条/分、\`uncertified\`=30条/分 |
+
+服务端先过**官方凭据校验**（平台连接器 verifyCredential，未过官方校验绝不入库），
+落库后自动拉起该 bot 的网关连接，返回：
+
+\`\`\`json
+{ "ok": true, "bot": { "appid": "1905935479", "platform": "qq", "name": "雅南" }, "agent_token": "<48hex，仅此一次>", "note": "…" }
+\`\`\`
+
+**错误**：401 admin token 缺失/错误；400 凭据校验被官方拒绝、bot 重复注册、
+credentials 形状非法、auth_level 非法（错误消息指出具体原因）。
+
+### curl 配方
+
+\`\`\`bash
+curl -sS -X POST http://127.0.0.1:8787/register \\
+  -H "Authorization: Bearer $ADMIN_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"platform":"qq","credentials":{"appid":"…","secret":"…"},"name":"雅南"}'
+\`\`\`
+
+拿到 \`agent_token\` 后即可用它连接 \`/mcp\` 与 \`/wait\`（见上文）。
 
 ---
 
@@ -136,5 +185,5 @@ done
 - \`receive_enabled=0\` 的 bot：网关不接入该平台，无事件产生，/wait 只会超时。
 - 事件粒度是「会话有新消息」，不是消息内容本身——内容一律经 MCP 工具消费
   （内容不过脚本，避免绕过工具面的权限与审计）。
-- 本端点不属于 MCP 工具面，不计入基座 14 + 平台扩展的工具清单。
+- 本端点不属于 MCP 工具面，不计入基座 13 + 平台扩展的工具清单。
 `;
