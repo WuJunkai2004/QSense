@@ -15,15 +15,17 @@
 import type { NormalizedInbound } from "./message";
 
 /** SDK 契约版本：宿主加载插件时用 satisfiesRange(SDK_VERSION, plugin.sdkRange) 校验 */
-export const SDK_VERSION = "2.1.0";
+export const SDK_VERSION = "2.2.0";
 
 // ---------------------------------------------------------------------------
-// 基座工具保留名（14）：插件工具不得与之重名（加载即硬失败）。quota 等平台
+// 基座工具保留名（13）：插件工具不得与之重名（加载即硬失败）。quota 等平台
 // 扩展工具由插件声明，跨插件唯一性由 ConnectorRegistry 保证。
+// v2.2（2026-11-19）：register_bot 退出 MCP 工具面（注册是管理面操作，不再
+// 暴露给 agent）——宿主改经 HTTP POST /register（admin token）承载，保留名
+// 集合同步收窄。
 // ---------------------------------------------------------------------------
 
 export const BASE_TOOL_NAMES = [
-  "register_bot",
   "list_all",
   "list_new",
   "list_members",
@@ -41,7 +43,7 @@ export const BASE_TOOL_NAMES = [
 
 export type BaseToolName = (typeof BASE_TOOL_NAMES)[number];
 
-/** 保留名集合（基座 14；插件声明面校验用） */
+/** 保留名集合（基座 13；插件声明面校验用） */
 export const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(BASE_TOOL_NAMES);
 
 // ---------------------------------------------------------------------------
