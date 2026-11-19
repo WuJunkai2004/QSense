@@ -55,9 +55,9 @@ Content-Type: application/json
 **私聊会话**」里的消息——他在群里的发言属于另一个会话，**不会**命中；想「他到处发言
 都叫我」请用 \`authors\`。
 
-⚠️ **mention 判定口径**：QQ 官方只在 \`GROUP_AT_MESSAGE_CREATE\`（@机器人事件）里给
-权威 @bot 语义；开了全量消息权限的群，@bot 消息以 \`GROUP_MESSAGE_CREATE\` 到达且官方
-不区分 @ 归属——此时服务端**从宽**（含任意 @ 即命中，宁可多醒不漏醒）。Telegram 侧
+⚠️ **mention 判定口径**：QQ 经官方事件体 \`mentions[].is_you\` 权威判定「@是否本bot」
+（@本bot=true；@普通用户或别的bot=false；AT 事件与全量消息事件口径一致）。仅当官方
+载荷意外缺失该字段时回退**从宽**（含任意 @ 即命中，宁可多醒不漏醒）。Telegram 侧
 经 getMe 身份比对，判定精确。
 
 ### 常用场景真值表

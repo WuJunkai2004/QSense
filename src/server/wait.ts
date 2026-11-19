@@ -168,7 +168,8 @@ export function validateWaitBody(raw: unknown): WaitBody {
 
 // ---------------------------------------------------------------------------
 // 匹配：跨字段 AND、数组内 OR、filter 数组=跨对象 OR；
-// mention 语义 = 私聊 或 群@本bot（未知且含@从宽兜底——不漏叫醒优先）
+// mention 语义 = 私聊 或 群@本bot（QQ 经官方 mentions[].is_you 权威判定，几乎
+// 总有 true/false；仅官方未带 mentions 时未知——未知且含@ 从宽兜底，不漏叫醒优先）
 // ---------------------------------------------------------------------------
 
 export function matchFacts(facts: WaitFacts, filters: WaitFilter[]): boolean {
