@@ -25,6 +25,7 @@ import {
 } from "./quota";
 import { createQrBindTask, pollQrBind, type QrBindDeps } from "./qrbind";
 import { appOfCreds, type QqNetDeps } from "./net";
+import { qqSendError } from "./errors";
 import { fetchGatewayUrl } from "./url";
 import { normalizeQqEnvelope } from "./normalize";
 import { TokenService, type QqApp } from "./token";
@@ -89,6 +90,8 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
       passiveWindow: true,
       quota: true,
     },
+    // 发送错误语义面（契约 v2.2.2）：官方码判定 + 包内文案，core 委托翻译
+    sendError: qqSendError,
     normalize: (botId, payload): NormalizedInbound | null =>
       normalizeQqEnvelope(botId, payload),
     credentialSchema: {

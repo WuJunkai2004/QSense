@@ -22,11 +22,6 @@ const zh = {
   boot_ok:
     "qqbot-websocket-mcp 已启动：http://{addr} ，已注册 {bots} 个bot，数据目录 {dataDir}，发送开关 {send}。",
   // —— 网关（M1） ——
-  gw_url_fail:
-    "获取网关地址失败（HTTP {status}）：{reason}。检查到 api.bot.qq.com 的网络连通性与 access_token 有效性。",
-  gw_fatal_close:
-    "网关连接致命关闭，已停止重连（{detail}）。若为 4914/4915：intents 未授权或机器人状态异常，需到开放平台人工核查。",
-  gw_disconnected_final: "网关断开且不再重连（code={code}，{reason}）。",
   gw_event_dedup: "重复事件已去重丢弃：type={type}，id={id}。",
   ingest_no_platform:
     "上行信封缺 platform 键，已丢弃（bot={bot}）。请检查连接器版本是否与契约 v2 兼容。",
@@ -57,16 +52,9 @@ const zh = {
     "回复目标消息不在缓存中：msg_id={msg_id}。请先用 search / browse 确认消息存在（撤回/回复只能针对官方消息ID）。",
   send_quote_not_found:
     "引用目标消息不在缓存中：msg_id={msg_id}。请先用 search / browse 确认消息存在（引用需要缓存中的官方消息ID）。",
-  send_quota_daily:
-    "主动消息日额度不足：群 {group} 今日已发 {used}/{limit} 条（官方上限 1000 条/天/群，北京时间 0 点重置）。digest 类任务请降级为落盘不发，勿重试。",
-  send_rate_limited_bot:
-    "主动消息触发 bot 级频控（{qpm} 条/分钟，认证等级 {level}）。请等待约 {wait} 秒后重试，勿立即重试。",
-  send_rate_limited_relation:
-    "对该群的主动消息触发单关系频控（官方限制 20 条/分钟/群）。请等待约 {wait} 秒后重试。",
   send_audit_pending:
-    "消息已提交官方，但进入人工审核（官方码 {code}）：服务端已标记 pending_audit，结果将由 MESSAGE_AUDIT 事件回填，请勿重发（重复发送浪费额度）。",
-  send_markdown_downgraded:
-    "Markdown 无模板权限（官方码 304036），已自动降级为纯文本发送成功。",
+    "消息已提交平台，但进入人工审核（平台码 {code}）：服务端已标记 pending_audit，结果将由平台事件回填，请勿重发（重复发送浪费额度）。",
+  send_markdown_downgraded: "Markdown 不受支持，已自动降级为纯文本发送成功。",
   send_text_too_long:
     "消息内容 {len} 字符，超过官方上限 5000。请分段发送或精简内容。",
   media_source_invalid:
@@ -75,29 +63,8 @@ const zh = {
     "图片上传官方转存失败：{reason}。可更换图片来源后重试（URL 须公网可访问；data: 内联数据须为有效图片）。",
   asset_not_found:
     "资产不存在：asset:{id}。请先调 request_upload 拿上传票据，并按返回的 curl 命令用执行环境直传图片字节（票据 15 分钟有效、单次使用）。",
-  err_40034004:
-    "富媒体转存失败（官方码 40034004）。可重试一次；反复失败请更换图片 URL（须公网可访问）或改用 data: 内联。",
-  err_40034005:
-    "回复目标 msg_id 已过期（官方码 40034005）：超出被动窗口。可改为直接发送（自动走主动通道）或放弃。",
-  err_304027:
-    "回复目标 msg_id 已过期（官方码 304027）：超出被动窗口。可改为直接发送（自动走主动通道）或放弃。",
-  err_40034100:
-    "主动消息超过官方频控（官方码 40034100）。请等待额度恢复后再试（bot 级 {qpm} 条/分钟，单群 1000 条/天）。",
-  err_40034010:
-    "官方不允许发送 URL（官方码 40034010）：URL 需在开放平台报备。请去除内容中的链接后重试。",
-  err_40054010:
-    "官方不允许发送 URL（官方码 40054010）：URL 需在开放平台报备。请去除内容中的链接后重试。",
-  err_40034101:
-    "机器人已不是该群成员（官方码 40034101），发送失败。请检查机器人是否被移出群。",
-  err_40054003:
-    "机器人已不是该群成员（官方码 40054003），发送失败。请检查机器人是否被移出群。",
-  err_40054005:
-    "官方判定消息重复（官方码 40054005：msg_seq 未递增）。服务端账本异常，请勿重试并报告维护者。",
-  err_40054002: "机器人被禁言（官方码 40054002），无法发送。请等待解禁。",
-  err_40034006:
-    "消息内容被官方判定违规（官方码 40034006），已放弃。请修改内容。",
   err_send_unknown: "发送失败（HTTP {status}，业务码 {code}）：{message}。",
-  err_send_no_code: "发送失败（{message}）。请检查网络与官方服务状态。",
+  err_send_no_code: "发送失败（{message}）。请检查网络与平台服务状态。",
 } as const;
 
 type Translation = Record<keyof typeof zh, string>;
@@ -119,12 +86,6 @@ const en: Translation = {
     "Listen failed: cannot bind {addr} ({reason}). Check if PORT/HOST is occupied or permission denied.",
   boot_ok:
     "qqbot-websocket-mcp started: http://{addr} , {bots} bot(s) registered, data dir {dataDir}, send={send}.",
-  gw_url_fail:
-    "Failed to fetch gateway URL (HTTP {status}): {reason}. Check network to api.bot.qq.com and access_token validity.",
-  gw_fatal_close:
-    "Gateway connection closed fatally, reconnect stopped ({detail}). For 4914/4915: unauthorized intents or abnormal bot status, resolve manually on the open platform.",
-  gw_disconnected_final:
-    "Gateway disconnected and will not reconnect (code={code}, {reason}).",
   gw_event_dedup: "Duplicate event dropped: type={type}, id={id}.",
   ingest_no_platform:
     "Inbound envelope lacks the platform key, dropped (bot={bot}). Check that the connector is compatible with contract v2.",
@@ -153,16 +114,10 @@ const en: Translation = {
     "Reply target not in cache: msg_id={msg_id}. Use search / browse to locate a cached message first (reply/recall require official message IDs).",
   send_quote_not_found:
     "Quote target not in cache: msg_id={msg_id}. Use search / browse to locate a cached message first (quoting requires a cached official message ID).",
-  send_quota_daily:
-    "Daily proactive quota exhausted for group {group}: {used}/{limit} today (official limit 1000/day/group, resets at midnight Beijing). Digest jobs should fall back to disk, do not retry.",
-  send_rate_limited_bot:
-    "Bot-level proactive rate limit hit ({qpm}/min, auth level {level}). Wait about {wait}s before retrying.",
-  send_rate_limited_relation:
-    "Per-relation proactive rate limit hit for this group (official limit 20/min/group). Wait about {wait}s before retrying.",
   send_audit_pending:
-    "Message submitted but queued for manual audit (official code {code}): marked pending_audit server-side; result will arrive via MESSAGE_AUDIT event. Do not resend (wastes quota).",
+    "Message submitted but queued for manual audit (platform code {code}): marked pending_audit server-side; result will arrive via a platform event. Do not resend (wastes quota).",
   send_markdown_downgraded:
-    "Markdown has no template permission (official code 304036); automatically sent as plain text instead.",
+    "Markdown is not supported; automatically sent as plain text instead.",
   send_text_too_long:
     "Message content is {len} chars, exceeding the official 5000 limit. Split or shorten the content.",
   media_source_invalid:
@@ -171,30 +126,8 @@ const en: Translation = {
     "Image upload/transfer failed: {reason}. Retry with a different source (URL must be publicly accessible; data: payload must be a valid image).",
   asset_not_found:
     "Asset not found: asset:{id}. Call request_upload first to get an upload ticket, then PUT the image bytes from your execution environment following the returned curl command (ticket valid 15 min, single use).",
-  err_40034004:
-    "Rich media transfer failed (official code 40034004). Retry once; if it keeps failing, use a different image URL (must be publicly accessible) or switch to data: inline.",
-  err_40034005:
-    "Reply target msg_id expired (official code 40034005): passive window exceeded. Send directly instead (auto-routes to proactive) or skip.",
-  err_304027:
-    "Reply target msg_id expired (official code 304027): passive window exceeded. Send directly instead (auto-routes to proactive) or skip.",
-  err_40034100:
-    "Proactive message rate-limited by official API (code 40034100). Wait for quota ({qpm}/min bot level, 1000/day per group).",
-  err_40034010:
-    "URLs are not allowed by official API (code 40034010): URLs must be registered on the platform. Remove links from content.",
-  err_40054010:
-    "URLs are not allowed by official API (code 40054010): URLs must be registered on the platform. Remove links from content.",
-  err_40034101:
-    "Bot is no longer a member of this group (official code 40034101). Check whether the bot was removed.",
-  err_40054003:
-    "Bot is no longer a member of this group (official code 40054003). Check whether the bot was removed.",
-  err_40054005:
-    "Official dedup hit (code 40054005: msg_seq not incremented). Ledger anomaly — do not retry, report to maintainer.",
-  err_40054002: "Bot is muted (official code 40054002). Wait for unmute.",
-  err_40034006:
-    "Content rejected by official audit (code 40034006). Abandoned; modify the content.",
   err_send_unknown: "Send failed (HTTP {status}, biz code {code}): {message}.",
-  err_send_no_code:
-    "Send failed ({message}). Check network and official service status.",
+  err_send_no_code: "Send failed ({message}). Check network and platform service status.",
 };
 
 export type Lang = "zh" | "en";
@@ -229,6 +162,3 @@ export function createT(lang: Lang) {
 
 // 进程内检测一次，各模块直接 import 使用
 export const t = createT(detectLang());
-
-/** i18n 键类型（供外部模块做键映射表） */
-export type I18nKey = keyof typeof zh;

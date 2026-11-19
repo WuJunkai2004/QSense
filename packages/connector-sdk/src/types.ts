@@ -15,7 +15,7 @@
 import type { NormalizedInbound } from "./message";
 
 /** SDK 契约版本：宿主加载插件时用 satisfiesRange(SDK_VERSION, plugin.sdkRange) 校验 */
-export const SDK_VERSION = "2.2.1";
+export const SDK_VERSION = "2.2.2";
 
 // ---------------------------------------------------------------------------
 // 基座工具保留名（13）：插件工具不得与之重名（加载即硬失败）。quota 等平台
@@ -363,6 +363,20 @@ export interface ConnectorInstance {
 // 插件（声明面）：分仓包默认导出
 // ---------------------------------------------------------------------------
 
+/**
+ * 发送错误语义（契约 v2.2.2 可选面）：平台官方错误码 → core 中立词汇 +
+ * 平台自包含文案（「包内文案自包含」纪律——core i18n 不翻译平台错误码）。
+ * extractBizCode 的 bizCode 字段约定是 core 与各连接器共用的通用协议。
+ */
+export interface SendErrorSemantics {
+  /** 平台判定：受理进入人工审核（core 置 pending_audit 等平台事件回填，勿重发） */
+  isAuditPending?(e: unknown): boolean;
+  /** 平台判定：markdown 无权限（core 自动降级纯文本重试一次） */
+  isMarkdownDowngrade?(e: unknown): boolean;
+  /** 平台文案：可操作错误解释（含官方码语义）；未登记码返回 undefined → core 通用兜底 */
+  describe?(e: unknown): string | undefined;
+}
+
 export interface ConnectorPlugin {
   /** 平台 id：/^[a-z][a-z0-9-]*$/；保留字 "core" 禁用 */
   id: string;
@@ -371,6 +385,12 @@ export interface ConnectorPlugin {
   /** 展示名（WebUI 用，如 "QQ 官方机器人"） */
   title: string;
   caps: PlatformCaps;
+  /**
+   * 发送错误语义（契约 v2.2.2 可选面）：平台官方错误 → core 中立词汇。
+   * core 发送器按「先问插件、后通用兜底」次序使用；未声明=平台无对应语义
+   * （如 Telegram 无审核/降级概念），全部走 core 通用文案。
+   */
+  sendError?: SendErrorSemantics;
   /** 「添加机器人」表单 schema（WebUI 动态渲染） */
   credentialSchema: JsonSchema;
   /** 密钥键清单：WebUI password 渲染 + 日志/错误脱敏 */

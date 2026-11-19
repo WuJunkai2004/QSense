@@ -57,3 +57,10 @@ export {
   type QqEvent,
 } from "./normalize";
 export { decomposeElements } from "./expand";
+// —— 发送错误语义面（契约 v2.2.2）：宿主/测试按需引用 ——
+export {
+  extractBizCode,
+  isAuditPendingCode,
+  isMarkdownPermissionError,
+  qqSendError,
+} from "./errors";

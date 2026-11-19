@@ -7,12 +7,45 @@ import {
   buildProactiveBody,
   buildReplyBody,
   createQqNet,
+  qqSendError,
   scopeToApi,
   type QQSendApi,
 } from "@qsense/connector-qq";
 import type { ProactiveWire, ReplyWire, UploadMediaWire } from "@qsense/connector-sdk";
 
 const CREDS = { appid: "10001", secret: "s" };
+
+/** QQ 官方码错误 mock（ApiError 形状：bizCode/httpStatus） */
+class FakeApiError extends Error {
+  override name = "ApiError";
+  constructor(
+    readonly bizCode: number,
+    readonly httpStatus = 400,
+  ) {
+    super(`biz ${bizCode}`);
+  }
+}
+
+test("sendError 语义面（契约 v2.2.2）：官方码判定 + 包内可操作文案；未登记码 undefined 走 core 兜底", () => {
+  // 审核受理判定（304023/304024）与降级判定（304036）
+  assert.equal(qqSendError.isAuditPending?.(new FakeApiError(304023)), true);
+  assert.equal(qqSendError.isAuditPending?.(new FakeApiError(304024)), true);
+  assert.equal(qqSendError.isAuditPending?.(new FakeApiError(40054002)), false);
+  assert.equal(qqSendError.isMarkdownDowngrade?.(new FakeApiError(304036)), true);
+  assert.equal(qqSendError.isMarkdownDowngrade?.(new FakeApiError(40054002)), false);
+
+  // describe：审核码给 pending_audit 文案（含官方码）；登记码给可操作解释
+  const audit = qqSendError.describe?.(new FakeApiError(304023));
+  assert.match(audit ?? "", /人工审核/);
+  assert.match(audit ?? "", /304023/);
+  assert.match(qqSendError.describe?.(new FakeApiError(40054002)) ?? "", /禁言/);
+  const quota = qqSendError.describe?.(new FakeApiError(40034100));
+  assert.match(quota ?? "", /频控/);
+  assert.match(quota ?? "", /30 条\/分钟/); // qpm 参数插值
+  // 未登记码 / 无业务码 → undefined（core 通用兜底接管）
+  assert.equal(qqSendError.describe?.(new FakeApiError(99999999)), undefined);
+  assert.equal(qqSendError.describe?.(new Error("网络炸了")), undefined);
+});
 
 function replyWire(over: Partial<ReplyWire> = {}): ReplyWire {
   return {

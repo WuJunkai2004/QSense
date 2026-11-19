@@ -19,6 +19,7 @@ import type {
   ProactiveWire,
   RecallWire,
   ReplyWire,
+  SendErrorSemantics,
   UploadMediaWire,
 } from "@qsense/connector-sdk";
 import type { BotRegistry } from "../bots";
@@ -27,12 +28,7 @@ import { t } from "../i18n";
 import type { Logger } from "../utils/logger";
 import type { DB } from "../store/db";
 import type { Repo } from "../store/repo";
-import {
-  describeSendError,
-  extractBizCode,
-  isAuditPendingCode,
-  isMarkdownPermissionError,
-} from "./errors";
+import { describeSendError, extractBizCode } from "./errors";
 
 /** 被动回复窗口（API-FACTS #3，官方限制）：群 5 分钟/5 次；单聊 60 分钟/4 次 */
 export const PASSIVE_WINDOW = {
@@ -126,6 +122,9 @@ export interface SenderDeps {
    * （Telegram）发送恒走主动通道、原语校验放宽；缺省=严格校验（QQ 现行为不变）
    */
   capsFor?: (botId: string) => PlatformCaps | undefined;
+  /** 每 bot 发送错误语义面（契约 v2.2.2）：平台官方码判定与文案由连接器声明；
+   * 缺省=平台无对应语义（如 Telegram），全部走 core 通用兜底 */
+  sendErrorFor?: (botId: string) => SendErrorSemantics | undefined;
   /** 平台策略钩子（QQ=额度门禁/记账）；缺省=无额度语义平台，直接放行 */
   hooks?: BoundConnectorHooks;
   /** 资产存储（send_media 的 asset:<id> 引用解析）；缺省=资产功能未装配 */
@@ -354,7 +353,8 @@ export class Sender {
         };
       } catch (e) {
         const biz = extractBizCode(e);
-        if (isAuditPendingCode(biz)) {
+        const sem = this.deps.sendErrorFor?.(botId);
+        if (sem?.isAuditPending?.(e) === true) {
           this.deps.repo.updateSendStatus(
             reservation,
             "pending_audit",
@@ -365,7 +365,7 @@ export class Sender {
             status: "pending_audit",
             channel: "passive",
             msg_seq: seq,
-            detail: t("send_audit_pending", { code: biz ?? 0 }),
+            detail: sem.describe?.(e) ?? t("send_audit_pending", { code: biz ?? 0 }),
           };
         }
         this.deps.repo.updateSendStatus(
@@ -382,10 +382,11 @@ export class Sender {
       try {
         return await send(true, this.deps.repo.nextMsgSeq(botId, replyMsgId));
       } catch (e) {
-        if (!isMarkdownPermissionError(e)) {
-          throw new Error(describeSendError(e));
+        const sem = this.deps.sendErrorFor?.(botId);
+        if (sem?.isMarkdownDowngrade?.(e) !== true) {
+          throw new Error(describeSendError(e, sem));
         }
-        // 304036：Markdown 无模板权限 → 自动降级纯文本（新账本行，失败行不计窗口次数）
+        // 平台判定 Markdown 无权限 → 自动降级纯文本（新账本行，失败行不计窗口次数）
         const result = await send(
           false,
           this.deps.repo.nextMsgSeq(botId, replyMsgId),
@@ -393,14 +394,15 @@ export class Sender {
         return {
           ...result,
           status: "downgraded",
-          detail: t("send_markdown_downgraded"),
+          detail: sem.describe?.(e) ?? t("send_markdown_downgraded"),
         };
       }
     }
     try {
       return await send(false, this.deps.repo.nextMsgSeq(botId, replyMsgId));
     } catch (e) {
-      if (extractBizCode(e) !== null) throw new Error(describeSendError(e));
+      if (extractBizCode(e) !== null)
+        throw new Error(describeSendError(e, this.deps.sendErrorFor?.(botId)));
       throw e;
     }
   }
@@ -485,7 +487,8 @@ export class Sender {
       };
     } catch (e) {
       const biz = extractBizCode(e);
-      if (isAuditPendingCode(biz)) {
+      const sem = this.deps.sendErrorFor?.(botId);
+      if (sem?.isAuditPending?.(e) === true) {
         // 审核受理同样占用官方当日额度，记账保守 +1
         repo.updateSendStatus(
           reservation,
@@ -497,11 +500,11 @@ export class Sender {
         return {
           status: "pending_audit",
           channel: "proactive",
-          detail: t("send_audit_pending", { code: biz ?? 0 }),
+          detail: sem.describe?.(e) ?? t("send_audit_pending", { code: biz ?? 0 }),
         };
       }
       repo.updateSendStatus(reservation, "failed", undefined, biz ?? undefined);
-      throw new Error(describeSendError(e));
+      throw new Error(describeSendError(e, sem));
     }
   }
 
@@ -673,7 +676,9 @@ export class Sender {
       handle = up.handle;
     } catch (e) {
       throw new Error(
-        t("media_upload_failed", { reason: describeSendError(e) }),
+        t("media_upload_failed", {
+          reason: describeSendError(e, this.deps.sendErrorFor?.(botId)),
+        }),
       );
     }
     this.log.info("media uploaded", {
@@ -838,7 +843,7 @@ export class Sender {
         undefined,
         extractBizCode(e) ?? undefined,
       );
-      throw new Error(describeSendError(e));
+      throw new Error(describeSendError(e, this.deps.sendErrorFor?.(botId)));
     }
   }
 }

@@ -152,6 +152,7 @@ async function main(): Promise<void> {
     bots: registry,
     transportFor: (botId) => connectors.netFor(botId),
     capsFor: (botId) => connectors.capsFor(botId),
+    sendErrorFor: (botId) => connectors.sendErrorFor(botId),
     hooks: {
       proactiveGate: (botId, target) => connectors.hooksGate(botId, target),
       proactiveRecord: (botId, target) => connectors.hooksRecord(botId, target),

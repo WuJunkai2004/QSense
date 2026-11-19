@@ -136,6 +136,13 @@ export class ConnectorRuntime {
     return this.deps.plugins.get(this.platformOf(botId))?.caps;
   }
 
+  /** 每 bot 发送错误语义面（契约 v2.2.2；未知 bot/平台/未声明=undefined 走通用兜底） */
+  sendErrorFor(
+    botId: string,
+  ): import("@qsense/connector-sdk").SendErrorSemantics | undefined {
+    return this.deps.plugins.get(this.platformOf(botId))?.sendError;
+  }
+
   /**
    * 额度门禁（Sender proactive 前置）：按 bot 平台解析插件钩子；
    * 平台未声明 proactiveGate（或插件未加载）=放行。

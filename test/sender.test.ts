@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLogger } from "../src/utils/logger";
 import { Sender } from "../src/sender";
+import { describeSendError } from "../src/sender/errors";
 import { t } from "../src/i18n";
 import { normalizeQqEnvelope } from "@qsense/connector-qq";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
@@ -32,6 +33,7 @@ import {
   beijingDate,
   createQqConnector,
   dailyCountOf,
+  qqSendError,
   type QqConnectorPlugin,
   type QqSendLimits,
 } from "@qsense/connector-qq";
@@ -502,6 +504,7 @@ test("M4-8 304036 → Markdown 自动降级纯文本（新 seq，降级结果可
       repo: fx.repo,
       bots: fx.registry,
       transportFor: () => mock.mock,
+      sendErrorFor: () => qqSendError,
     });
     const r = await sender.reply(BOT, GROUP, "M1", "# 标题", true);
     assert.equal(r.status, "downgraded");
@@ -530,6 +533,7 @@ test("M4-9 304023 → pending_audit；MESSAGE_AUDIT_PASS 事件回填 audit_pass
       repo: fx.repo,
       bots: fx.registry,
       transportFor: () => mock.mock,
+      sendErrorFor: () => qqSendError,
     });
     const r = await sender.proactive(BOT, GROUP, "待审核内容");
     assert.equal(r.status, "pending_audit");
@@ -572,11 +576,25 @@ test('M4-10 官方错误码翻译：40054002 → "禁言"可操作文案', async
       repo: fx.repo,
       bots: fx.registry,
       transportFor: () => mock.mock,
+      sendErrorFor: () => qqSendError,
     });
     await assert.rejects(() => sender.reply(BOT, GROUP, "M1", "hi"), /禁言/);
   } finally {
     fx.close();
   }
+});
+
+test("M4-10b 错误语义面委托：无语义面 → 通用兜底文案；有语义面 → 平台文案优先", async () => {
+  // 无语义面：QQ 码也是通用兜底（含业务码原文，无平台解释）
+  const noSem = describeSendError(new FakeApiError(40054002));
+  assert.match(noSem, /业务码 40054002/);
+  assert.doesNotMatch(noSem, /禁言/);
+  // 有语义面：平台文案优先（QQ 包 describe 给可操作解释）
+  const withSem = describeSendError(new FakeApiError(40054002), qqSendError);
+  assert.match(withSem, /禁言/);
+  // 无业务码错误 → 通用兜底（语义面 describe 也返回 undefined）
+  const noCode = describeSendError(new Error("网络炸了"), qqSendError);
+  assert.match(noCode, /网络炸了/);
 });
 
 test("M4-11 撤回：走官方 DELETE，账本记一行", async () => {
@@ -739,6 +757,7 @@ function makeSender(
     repo: fx.repo,
     bots: fx.registry,
     transportFor: () => mock.mock,
+    sendErrorFor: () => qqSendError,
     ...(hooks !== undefined ? { hooks } : {}),
   });
 }
