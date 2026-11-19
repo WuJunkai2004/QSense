@@ -73,6 +73,31 @@ function parseAttachments(
 }
 
 /**
+ * @本bot 权威判定（契约 v2.1，真机 2026-11-19 修订）：官方事件体 mentions[].is_you
+ * 就是「@是否本bot」的权威归属，AT 事件与全量事件一致——@本bot 时 true；@普通用户
+ * （bot:false）与 @别的bot（bot:true 但 is_you:false）一律 false。任一 is_you=true
+ * → true；含 mention 但无一命中 → false；官方未带 mentions → undefined（wait 层
+ * mention 过滤对未知+含@ 从宽兜底，不漏叫醒优先）。
+ * 旧口径「仅 AT 事件类型盖章」作废：它漏读 is_you，导致全量事件里 @他人 也是
+ * atMe=undefined，误触发从宽兜底（真机三情形实证：bot:true/is_you:true、
+ * bot:true/is_you:false、bot:false/is_you:false）。
+ */
+function atMeOf(raw: Record<string, unknown>): boolean | undefined {
+  const list = raw.mentions;
+  if (!Array.isArray(list) || list.length === 0) return undefined;
+  for (const item of list) {
+    if (
+      item !== null &&
+      typeof item === "object" &&
+      (item as Record<string, unknown>).is_you === true
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * 官方 msg_idx 令牌提取：raw.message_scene.ext 形如 ["msg_idx=REFIDX_…", "auth_token=…"]。
  * 引用元素（103）以该令牌为锚指向被引消息——入库存列，quote_json 的锚与读取端懒补都用它。
  */
@@ -187,6 +212,9 @@ export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
   textLines.push(...fileNames);
   const text = textLines.filter((s) => s !== "").join("\n");
   const content = renderLines.filter((s) => s !== "").join("\n");
+  // @本bot 权威判定：官方 mentions[].is_you（AT 事件与全量事件一致，见 atMeOf）；
+  // 群消息盖章，单聊省略（mention 谓词里私聊天然命中）。
+  const atMe = scope === "group" ? atMeOf(r) : undefined;
 
   return {
     botId: event.botId,
@@ -205,12 +233,7 @@ export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
     attachments: collector.list,
     ark: extractArk(r),
     msgIdx: extMsgIdx,
-    // @本bot 权威判定：仅 AT 事件盖章（官方事件类型语义）；全量群消息
-    // （GROUP_MESSAGE_CREATE）官方不区分 @ 归属，省略=未知——wait 层 mention
-    // 过滤对未知+含@ 从宽兜底（不漏叫醒优先）。
-    ...(scope === "group" && event.type === "GROUP_AT_MESSAGE_CREATE"
-      ? { atMe: true }
-      : {}),
+    ...(atMe !== undefined ? { atMe } : {}),
     raw: r,
   };
 }
