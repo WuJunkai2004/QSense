@@ -1,7 +1,7 @@
 // Telegram 连接器插件声明面（ConnectorPlugin）：caps / credentialSchema /
 // hooks（verifyCredential）/ create。P3.5 试金石（2026-11-16）——
 // 纯外挂包进场：core 预期改动仅 normalize/telegram parser + ingest 路由 +
-// Sender caps 感知路由三处（diff 记录于 todo.md，即「抽象不泄漏」的账本）。
+// Sender caps 感知路由三处（「抽象不泄漏」的试金石账本）。
 //
 // 平台语义判定（与 QQ 的差异全部走 caps 声明，不进宿主）：
 // - passiveWindow=false：Telegram 无被动窗口概念，任意时刻可发 → 发送只走
