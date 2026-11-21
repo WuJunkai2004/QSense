@@ -1,5 +1,5 @@
 {
-  "name": "qqbot-websocket-mcp",
+  "name": "qsense",
   "version": "0.2.0",
   "description": "QQ官方机器人 → MCP 网关：官方 WS Gateway 接入事件，SQLite 缓存，MCP 工具面暴露给 OpenCode",
   "author": "Wu Junkai <wu.junkai@qq.com>",

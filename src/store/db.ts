@@ -1,5 +1,5 @@
 // SQLite 打开 + WAL + 版本化迁移框架（better-sqlite3 同步 API，单进程足够）。
-// 表结构权威定义见 DESIGN.md §3.3。
+// 表结构权威定义见 src/store/migrations.ts。
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";

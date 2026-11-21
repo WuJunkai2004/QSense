@@ -75,7 +75,7 @@ function handleGatewayEvent(repo: Repo, event: QqEvent): void {
   makePipeline(repo)(event.type, event.data, event.botId);
 }
 
-/** 官方 GROUP_MESSAGE_CREATE 事件形状（依据 API-FACTS.md #2 字段表） */
+/** 官方 GROUP_MESSAGE_CREATE 事件形状（官方字段事实见 AGENTS.md） */
 const groupMsgShape = {
   id: "MSGID_1",
   author: {

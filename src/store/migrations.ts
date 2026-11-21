@@ -28,7 +28,7 @@ export const migrations: Migration[] = [
   {
     version: 2,
     name: "business-tables",
-    // 全量业务表，权威定义见 DESIGN.md §3.3。
+    // 全量业务表，权威定义见本文件（迁移 v1→v13）。
     // 偏差说明：FTS 用 trigram 而非 unicode61——unicode61 不分词中文（整句成单 token），
     // search 关键词检索对中文不可用；trigram 支持子串匹配（better-sqlite3 内置 SQLite ≥ 3.34）。
     up: `

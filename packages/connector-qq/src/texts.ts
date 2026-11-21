@@ -13,7 +13,7 @@ const zh = {
     "主动消息触发 bot 级频控（{qpm} 条/分钟，认证等级 {level}）。请等待约 {wait} 秒后重试，勿立即重试。",
   send_rate_limited_relation:
     "对该群的主动消息触发单关系频控（官方限制 20 条/分钟/群）。请等待约 {wait} 秒后重试。",
-  // —— 发送错误官方码 → 可操作文案（API-FACTS.md #5；2026-11-19 自 core i18n 下沉） ——
+  // —— 发送错误官方码 → 可操作文案（官方错误码事实见 AGENTS.md；2026-11-19 自 core i18n 下沉） ——
   send_audit_pending:
     "消息已提交官方，但进入人工审核（官方码 {code}）：服务端已标记 pending_audit，结果将由 MESSAGE_AUDIT 事件回填，请勿重发（重复发送浪费额度）。",
   send_markdown_downgraded:

@@ -1,131 +1,129 @@
 # QSense
 
-QQ **官方**机器人 → MCP 网关。通过官方 WebSocket Gateway 接收群聊/单聊事件 → SQLite 缓存 → 以 MCP Server（Streamable HTTP + Bearer）暴露工具面给本地 OpenCode，作为机器人的"环境感知层"。
+QQ / Telegram **官方**机器人 → MCP 网关。
+
+机器人经官方接口收到的群聊、私聊消息被缓存在本地 SQLite，再以 MCP 工具的形式提供给本地 AI 客户端（如 OpenCode），让智能体具备"读群、记忆、发言"的环境感知能力。附带一个 QQ 桌面风格的 WebUI，供人类管理机器人、控制发送、浏览消息。
+
+**合规是生存底线**：数据只来自官方 API，事件走官方 WebSocket Gateway（出站长连接，无需公网 IP / 域名 / TLS），不使用任何注入式协议端。
 
 ```
-QQ 开放平台（官方）
-  │ WSS 出站长连接（Identify/心跳/Dispatch/Resume——断线自动补发，不丢消息）
-  ▼
-┌────────────────────────────────────────────┐
-│ qq-gateway 常驻进程                          │
-│  ├─ 事件接入器（官方 WS Gateway）             │
-│  ├─ 规范化（引用/合并转发递归展开、附件、名册） │
-│  ├─ SQLite 缓存（WAL + FTS5 trigram 中文检索）│
-│  ├─ 发送器（被动窗口/额度记账/幂等账本）       │
-│  └─ MCP Server /mcp（Streamable HTTP+Bearer）│
-└────────────────────────────────────────────┘
-  ▲ MCP 标准接口
-  │
-agent with MCP client ／cron 定时任务 ／人格会话
+QQ / Telegram 官方服务器
+   │  官方 WebSocket / 长轮询（出站，无需公网入站）
+   ▼
+┌───────────────────────────────────────────────┐
+│ QSense 常驻服务（默认 127.0.0.1:8787）          │
+│  ├─ 连接器插件（connector-qq / connector-telegram）│
+│  ├─ 消息规范化 + SQLite 全量缓存（中文全文检索）  │
+│  ├─ 发送器（被动窗口 / 额度记账 / 幂等账本）      │
+│  ├─ MCP   /mcp（Streamable HTTP + Bearer）      │
+│  ├─ 唤醒  /wait（长轮询事件）                    │
+│  └─ WebUI /ui（人类管理端）                      │
+└───────────────────────────────────────────────┘
+   ▲ MCP 标准接口
+   │
+AI 客户端（OpenCode 等）· cron 定时任务
 ```
 
 ## 快速开始
 
+前置：Node.js ≥ 20。
+
 ```bash
-# 1. 依赖：Node.js >= 20
+# 1. 安装依赖
 npm ci
 
-# 2. WebUI（qqbot-webui 仓库，本仓库以 junction 挂在 ./ui；clone 后需就位）
-#    git clone <qqbot-webui> ../qqbot-webui   # 与本仓库同级
-#    cmd //c "mklink /J ui ..\qqbot-webui"    # Windows junction（.gitmodules 已保留）
-cd ui && npm install && npm run build:only && cd ..             # 产物在 ui/dist/
+# 2. 构建 WebUI（ui 是 submodule，指向本仓库的 webui 分支）
+cd ui && npm install && npm run build:only && cd ..
 
-# 3. 配置（config.toml 是唯一配置权威；env 已退役，服务不读任何环境变量）
+# 3. 生成配置（config.toml 是唯一配置权威；bot 凭据绝不写进这里）
 cp config.toml.example config.toml
-#   无需填任何 bot 或 token（凭据绝不进 toml）：首次启动自动生成 admin token 并打印一次（记下它）
 
-# 4. 起服务（自动连官方 WS 网关；无 bot 时空转等待注册）
+# 4. 构建并启动（未注册 bot 时空转等待）
 npm run build && npm start
-curl http://127.0.0.1:8787/healthz
+```
 
-# 5. WebUI：浏览器打开 http://127.0.0.1:8787/ui ，粘贴首启打印的 admin token 登录
-#    → 「+」添加机器人（appid/secret 过官方校验，返回 agent_token 仅此一次）
-#    → 设置页开发送开关、配群白名单、改认证等级
-#    OpenCode 侧注册（workspace opencode.jsonc，用 bot 的 agent_token）
-#   mcp.servers.qq-gateway: { type:"remote", url:"http://127.0.0.1:8787/mcp",
-#     oauth:false, headers:{Authorization:"Bearer <agent_token>"}, disabled:false }
+首次启动会在日志里**打印一次 admin token**（之后不再显示），用它登录 `http://127.0.0.1:8787/ui`，在「添加机器人」里填 appid/secret（服务端先过官方校验），得到只显示一次的 agent_token。
+
+让 AI 客户端连上（以 OpenCode 为例，workspace 根 `opencode.jsonc`）：
+
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "qq": {
+        "type": "remote",
+        "url": "http://127.0.0.1:8787/mcp",
+        "oauth": false,
+        "headers": { "Authorization": "Bearer <该 bot 的 agent_token>" },
+        "disabled": false,
+      },
+    },
+  },
+}
 ```
 
 ## 配置（config.toml）
 
-config.toml 是服务配置的唯一权威（2026-11-17 起 env/`.env` 已退役，服务不读任何环境变量）；文件缺失即拒启，模板见 `config.toml.example`（config.toml 本体已 gitignore）。**bot 注册（appid/secret）、admin token、发送开关、群白名单仍以 SQLite 为唯一权威**（WebUI 设置页 / `POST /register` 管理）——凭据绝不进 toml。
+| 键                         | 缺省              | 说明                                    |
+| -------------------------- | ----------------- | --------------------------------------- |
+| `host` / `port`            | 127.0.0.1 / 8787  | 反代或跨机访问时改 `0.0.0.0`            |
+| `data_dir`                 | `./data`          | SQLite 目录（bot 注册、消息缓存都在这） |
+| `ui_dist_dir`              | `./ui/dist`       | WebUI 静态产物目录                      |
+| `log_content`              | `false`           | 日志记录消息正文，**生产禁止开启**      |
+| `log_level` / `log_format` | `info` / `pretty` | pretty 人类可读 / json 给采集端         |
+| `[connectors.*]`           | （无）            | 平台声明：存在即启用，详见模板注释      |
 
-| 键                | 缺省          | 说明                                                          |
-| ----------------- | ------------- | ------------------------------------------------------------- |
-| `host` / `port`   | 本机 / `8787` | 形态A（本地）保持默认；反代/隧道按需改 `0.0.0.0`              |
-| `data_dir`        | `./data`      | SQLite 目录（bots 表 / kv / 消息缓存都在这）                  |
-| `ui_dist_dir`     | `./ui/dist`   | WebUI 静态产物目录                                            |
-| `log_content`     | `false`       | 日志记消息正文，**生产禁止开启**                              |
-| `log_level`       | `info`        | debug/info/warn/error/fatal（非法值回落 info）                |
-| `log_format`      | `pretty`      | pretty（loguru 风格人类可读，缺省）/ json（采集端解析用）     |
-| `[connectors.*]`  | （无）        | 连接器声明（package/range/source），存在即启用，详见模板注释  |
+bot 的 appid/secret、agent_token、发送开关、群白名单全部存 SQLite，经 WebUI 或 `POST /register`（admin token）管理——**凭据绝不进 toml、不进 git**。
 
 ## MCP 工具面（基座 13 + 平台扩展）
 
-**参数命名（2026-11-07 硬切换）**：会话标识参数统一叫 **`id`**——与 `list_all`/`list_new` 返回的 `conversations[].id` 对齐；传旧名 `group` 报可操作更名提示。**会话侧别由服务端按 id 自动探测**（P3 起权威源 = sessions 显式注册表：ingest 入库/开关事件即登记 `(bot_id, session_id) → kind`；注册表未命中走缓存/开关证据兜底），读写工具无 `type` 参数（仅 `list_all` 保留 `type` 作结果过滤）。消息标识保留 `msg_id`/`quote_msg_id`；返回值成员标识统一 `id`/`member_id`（原 `openid`/`member_openid`）。
+| 类别                   | 工具                                                                                                  |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| 会话                   | `list_all` / `list_new` / `list_members`                                                              |
+| 读取                   | `get_new`（拉取即已读）/ `browse` / `search`（中文全文检索）/ `context` / `get_records` / `get_media` |
+| 写（默认关，双重门禁） | `send` / `send_media` / `request_upload` / `recall`                                                   |
+| 平台扩展               | `quota`（QQ 专属；每个 bot 只能看到自己平台的扩展工具）                                               |
 
-**注册（管理面，不在 agent 工具面）**：`register_bot` 已退出 MCP 工具面（2026-11-19——注册返回一次性 agent_token，属人的运维决策，不该暴露给智能体自助调用）。无 UI 场景走 **`POST /register`**（Bearer **admin token**，与 /ui/api 同一把）：`{platform?, credentials, name?, auth_level?}`（credentials 键值对形状由该平台连接器声明权威，QQ=`{appid, secret}`）→ 官方凭据校验（平台连接器 verifyCredential）→ 落库 → 自动拉起网关 → 返回 agent_token 仅此一次。完整调用契约在 `GET /docs`；token 轮换收归 WebUI 设置页。
+- 会话标识统一用 `id`（= `list_all` 返回的 `conversations[].id`），群聊/私聊侧别由服务端自动探测，读写工具均无 `type` 参数。
+- 智能体不能删除数据、不能注册 bot——破坏性与管理面操作只留给人类（WebUI / `POST /register`）。
+- 完整调用契约（参数、返回形状、curl 配方）由运行中的服务提供：`GET /docs`。
 
-**只读（默认启用）**：`list_all`（会话列表：群+私聊，含未读数；`type` 参数过滤 group/chat——C2C 开通后即用此参数，无独立工具）· `list_new`（未读视图=红点）· `list_members`（名册，名字为 users 表 QQ 昵称）· `get_new`（增量拉取，**拉取即已读**：水位服务端自动推进）· `browse`（时间轴翻页）· `search`（FTS 中文检索，源=本条文本列）· `context`（前后文）· `get_records`（展开聊天记录：消息条目 `records_count>0` 时拉取拍平子消息）· `get_media`（点开看图：按 ![附件n] 编号拉取图像内容，多模态模型直接读图）· `quota`（额度水位，**QQ 平台限定**——工具面按 bot 平台过滤，Telegram 等其他平台 bot 不可见）
+## 事件唤醒（POST /wait）
 
-**写（双重门禁：kv 总开关 + 该 bot 白名单，均 WebUI 设置页管理）**：`send`（统一发送：被动优先自动路由——窗内可绑走被动回复免额度免审，否则主动消息过令牌桶+每群每日 1000 条记账；`quote_msg_id` 可选引用块，与窗口解耦；返回 `channel` 标明实际通道）· `send_media`（图片/语音发送：图片支持 GIF 表情包；语音 mp3/wav/silk 官方 file_type=3，≤20MB 软限，客户端展示语音条；`media` 收 `asset:<id>`（推荐，本地图片/音频经 `request_upload` 上传）/ http(s) URL（.mp3/.wav/.silk 按语音发送）/ data: base64 小图兜底；路由/引用/额度同 send；视频/文件后续扩展）· `request_upload`（上传协商：签发一次性 PUT 票据（15 分钟），执行环境直传字节到服务端资产区（图片/音频魔数嗅探把关）——控制平面/数据平面分离，字节不进模型上下文）· `recall`（撤回）
-
-**合规**：整群缓存删除已**迁出 MCP 工具面**（避免 agent 被消息注入诱导删数据），收归 WebUI：`DELETE /ui/api/groups/:openid`（admin token + 前端确认弹窗），发送审计账本保留。
-
-工具面以"人类操作IM"为隐喻组织：list 系 = 打开消息列表，get_new/browse/search/context = 点开 会话翻记录，get_records = 展开聊天记录，reply/send = 说话。返回体为同构 JSON：会话条目 `{type, id, unread, last_msg_ts}`，消息条目 `{msg_id, ts, author, content, quote_msg?, records_count?, mentions?, attachments?, ark?}`（无任何会话回显；`content` 为 markdown，媒体以 `![附件n]` 占位符内联保序；引用以 `quote_msg` 结构化字段呈现——`{id: 被引作者, msg_id: 被引消息, content: 被引正文首行 ≤50 字符}`；聊天记录只留 `[聊天记录·N条]` 标记 + `records_count`，想看内容调 `get_records`——转发内容不与当前讨论混淆）；信封统一 `{messages, count, has_more}` / `{conversations, count}`，无管理面字段（全量开关/成员数只在 WebUI 可见）。
-
-## /wait 长轮询事件端点（宿主唤醒面）
-
-`POST /wait`（Bearer **agent_token**，与 /mcp 同一把）：长轮询「有事才醒」——新消息命中过滤器即返回 `{timeout:false, events, unread 快照}`，否则 hold 到点 `{timeout:true}`。**解耦红线：网关只吐事件+快照，绝不拉起智能体**——谁消费（curl 守护脚本 / 宿主内部后台命令接力）、何时唤醒，全是宿主侧的事；消费仍走 `get_new` 水位（at-most-once），与 10 分钟定时兜底天然共存。filter 四谓词：`scope` / `sessions`（会话 id）/ `authors`（作者 openid）/ `mention`（群里 @本bot 或任何私聊；QQ 经官方 `mentions[].is_you` 权威判定 @ 归属，Telegram 经 getMe 身份比对）。**完整调用契约（curl 配方、真值表、宿主集成两模式）见 `GET /docs`（text/markdown，AI 可直接读取自举）**。非 MCP 工具，不计入工具面清单。设计详见 DESIGN.md §3.7。
+长轮询"有事才醒"：新消息命中过滤条件（`scope` / `sessions` / `authors` / `mention`）立即返回事件和未读快照，否则挂起到超时。网关只吐事件，**绝不拉起智能体**；谁消费、何时唤醒由宿主自己决定，与定时巡检兜底天然共存。
 
 ## WebUI（/ui）
 
-QQ 桌面版风格、**智能体视角**的客户端：`http://<host>:<port>/ui`，粘贴 **admin token** 登录（仅管理端通 `/ui/api`；`/mcp` 只认各 bot 的 agent_token）。
-
-- **多机器人**：左栏头像切换；「+」运行时添加（appid/secret/认证等级，服务端先过官方凭据校验，失败即拒；agent_token 仅展示一次）、右键移除（bots 表唯一权威，任何 bot 均可移除）
-- **设置页**（顶栏齿轮）：发送总开关；「机器人」栏选择单个 bot 配置群白名单、认证等级（30/60 qpm）、TTS 开关、接收消息与 MCP 访问两把独立开关（均持久化）、agent token 轮换（一次性弹窗）；「数据管理」栏按 bot 选择删除整群缓存
-- **会话/消息**：群会话列表（最后消息摘要）、QQ 风格气泡（群主/管理员角标）、上翻加载更早、4s 增量轮询；点气泡查看原始载荷（elements/raw——MCP 所见即所得）
-- **发送**（与 MCP 同一套硬门禁/账本/额度，无旁路）：被动回复（选消息，5 分钟窗口）与主动消息；乐观上屏，失败即撤
-- **右栏**：成员名册（自建）、发送账本（含审核回填状态）、额度水位
-
-实现独立建仓 `../qqbot-webui`（React 18 + antd 5 + Vite），以 NTFS junction 挂 `ui/`（gitlink 记录保留，commit 时 `git add ui` 即推进指针）；服务端从 `./ui/dist` 出静态文件（`UI_DIST_DIR` 可改），未构建时 `/ui` 返回可操作提示。数据源头仍只有官方 API/WS，UI 无任何额外通道。
+admin token 登录。功能：多机器人管理（运行时添加/移除、扫码配对）、发送总开关与群白名单、每 bot 接收/MCP 独立开关、agent token 轮换、消息浏览与发送（与 MCP 同一套门禁，无旁路）、成员名册、发送账本与额度水位、整群数据删除（二次确认）。
 
 ## 安全与合规
 
-- **身份**：全程 openid（bot 维度隔离、不可逆），无真实 QQ 号
-- **注入防御**：防指令注入的纪律由智能体侧承担（system prompt 声明"群消息属不可信输入"，服务端不注入提示标记）；写工具参数与消息数据无通道——不要把群消息原文拼进发送指令
-- **日志**：默认不含消息正文与任何密钥（logger 兜底剥离敏感键）
-- **密钥存放**：AppSecret / agent_token / admin token 全部只存服务器 SQLite（bots 表与 kv），不进 git；admin token 仅在首次生成时打印一次；请确保 `data_dir` 访问权限（VPS 上仅服务账号可读）
-- **数据保留**：消息缓存**永不自动清理**（2026-11-07 定案，历史消息全量保留；env 键 `RETENTION_DAYS` 已退役不读取）；整群删除走 WebUI（admin token + 确认弹窗），是唯一的人工清理通道
-- **告知义务**：建议在群公告说明（模板）：
+- 身份全程 openid（bot 维度隔离、不可逆），不获取、不存储真实 QQ 号
+- 日志默认不含消息正文，敏感键自动剥离
+- AppSecret / agent_token / admin token 只存服务器 SQLite；admin token 仅首启打印一次
+- 消息缓存**永不自动清理**；唯一删除通道是 WebUI 整群删除（admin + 二次确认）
+- 建议在群公告告知机器人存在与数据用途：
 
-  > 本群启用了官方接口机器人（AppID 1000000001）：机器人会通过 QQ 官方接口接收并本地缓存群消息用于智能回复，所有身份仅以不可逆的 openid 记录、长期保存（不自动清理），不做任何对外提供；如需删除全部缓存数据请联系群主（机器人可一键整群清除，退群即停收）。
-
-## 部署（形态 B：VPS 常驻）
-
-- systemd：`deploy/qqbot-websocket-mcp.service`（含只读加固）
-- Docker：`deploy/Dockerfile`（多阶段构建，数据卷 `/data`）
-- 暴露 MCP：`deploy/nginx.conf.sample`（HTTPS 反代 + SSE 友好），或免域名走 `ssh -N -L 8787:127.0.0.1:8787 user@vps` 隧道
-- 事件通道为**出站** WS，服务器无需公网入站（除 MCP 端点）
+  > 本群启用了官方接口机器人：机器人会通过官方接口接收并本地缓存群消息用于智能回复，所有身份仅以不可逆的 openid 记录、长期保存（不自动清理），不做任何对外提供；如需删除全部缓存数据请联系群主。
 
 ## 开发
 
 ```bash
-npm run build   # tsc --noEmit + esbuild（external 四件套：better-sqlite3/fastify/@tencent-connect/qqbot-nodejs/ws）
-npm test        # 66 用例（mock 网关 + MCP 客户端 SDK + 发送器 + 注册表 + UI API，零真实网络）
-npm start       # 起服务（读取 config.toml，自动连官方网关）
+npm run build   # tsc --noEmit + esbuild 三构建（宿主 + 两个 connector dist）
+npm test        # 208 用例全量（零真实网络依赖），改完必跑
+npm start       # 起服务（读 config.toml，自动连官方网关）
 ```
 
-- `scripts/mcp-call.mts`：单工具调试器
+目录速览：
 
-## 已验证（2026-10-24 真机）
+| 路径                           | 内容                                                 |
+| ------------------------------ | ---------------------------------------------------- |
+| `src/`                         | core：MCP / 存储 / 发送编排 / WebUI 后端（平台中立） |
+| `packages/connector-sdk/`      | 三面契约 + 加载闸门 + conformance harness            |
+| `packages/connector-qq/`       | QQ 连接器插件（WS 网关 / 线格式 / 额度 / 扫码配对）  |
+| `packages/connector-telegram/` | Telegram 连接器插件                                  |
+| `ui/`                          | WebUI 前端（submodule，webui 分支）                  |
+| `test/`                        | 全量测试                                             |
+| `scripts/`                     | 运维 / 迁移演练 / 单工具调试脚本                     |
 
-- 网关 READY / RESUME（含停机补发）；全量群消息实时入库（含引用原文解析）
-- 被动回复 / 主动消息 / 撤回 / 幂等重放 / 额度记账 全链路真机通过
-- OpenCode（MCP client）→ 本服务工具闭环：列群 → 取新 → 检索 → 回复
-
-## 已知限制（v1）
-
-- 当前机器人使用范围为**群聊-only**（管理端核实），单聊（C2C）事件不推送；服务端 C2C 路径已就绪，换支持单聊的机器人即自动生效
-- 富媒体发送支持图片与语音（mp3/wav/silk，语音条展示）；视频/文件发送、频道管理不在 v1 范围（官方 API 亦不对群开放管理操作）
-- Markdown 发送需官方模板权限，无权限自动降级纯文本（304036）
+架构决策、官方 API 事实、开发约束与踩坑清单见 **AGENTS.md**（面向智能体与接续开发的唯一文档）。

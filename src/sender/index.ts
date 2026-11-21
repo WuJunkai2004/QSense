@@ -1,4 +1,4 @@
-// 发送器·策略半（DESIGN.md §3.5，P1 收口后）：被动窗口管理、msg_seq 幂等账本、
+// 发送器·策略半（P1 收口后形态）：被动窗口管理、msg_seq 幂等账本、
 // 通道自动路由（被动优先）、双重门禁、Markdown 无权限自动降级、人工审核
 // （304023/304024）pending 标记、官方错误码翻译、自发消息补记。
 //
@@ -30,7 +30,7 @@ import type { DB } from "../store/db";
 import type { Repo } from "../store/repo";
 import { describeSendError, extractBizCode } from "./errors";
 
-/** 被动回复窗口（API-FACTS #3，官方限制）：群 5 分钟/5 次；单聊 60 分钟/4 次 */
+/** 被动回复窗口（官方限制，见 AGENTS.md）：群 5 分钟/5 次；单聊 60 分钟/4 次 */
 export const PASSIVE_WINDOW = {
   group: { ms: 5 * 60_000, max: 5 },
   c2c: { ms: 60 * 60_000, max: 4 },
