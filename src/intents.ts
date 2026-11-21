@@ -1,4 +1,4 @@
-// 事件订阅 intent 掩码（数值依据官方 intents 文档，见 API-FACTS.md #6）。
+// 事件订阅 intent 掩码（数值依据官方 intents 文档，见 AGENTS.md「QQ 官方 API 关键事实」）。
 // 自 core/gateway/intents.ts 原样迁入。
 // 传递无权限的 intents 会被网关拒绝并断开（op 9 / 4914/4915），新增 intent 前先核对权限。
 

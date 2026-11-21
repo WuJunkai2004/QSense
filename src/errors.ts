@@ -1,5 +1,5 @@
 // QQ 发送错误语义面（SDK SendErrorSemantics，契约 v2.2.2）：官方错误码 →
-// core 中立词汇判定 + 包内可操作文案（API-FACTS.md #5）。2026-11-19 自
+// core 中立词汇判定 + 包内可操作文案（官方错误码事实见 AGENTS.md）。2026-11-19 自
 // core sender/errors.ts 下沉——core i18n 不再翻译 QQ 官方码，分仓文案自包含。
 // ApiError（官方 SDK）字段：httpStatus / path / bizCode? / bizMessage?；
 // 非 ApiError 一律走 core 通用兜底文案。
