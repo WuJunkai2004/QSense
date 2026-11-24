@@ -1,4 +1,4 @@
-// M1 验收（mock 网关端到端，不依赖真实QQ消息）——P1 收口后经 connector-qq 实例 + core 运行时：
+// 网关验收（mock 网关端到端，不依赖真实 QQ 消息）——经 connector-qq 实例 + core 运行时：
 // 1. IDENTIFY 携带 "QQBot {token}" 与本项目 intents，READY 后会话持久化到 kv
 // 2. 心跳携带最新 s 并收 ACK
 // 3. dispatch 事件经 core ingest 管线上行（去重→入库）+ 消息级 id 去重
@@ -31,7 +31,7 @@ import { MockGateway } from "./helpers/mock-gateway";
 const sleep = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
 
-/** tap 观测点的消息拍平（契约 v2：tap 收 {messages, effects}，重复事件消息被滤空） */
+/** tap 观测点的消息拍平（tap 收 {messages, effects}，重复事件消息被滤空） */
 const flatMsgs = (
   captured: Array<{ messages: NormalizedMessage[] }>,
 ): NormalizedMessage[] => captured.flatMap((c) => c.messages);
@@ -70,7 +70,7 @@ async function setup(
   const gw = new MockGateway({ heartbeatIntervalMs: 40, ...opts });
   await gw.listen();
 
-  // M9：无 config 回落——bot 经注册表入表后由运行时连接
+  // bot 经注册表入表后由运行时连接
   const registry = new BotRegistry({ db });
   await registry.add({
     credentials: { appid: "10001", secret: "secret-value" },
@@ -160,7 +160,7 @@ test("M1-1 IDENTIFY 携带 QQBot token 与本项目 intents；READY 后会话持
     );
     assert.equal(id.intents, (1 << 25) | (1 << 27));
 
-    // P3：StatePort 物理键统一 connector:{platform}:{botId}:{key}（v12 已平移旧键）
+    // StatePort 物理键统一为 connector:{platform}:{botId}:{key}
     const row = ctx.db
       .prepare("SELECT v FROM kv WHERE k = 'connector:qq:10001:gw:session'")
       .get() as { v: string };

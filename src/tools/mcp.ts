@@ -30,7 +30,7 @@ import { TOOLS, runTool, type ToolCallResult } from "./defs";
 export interface McpDeps {
   log: Logger;
   repo: Repo;
-  /** M4 发送器：写工具走这里；缺省=写工具硬拒绝 */
+  /** 发送器：写工具走这里；缺省=写工具硬拒绝 */
   sender?: Sender;
   /** 机器人注册表（bots 表域层）：注册/轮换/白名单解析 */
   bots?: BotRegistry;
@@ -38,10 +38,11 @@ export interface McpDeps {
   assets?: import("../assets").AssetStore;
   /** agent_token 反查（request_upload 票据密钥取自绑定 bot 的 agent_token）；缺省=票据不可签发 */
   agentTokenOf?: (botId: string) => string | null;
-  /** MCP 工具执行全局并发上限（M6 限流）：SQLite 同步查询毫秒级、写工具 API 调用秒级，8 足够且防打爆 */
+  /** MCP 工具执行全局并发上限：SQLite 同步查询毫秒级、写工具 API 调用秒级，
+   * 默认 8 足以覆盖单用户场景并防止过载。 */
   maxConcurrent?: number;
   version: string;
-  /** 平台插件声明面注册表（P1 收口）：扩展工具经 ToolRouter 聚合；缺省=仅基座 13 */
+  /** 平台插件声明面注册表：扩展工具经 ToolRouter 聚合；缺省=仅基座 13 */
   plugins?: ConnectorRegistry;
   /** 插件工具上下面解析（host+config 按 bot）；缺省=插件工具不可用 */
   pluginContext?: (
@@ -85,8 +86,8 @@ function rpcError(
   });
 }
 
-/** MCP 传输层入口的请求体形参类型（库签名提取——协议面任意 JSON-RPC 消息
- * 原样透传给 transport，本层不解构；types.md 反模式 #6 的 Parameters<> 用法） */
+/** MCP 传输层入口的请求体形参类型（从库签名提取）。协议面的 JSON-RPC 消息
+ * 原样透传给 transport，本层不解构。 */
 type McpRequestBody = Parameters<
   StreamableHTTPServerTransport["handleRequest"]
 >[2];
@@ -107,14 +108,14 @@ export function createMcpHandler(
   interface Session {
     server: Server;
     transport: StreamableHTTPServerTransport;
-    /** M8：会话与 bot 绑定（token→bot 在 HTTP 层解析，initialize 时落定） */
+    /** 会话与 bot 绑定（token→bot 在 HTTP 层解析，initialize 时落定） */
     botId: string;
     /** initialize 请求的 Host（upload_url 拼接用；会话期内通常不变） */
     baseUrl: string;
   }
   const sessions = new Map<string, Session>();
 
-  // 工具路由（P1 收口 → P5 跨平台过滤，2026-11-17）：基座 13（保留名）+ 该 bot
+  // 工具路由：基座 13（保留名）+ 该 bot
   // 平台的插件声明扩展。同一服务多平台 bot 并存时，每个 bot 的工具面只含本平台
   // 扩展工具（Telegram bot 看不到 QQ 的 quota——平台语义隔离是工具面结构性的，
   // 不靠调用时报错兜底）。bot 的 platform 不可变（bots 表），会话期内路由表稳定。
@@ -169,9 +170,9 @@ export function createMcpHandler(
     }));
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const name = req.params.name;
-      // MCP SDK 的 params.arguments 已是 Record<string, unknown> | undefined——协议线格式边界
+      // MCP 参数在协议边界统一转为 JSON 文本，交给工具工厂内各自的 schema 校验
       const args = req.params.arguments ?? {};
-      // M6 限流：全局并发上限（单用户场景够用），超限快速失败不排队
+      // 全局并发上限（单用户场景够用），超限快速失败不排队
       if (active >= maxConcurrent) {
         mcpLog.warn("tool call rejected (busy)", { tool: name, active });
         return {

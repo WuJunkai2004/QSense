@@ -1,6 +1,5 @@
-// 历史回放验收（B⁺ T2，2026-11-24）：对生产库全量 raw_json 重演
-// 「normalize → UnifiedMessageSchema safeParse」，验证 zod 网关对存量数据零违规
-// ——enforce 的安全前提（复用迁移 v8 raw_json 历史重演先例）。
+// 历史回放验收：对生产库全量 raw_json 重演「normalize → UnifiedMessageSchema
+// safeParse」，验证 zod 网关对存量数据零违规。
 //
 // 用法：npx tsx scripts/replay-normalize.mts [数据库路径]（默认 data/qqbot.db）
 //   只读打开（readonly），不干扰运行中的服务。退出码：违规>0 → 1。

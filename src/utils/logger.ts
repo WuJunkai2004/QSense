@@ -2,9 +2,8 @@
 // - pretty（缺省）：loguru 风格人类可读行，TTY 下带 ANSI 着色（NO_COLOR/FORCE_COLOR 可控）
 // - json：结构化 JSON 行，供 journald / Docker 等采集端解析（部署环境显式 LOG_FORMAT=json）
 // 硬约束「日志不得泄露消息正文」：除调用侧纪律外，这里对敏感键做兜底剥离，
-// 命中即替换为 [REDACTED]。敏感键清单随里程碑扩充（messages 表字段为准）。
-// B⁺ T6（2026-11-24 用户定案）：fields 值域 = 平面基元联合（调用侧全量调查实证）——
-// 不是递归万能字典；结构化信息请调用侧自行摘要成字符串。
+// 命中即替换为 [REDACTED]。敏感键清单以 messages 表字段为准。
+// 结构化字段只承载平面基元值；嵌套信息由调用侧摘要成字符串后再记录。
 
 export type Level = "debug" | "info" | "warn" | "error" | "fatal";
 export type LogFormat = "pretty" | "json";

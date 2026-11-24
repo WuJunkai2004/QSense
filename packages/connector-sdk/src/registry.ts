@@ -1,6 +1,6 @@
 // 宿主侧 ConnectorRegistry：插件注册表。
-// P0：进程内 register（QQ 本地注册先声后形）。
-// P2：loadModule(spec) 动态 import 分仓包默认导出 → validatePlugin → register。
+// 注册：进程内维护插件声明面。
+// 加载：loadModule(spec) 动态 import 分仓包默认导出 → validatePlugin → register。
 
 import { validatePlugin } from "./gates";
 import { z } from "zod";
@@ -68,12 +68,9 @@ export class ConnectorRegistry {
 }
 
 /**
- * P2 分仓加载：动态 import 插件包默认导出 → （工厂则注入 init 执行）→
+ * 分仓加载：动态 import 插件包默认导出 → （工厂则注入 init 执行）→
  * validatePlugin（含 sdkRange 校验）→ 返回声明面。
- * 加载失败 / 非法声明 / sdkRange 不兼容都以可操作错误抛出。
- *
- * B⁺ T6：动态 import 边界的不可信形状用 zod custom 收口（函数/对象二值判定，
- * 深层校验仍归 validatePlugin 的运行时防线）——加载产物进入本包后即有具体类型。
+ * 加载失败、非法声明或 sdkRange 不兼容都以可操作错误抛出。
  */
 const PluginDefaultSchema = z.custom<ConnectorPlugin | ConnectorPluginFactory>(
   (v) => v !== null && (typeof v === "object" || typeof v === "function"),
@@ -83,9 +80,9 @@ export async function loadModule(
   spec: string,
   init?: PluginModuleInit,
 ): Promise<ConnectorPlugin> {
-  // 动态 import 边界的不可信形状用 zod custom 收口（函数/对象二值判定，深层
-  // 校验仍归 validatePlugin 的运行时防线）——加载产物进入本包后即有具体类型。
-  // import 失败 / 缺默认导出 / 非（对象|工厂）默认导出均以可操作错误抛出。
+  // 动态 import 边界的不可信形状先用 zod custom 收口（函数/对象二值判定），
+  // 深层校验归 validatePlugin。import 失败、缺默认导出或默认导出既非对象也非
+  // 工厂时，均以可操作错误抛出。
   const gate = await import(/* webpackIgnore: true */ spec)
     .then((mod) => z.object({ default: PluginDefaultSchema }).safeParse(mod))
     .catch((e) => {

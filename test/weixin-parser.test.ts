@@ -1,4 +1,4 @@
-// 微信 parser + ingest 管线测试（P4；契约 v2：parser 归 connector-weixin 包）：
+// 微信 parser + ingest 管线测试（parser 归 connector-weixin）：
 // WeixinMessage → NormalizedMessage 映射形状、富化图落附件 url、各类媒体的占位约定、
 // 引用快照 / ID-only 引用的正文线索 / 被引媒体归属 / 局部引用、非消费面丢弃、
 // 私聊 opt-in 等价映射；入库路径走真管线（表驱动路由 → 插件 normalize → 效应落地 → 引用懒补）。
@@ -375,7 +375,7 @@ test("parser：非消费面 → null（机器人回声/群消息/已删除/无�
     normalizeWeixinMessage(BOT, payloadOf(textMsg({ message_id: undefined, client_id: undefined }))),
     null,
   );
-  // B⁺ T5：信封形状归声明面 schema 把关（safeParse 失败 = 可观测丢弃 + warn）。
+  // 信封形状由声明面 schema 把关（safeParse 失败 = 可观测丢弃 + warn）。
   // 非 object / 错平台信封经 JSON.parse 边界进入（模拟动态形状）。
   const plugin = createWeixinConnector();
   assert.equal(

@@ -1,5 +1,5 @@
-// M0 验收：结构化日志——级别过滤 + 敏感字段兜底剥离。
-// B⁺ T6：fields 值域 = 平面基元联合（调用侧全量调查实证），redact 顶层整键替换。
+// 结构化日志验收：级别过滤 + 敏感字段兜底剥离。
+// fields 值域为平面基元联合；redact 做顶层整键替换。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

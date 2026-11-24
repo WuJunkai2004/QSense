@@ -1,25 +1,17 @@
-// MCP 工具面定义：以"人类操作IM"为隐喻组织——
+// MCP 工具面定义：以「人类操作 IM」为隐喻组织——
 //   列表层 list_all/list_new（消息列表视角；list_all 的 type 参数作结果过滤）→
 //   读取层 get_new/browse/search/context（会话侧别由 id 自动探测，repo.detectSessionKind）→
 //   名册 list_members →
 //   写工具 send/send_media/request_upload/recall（双重门禁）。
-// P1 收口（2026-11-15）：基座恒定 14 工具；quota 等平台扩展工具由连接器插件声明
-// （QQ=connector-qq 的 quota 工具），经 ToolRouter 在 MCP 层聚合，名单不变（14+1=15）。
-// 基座 13（2026-11-19）：register_bot 退出 MCP 工具面——注册是管理面操作（返回
-// 一次性 agent_token），不该暴露给 agent；无 UI 场景改走 HTTP POST /register
-// （admin 鉴权，与 /ui/api 同源），/docs 有完整调用契约。
-// 已读水位（拉取即已读）与整群删除（原 forget，迁 WebUI）为服务端内部状态/管理操作，不在 agent 工具面。
-// token 轮换收归 WebUI（2026-10-27 工具面缩窄）：调用即自毁凭证且新值落进对话上下文，属人的运维决策。
-// 写工具经 Sender（真实官方API）：发送总开关（SQLite）开启且群在该 bot allow_groups 内才生效，否则硬拒绝。
-// 多机器人：token 绑定制，一个 agent_token 只属于一个 bot；
-// `bot` 参数已全工具面退役（绑定关系在 HTTP 层 Bearer→bot 完成，agent 无需感知 bot 维度）。
+// 基座工具面恒为 13 个；注册、token 轮换、已读水位与整群删除属于管理面，不经 MCP 暴露。
+// quota 等平台扩展工具由连接器声明，经 ToolRouter 在 MCP 层聚合。
+// 写工具经 Sender 调用官方 API：发送总开关开启且目标群在 allow_groups 内才生效，否则硬拒绝。
+// 多机器人采用 token 绑定：一个 agent_token 只属于一个 bot，绑定关系在 HTTP Bearer 鉴权时完成。
 //
-// B⁺ T6（2026-11-24）：defineTool 泛型工厂（与 SDK pluginTool 同型的控制反转）——
-// 每工具 zod 入参 schema → 类型化 run；A（args 类型）在工厂闭包内绑定，统一 ToolDef
-// 面（call(rawArgs: string | undefined)）非泛型，core（mcp.ts/runTool）只喂 JSON 文本。
-// inputSchema 用 SDK JsonSchema 具体子集（协议面 JSON Schema 声明）；工具输出为逐工具
-// 具体 interface（整体 JSON.stringify 进 MCP text 块）。错误分层：JSON 语法坏 ≠ schema
-// 形状违规 ≠ 业务检查失败（ToolError 文案是测试断言锚点，原样保留）。
+// defineTool 是工具面的控制反转工厂：每工具用 zod 入参 schema 生成类型化 run，
+// 统一 ToolDef 面只接收 JSON 文本。inputSchema 是 MCP 协议面的 JSON Schema 声明；
+// 输出为逐工具具体 interface，整体序列化为 MCP text 块。错误分层：JSON 语法错误、
+// schema 形状违规、业务检查失败（ToolError）各自返回可操作文案。
 
 import type { BotRegistry } from "../bots";
 import type { Sender, SendResult } from "../sender";
@@ -148,7 +140,7 @@ interface RecallOut {
   recalled: string;
 }
 
-/** 工具 JSON 输出闭集联合（新增输出形状在此登记；具体形状，非万能字典） */
+/** 工具 JSON 输出闭集联合；新增输出形状必须在此登记 */
 type ToolRunOut =
   | ConversationsOut
   | MembersOut
@@ -160,11 +152,11 @@ type ToolRunOut =
 
 export interface ToolContext {
   repo: Repo;
-  /** M4 发送器：写工具必需；缺省=发送功能未装配，硬拒绝 */
+  /** 发送器：写工具必需；缺省=发送功能未装配，硬拒绝 */
   sender?: Sender;
   /** 机器人注册表（bots 表域层：注册/轮换/白名单） */
   bots?: BotRegistry;
-  /** M8：本请求 Bearer token 绑定的 bot（一个 token 只属一个 bot）；缺省=未认证 */
+  /** 本请求 Bearer token 绑定的 bot（一个 token 只属一个 bot）；缺省=未认证 */
   botId?: string;
   /** 资产存储（request_upload 票据签发 / send_media asset: 引用）；缺省=未装配 */
   assets?: import("../assets").AssetStore;
@@ -185,11 +177,10 @@ interface ToolDef {
 }
 
 /**
- * 基座工具工厂（B⁺ T6 控制反转，与 SDK pluginTool 同型）：每工具 zod 入参
- * schema → 类型化 run。A 在工厂闭包内解析绑定；core 不经手具体 args 类型。
- * 错误分层（types.md §四.2）：JSON 语法坏 → 专属文案（不回显原文）；schema 形状
- * 违规 → isError + formatZodIssues（点名字段路径）；run 内业务检查 → ToolError
- * 文案原样透传（测试断言锚点）。
+ * 基座工具工厂（与 SDK pluginTool 同型）：每工具用 zod 入参 schema 生成类型化
+ * run。A 在工厂闭包内绑定，调用面只接收 JSON 文本，core 不经手具体 args 类型。
+ * 错误分层：JSON 语法错误 → 专属文案（不回显原文）；schema 形状违规 → isError +
+ * formatZodIssues（点名字段路径）；run 内业务检查 → ToolError 文案原样透传。
  */
 function defineTool<A>(decl: {
   name: string;
@@ -256,7 +247,7 @@ function defineTool<A>(decl: {
 
 // —— 参数校验（schema 声明结构 + handler 业务检查，错误可操作） ——
 
-/** 必填字符串（schema 声明面）：缺失/非字符串/trim 空串 → 可操作文案（旧 str() 锚点） */
+/** 必填字符串（schema 声明面）：缺失/非字符串/trim 空串 → 可操作文案 */
 function requiredStr(key: string, what: string) {
   const msg = `参数 ${key} 缺失或非字符串：需要 ${what}。`;
   return z
@@ -265,7 +256,7 @@ function requiredStr(key: string, what: string) {
     .refine((s) => s !== "", msg);
 }
 
-/** 可选字符串归一（handler 侧）：trim；空串/null → undefined（旧 optStr 语义） */
+/** 可选字符串归一（handler 侧）：trim；空串/null → undefined */
 function optStrArg(v: string | null | undefined): string | undefined {
   const t = v?.trim();
   return t === undefined || t === "" ? undefined : t;
@@ -287,7 +278,7 @@ function requiredStrValue(
 /** 可选整数 wire 容错面：数字或数字串皆可（LLM 客户端礼貌容错），转换/范围归 intArg */
 const intWire = z.union([z.number(), z.string()]).nullish();
 
-/** 可选整数（handler 侧）：空/缺省→fallback；越界/非整数→ToolError（旧 optInt 文案不变） */
+/** 可选整数（handler 侧）：空/缺省→fallback；越界/非整数→ToolError */
 function intArg(
   v: number | string | null | undefined,
   key: string,
@@ -305,7 +296,7 @@ function intArg(
   return n;
 }
 
-/** 会话类型过滤（schema 声明面）：词表外 → 可操作文案（旧 optType 锚点） */
+/** 会话类型过滤（schema 声明面）：词表外 → 可操作文案 */
 const typeArgSchema = z.enum(["chat", "group", "all"], {
   error: (iss) => `参数 type 只接受 chat/group/all，收到：${String(iss.input)}。`,
 });
@@ -324,7 +315,7 @@ const sessionArgs = {
 
 /**
  * bot 解析：token 绑定制——一个 agent_token 只属于一个 bot，工具作用域即该 bot。
- * `bot` 参数已退役：绑定关系在 HTTP 层 Bearer→bot 完成。
+ * 工具不接收 bot 参数，绑定关系在 HTTP Bearer 鉴权层完成。
  */
 function resolveBotId(ctx: ToolContext): string {
   if (ctx.botId === undefined) {
@@ -343,10 +334,9 @@ function requireSender(ctx: ToolContext): Sender {
   return ctx.sender;
 }
 
-/** MCP 面瘦身（2026-11-24）：SendResult 只回模型有用的字段。channel（被动|主动）
- * 与 msg_seq 是 core 记账语义（窗口/额度内务）——模型无法基于它们做任何决策，
- * 对扮演无帮助，属上下文噪音；人类调试面在 WebUI sends 列表（kind/msg_seq 列）。
- * status 保留：pending_audit（勿重发）/ downgraded / replayed 影响 AI 下一步行动。 */
+/** SendResult 只向模型返回有用字段。channel（被动|主动）与 msg_seq 属于 core
+ * 记账内务，模型无法据此做决策；人类调试面在 WebUI sends 列表。保留 status：
+ * pending_audit（勿重发）/ downgraded / replayed 会影响 AI 的下一步行动。 */
 function sendResultForModel(
   r: SendResult,
 ): Pick<SendResult, "status" | "provider_msg_id" | "detail"> {
@@ -365,7 +355,7 @@ function sendResultForModel(
 // 发送侧本地补记），读取层据此标 author.role="yourself" ——
 
 function msgOut(repo: Repo, botId: string, row: MsgRow): MessageOut {
-  // author.name 一律 users 最新 QQ 昵称（2026-11-08 定案：改名后旧消息也跟着变）；行快照兜底
+  // author.name 一律取 users 表当前昵称（改名后历史消息同步展示新名）；行内快照兜底
   const authorName =
     (row.author_openid !== null
       ? repo.userNameOf(botId, row.author_openid)
@@ -393,7 +383,7 @@ function msgOut(repo: Repo, botId: string, row: MsgRow): MessageOut {
   }
   if (row.records_count > 0) out.records_count = row.records_count;
   if (row.mentions_json) {
-    // B⁺ T6：mentions_json 过 SDK MentionSchema（入库源即该形状）；坏档按缺失
+    // mentions_json 用 SDK MentionSchema 解析（入库源即该形状）；坏档按缺失处理
     const m = parseJsonWith(z.array(MentionSchema), row.mentions_json);
     if (m !== null) {
       // mention 矫正：官方 username 是群昵称（一人多群昵称必混乱），一律以 users QQ 昵称为准
@@ -455,11 +445,9 @@ function isoTs(ts: number | null | undefined): string | null {
 }
 
 /**
- * 会话标识取参（全工具面统一）。原参数名 group 在单聊（C2C）成为一等公民后更名 id——
- * 与 list_all/list_new 返回值 conversations[].id 对齐；传旧名 group 未传 id 时给
- * 可操作的更名提示，存量调用模式（含模型上下文里的旧示例）可立即自愈。
- * 顺序保留（2026-11-24 schema 化时定案）：更名提示优先于缺参报错——id 留在
- * resolveSession 里运行时校验，不进 schema 必填面。
+ * 会话标识取参（全工具面统一）：参数名 id 与 list_all/list_new 返回的
+ * conversations[].id 对齐。传入兼容名 group 时返回可操作提示；该提示优先于缺参
+ * 报错，因此 id 在 resolveSession 内做运行时校验，不设为 schema 必填字段。
  */
 function resolveSession(
   ctx: ToolContext,
@@ -486,10 +474,9 @@ function cursorKeyOf(kind: "group" | "chat", scopeId: string): string {
 }
 
 /**
- * 会话侧别自动探测（读写工具的 type 参数已退役——id 从 list_all/list_new 拿，
- * 返回条目自带类型，调用方再传一遍是冗余）：P3 起权威源 = sessions 显式注册表
- * （不依赖「命名空间互斥」的平台保证）；注册表未命中走缓存/白名单兜底，
- * 均未命中给可操作错误。
+ * 会话侧别自动探测：id 来自 list_all/list_new，工具无需再接收 type 参数。
+ * 权威源是 sessions 显式注册表，不依赖「群与用户 openid 命名空间互斥」的平台
+ * 假设；注册表未命中时走缓存/白名单兜底，均未命中返回可操作错误。
  */
 function detectKind(
   ctx: ToolContext,
@@ -854,7 +841,7 @@ export const TOOLS: ToolDef[] = [
             text: r.text,
           };
           if (r.quote_json !== null) {
-            // B⁺ T6：子行引用过 SDK QuoteSchema（入库源即该形状）；坏档按缺失
+            // 子行引用用 SDK QuoteSchema 解析（入库源即该形状）；坏档按缺失处理
             const q = parseJsonWith(QuoteSchema, r.quote_json);
             if (q !== null) {
               const ref = ctx.repo.resolveQuoteRef(botId, kind, scopeId, q);
@@ -955,7 +942,7 @@ export const TOOLS: ToolDef[] = [
       );
     },
   }),
-  // —— M4 写工具（发送总开关 + 会话级条件双门禁，均 WebUI 设置页管理） ——
+  // —— 写工具（发送总开关 + 会话级条件双门禁，均 WebUI 设置页管理） ——
   defineTool({
     name: "send",
     description:

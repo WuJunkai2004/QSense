@@ -1,15 +1,14 @@
-// NetKit——协议无关的传输机械层（B⁺ T3，2026-11-24）。接口红线：只含机械，
-// 任何平台名/平台语义的参数进不来（评审卡死）；策略由插件定（backoff 封顶、
-// fatal 判定、游标推进），机械归 NetKit（超时/中止/重试/节流/物化/嗅探/休眠）。
+// NetKit——协议无关的传输机械层。接口红线：只含机械，不接收平台名或平台语义；
+// 策略由插件决定（backoff 封顶、fatal 判定、游标推进），机械由 NetKit 提供
+// （超时/中止/重试/节流/物化/嗅探/休眠）。
 //
-// 打包形态（T3-D2 定案 A）：本文件随宿主 bundle + 连接器 dist bundle——
-// NetError 跨包副本 instanceof 不成立（踩坑 20 同源教训），统一用 isNetError
-// 鸭子判定。连接器对 SDK 的值导入自此允许（类型照旧 type-only 照旧）。
+// 本文件同时进入宿主 bundle 与各连接器的 dist bundle，跨包副本的 NetError
+// instanceof 不成立，因此统一用 isNetError 做鸭子类型判定。连接器可以值导入
+// SDK；各包仍应保持类型导入优先。
 //
-// 驱动族（T3-D1 定案）：按需建员，不预建目录。longPoll 是唯一有真实用户的
-// 成员（tg/wx）；net.ws（QQ 走官方 SDK 权威）与 webhook 接收器留槽不建。
-// 驱动自有不变量（平台不可覆盖）：批次全部摄取完成才推进游标（至少一次，
-// core 去重兜底）、失败指数退避、定时器一律 unref、abort 即时生效。
+// 驱动族按需增加。当前 longPoll 用于 tg/wx；QQ 的 WS 生命周期由官方 SDK 管理，
+// 不另建 net.ws。驱动不变量（平台不可覆盖）：批次全部摄取完成才推进游标
+// （至少一次，core 去重兜底）、失败指数退避、定时器一律 unref、abort 即时生效。
 
 import type { ZodType } from "zod";
 import type { MediaSourceWire } from "./types";
@@ -497,7 +496,7 @@ export async function longPoll<C, I>(
       // 失败即降级（退避重试中）——平台把 degraded 映射到 host.reportStatus
       // disconnected（tg/wx 现行逐次上报语义，驱动统一承担）
       spec.onState?.("degraded");
-      // wx 语义（连败 ≥ 阈值且带旧游标 → 游标可能已失效）：清游标重拉；
+      // wx 语义（连败 ≥ 阈值且游标非空 → 游标可能已失效）：清游标重拉；
       // 至少一次语义由 core 按 msg_id 去重兜底。清游标分支同样退避（防忙转）
       if (spec.resetCursor !== undefined && failures >= maxFailures) {
         await spec.resetCursor();

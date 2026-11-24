@@ -1,4 +1,4 @@
-// M4-17 验收：资产上传（控制平面/数据平面分离）——
+// 资产上传验收（控制平面/数据平面分离）——
 // request_upload 票据签发（HMAC 按 bot agent_token 派生、15 分钟、单次使用）→
 // PUT /assets/{botId}/{assetId} 直传落盘（魔数嗅探/超限/篡改/过期/重放）→
 // send_media asset:<id> 引用闭环（服务端读文件走 uploadMedia localPath）。
@@ -52,7 +52,7 @@ function setupFx(): Fixture {
   const db = openDatabase(dir);
   runMigrations(db, migrations);
   const repo = new Repo(db);
-  // M9：无 env 播种——基座 bot 直接入 bots 表（白名单含 GROUP），发送开关置 true
+  // 基座 bot 直接入 bots 表（白名单含 GROUP），发送开关置 true
   db.prepare(
     `INSERT INTO bots(appid, name, secret, agent_token, allow_groups, auth_level, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -262,7 +262,7 @@ test("M4-17 PUT 数据端点：成功落盘/魔数拒绝/签名篡改/过期/重
   }
 });
 
-// —— M10 语音扩展：音频魔数嗅探 + 语音资产闭环（asset: → file_type=3） ——
+// —— 语音扩展：音频魔数嗅探 + 语音资产闭环（asset: → file_type=3） ——
 
 // 最小 mp3 仿制：ID3v2 头 + 裸 MPEG 帧同步字 + 数据体
 const MP3_BYTES = Buffer.concat([

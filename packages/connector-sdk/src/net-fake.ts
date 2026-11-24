@@ -1,18 +1,15 @@
-// FakeNetKit——测试驱动权的落点（B⁺ T3）：脚本化假端点 + 请求记录断言 + 手动时钟。
-// 连接器包内不再自持 overrides.fetch / 假端点管道——全部经 PluginContext.net 注入
-// 本假件驱动（连接器测试「先 build 再跑」纪律不变，踩坑 23）。
+// FakeNetKit——测试驱动入口：脚本化假端点 + 请求记录断言 + 手动时钟。
+// 连接器测试经 PluginContext.net 注入本假件，不自行持有 fetch overrides 或
+// 假端点管道。修改连接器源码后仍需先构建再运行测试。
 //
 // 设计口径：
-// - http：路由（URL 前缀或谓词）→ 应答（全局 Response，与真 fetch 返回类型统一；
-//   JSON 体由测试侧 JSON.stringify 显式序列化，Error 直接抛）；全部请求记录进
-//   requests 供断言（url/method/headers/body/fake 时钟）
-// - 时钟：手动游标（tick 推进）；sleep 立即返回并推进时钟（退避循环测试不真睡）
-// - throttle：立即通过（节流时序的验证归真 NetKit 单测，不在假件语义内）
-// - backoff / sniffMime / longPoll：真实现（纯机械或由测试供给 spec 驱动）
-// - materialize：url 源走脚本表（file()/fileError() 注册）；b64/file 源走真实现
-//
-// B⁺ T6：脚本应答不再用自定义 FakeReply 形状——直接产全局 Response（具体类型），
-// 「这是 JSON 文本」在测试侧显式（JSON.stringify），假件零自定义弱类型。
+// - http：路由（URL 前缀或谓词）→ 应答。使用全局 Response，与真 fetch 返回类型
+//   一致；JSON 体由测试侧 JSON.stringify 显式序列化，Error 直接抛出。全部请求
+//   记录进 requests 供断言（url/method/headers/body/fake 时钟）。
+// - 时钟：手动游标（tick 推进）；sleep 立即返回并推进时钟（退避循环不真睡）。
+// - throttle：立即通过（节流时序由真 NetKit 单测验证）。
+// - backoff / sniffMime / longPoll：真实现（纯机械或由测试供给 spec 驱动）。
+// - materialize：url 源走脚本表（file()/fileError() 注册）；b64/file 源走真实现。
 
 import {
   type BackoffController,

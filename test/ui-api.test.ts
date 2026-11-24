@@ -1,4 +1,4 @@
-// M7 验收（WebUI API）：/ui 静态托管（未构建 503 / 正常 / 防目录穿越）、/ui/api 鉴权、
+// WebUI API 验收：/ui 静态托管（未构建 503 / 正常 / 防目录穿越）、/ui/api 鉴权、
 // bootstrap/groups/messages 分页与增量/message 详情/members/sends/quota、
 // 运行时添加移除 bot（联动 supervisor 与 token/会话清理）、发送端点与门禁。
 
@@ -101,7 +101,7 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
     repo.setGroupSwitch(BOT, GROUP, true);
   }
 
-  // M9：注册制台架——admin token 固定为 TOKEN（鉴权用），基座 bot 入表，发送开关走库
+  // 注册制台架：admin token 固定为 TOKEN（鉴权用），基座 bot 入表，发送开关走库
   repo.ensureRuntime();
   repo.setAdminToken(TOKEN);
   repo.setSendEnable(true);
@@ -252,8 +252,8 @@ test("M7-U3 bootstrap：bots 含来源/网关状态，发送与白名单口径�
     };
     assert.equal(body.version, "0.2.0");
     assert.equal(body.send_enabled, true);
-    // M8：白名单按 bot 落库（bots 表），不再是顶层全局字段；M9：含 auth_level；
-    // TTS（kv 开关）：bootstrap 带 tts_enabled（缺省 false）
+    // 白名单按 bot 落库（bots 表），bootstrap 同时返回 auth_level 与 tts_enabled
+    //（TTS 开关在 kv，缺省 false）
     assert.deepEqual(body.bots, [
       {
         appid: BOT,
@@ -423,7 +423,7 @@ test("M7-U8 移除 bot：不存在 → 400（不在注册表）；存在 → 200
       headers: h,
       body: JSON.stringify({ appid: "20002", secret: "s2" }),
     });
-    // M8：bots 表是唯一权威——删除不存在的 appid → 400（env 基座概念已废除）
+    // bots 表是唯一权威——删除不存在的 appid → 400
     const missing = await fetch(`${fx.baseUrl}/ui/api/bots/99999`, {
       method: "DELETE",
       headers: authHeaders(), // DELETE 无 body：不能带 json Content-Type（Fastify 会因空体报 400）
@@ -698,7 +698,7 @@ test("M7-U11 connectors 声明端点：平台声明面（caps/credentialSchema/l
     const qq = body.connectors.find((c) => c.id === "qq");
     assert.ok(qq !== undefined, "QQ 平台声明应在列");
     assert.equal(qq.title, "QQ 官方机器人");
-    // credentialSchema 驱动「添加机器人」表单（P2 前端消费的字段源）
+    // credentialSchema 驱动「添加机器人」表单（前端字段来源）
     assert.deepEqual(qq.credential_schema.required, ["appid", "secret"]);
     assert.ok(qq.credential_schema.properties["appid"] !== undefined);
     assert.deepEqual(qq.credential_secrets, ["secret"]);
@@ -737,7 +737,7 @@ test("M7-U10 quota：水位与令牌桶快照", async () => {
   }
 });
 
-// —— M10 单聊（C2C）：WebUI 会话合并 / 统一消息读取 / 发送与补记 ——
+// —— 单聊（C2C）：WebUI 会话合并 / 统一消息读取 / 发送与补记 ——
 
 test("M10 UI 单聊：type=all 合并会话（名字=users 权威）+ type=chat 统一读取 + 发送走 chat scope", async () => {
   const fx = await setupServer();
@@ -866,7 +866,7 @@ test("M10 UI 单聊：type=all 合并会话（名字=users 权威）+ type=chat 
   }
 });
 
-// —— P4 微信：平台中介扫码注册 + 多平台手动添加（/bots 按平台声明取凭据）+ 连接器状态化错误透传 ——
+// —— 微信：平台中介扫码注册 + 多平台手动添加（/bots 按平台声明取凭据）+ 连接器状态化错误透传 ——
 
 interface WxFixture {
   baseUrl: string;
@@ -968,9 +968,8 @@ async function setupWeixinServer(
   };
 }
 
-/** WebUI JSON 请求体测试消费面：settings 段 / qr-poll / 注册表单 / 发送的并集（闭集）。
- * 凭据键按目标平台 credentialSchema 动态（宿主逐键 typeof 收字符串），故带具体值
- * 索签名——不是万能字典（值域闭集），与 ui.ts BotCreateWire looseObject 同理 */
+/** WebUI JSON 请求体测试消费面：settings 段 / qr-poll / 注册表单 / 发送的并集。
+ * 凭据键随目标平台 credentialSchema 动态变化，因此索引值域限定为闭集内的基元类型。 */
 interface UiPostBody {
   [key: string]:
     | string

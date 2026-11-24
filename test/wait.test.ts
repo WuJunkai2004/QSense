@@ -490,7 +490,7 @@ test("W-15 ingest tap 端到端：真 QQ 插件 normalize AT 事件 → hub 唤�
     assert.equal(events[0]!.id, GROUP);
 
     // 姊妹断言（2026-11-19 bug 回归）：全量群消息 @他人（is_you=false）不得唤醒
-    // mention 过滤——旧 parser 漏读 is_you 导致 atMe=undefined 而误触发从宽兜底。
+    // mention 过滤：atMe 缺失时按「含任意 @」从宽兜底，确保不漏叫醒。
     const notMeEvent = {
       platform: "qq",
       type: "GROUP_MESSAGE_CREATE",

@@ -1,6 +1,6 @@
 // 工具路由器：基座表（core 14）→ 插件表（平台声明扩展）的名字解析与插件侧调用。
 //
-// core 侧用法（P1 落地）：MCP callTool 先 resolve(name)——base 走基座管线；
+// core 侧用法：MCP callTool 先 resolve(name)——base 走基座管线；
 // plugin 走 callPluginTool（包装 PluginToolCtx = { host, botId }，错误规范化）。
 
 import { GateError } from "./gates";

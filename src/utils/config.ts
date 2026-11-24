@@ -98,7 +98,7 @@ function logLevelOf(doc: TomlTable): Level {
 }
 
 /** config.toml 源文 → Config；语法/类型错误抛可操作中文错误（经 i18n）。
- *  B⁺ T6：doc 类型 = smol-toml 自带的 TomlTable（TOML 强类型，零 unknown）。 */
+ *  文档类型使用 smol-toml 的 TomlTable，按键读取后逐项校验类型。 */
 export function configFromToml(source: string): Config {
   let doc: TomlTable;
   try {

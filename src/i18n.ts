@@ -3,7 +3,7 @@
 // {param} 占位插值；未提供的参数保留占位符原文。语言进程内检测一次，无运行时切换。
 
 const zh = {
-  // —— 配置校验（config.toml 唯一权威；env 已退役） ——
+  // —— 配置校验（config.toml 是唯一权威） ——
   cfg_file_missing:
     "配置文件缺失：{path}。请复制仓库根的 config.toml.example 为 config.toml（服务参数与连接器声明都在其中）。",
   cfg_unknown_key:
@@ -21,7 +21,7 @@ const zh = {
     "监听失败：{addr} 无法绑定（{reason}）。检查 PORT/HOST 是否被占用或无权限。",
   boot_ok:
     "qqbot-websocket-mcp 已启动：http://{addr} ，已注册 {bots} 个bot，数据目录 {dataDir}，发送开关 {send}。",
-  // —— 网关（M1） ——
+  // —— 事件接入与入库 ——
   gw_event_dedup: "重复事件已去重丢弃：type={type}，id={id}。",
   ingest_no_platform:
     "上行信封缺 platform 键，已丢弃（bot={bot}）。请检查连接器版本是否与契约 v2 兼容。",
@@ -33,15 +33,14 @@ const zh = {
     "平台 {platform} 消息入库失败，本条已跳过（去重未标记，重拉同批可恢复），id={id}：{reason}",
   ingest_shape_fail:
     "平台 {platform} 消息未过契约校验，已隔离丢弃（不入库、不去重标记），id={id}：{reason}",
-  ingest_effect_fail:
-    "平台 {platform} 效应 {kind} 落地失败，已跳过：{reason}",
+  ingest_effect_fail: "平台 {platform} 效应 {kind} 落地失败，已跳过：{reason}",
   ingest_effect_shape_fail:
     "平台 {platform} 效应未过契约校验，已丢弃：{reason}",
   send_reply_unsupported:
     "当前平台未实现被动回复原语（net.reply，无被动窗口的平台不实现）；发送应走主动通道——工具面用 send/send_auto 自动路由，WebUI 测试发送已统一走该路由。",
   // —— 退出 ——
   shutdown_done: "已优雅退出。",
-  // —— 发送器（M4） ——
+  // —— 发送器 ——
   send_disabled:
     "发送功能未开启，已硬拒绝。写操作需要发送总开关开启（WebUI 设置页管理），且目标会话满足发送条件（群=在该 bot 白名单内；私聊=对方未拒绝消息接收）。当前开关 {enabled}，该 bot 白名单群数 {allow}。",
   send_not_allowlisted:
@@ -147,7 +146,8 @@ const en: Translation = {
   asset_not_found:
     "Asset not found: asset:{id}. Call request_upload first to get an upload ticket, then PUT the image bytes from your execution environment following the returned curl command (ticket valid 15 min, single use).",
   err_send_unknown: "Send failed (HTTP {status}, biz code {code}): {message}.",
-  err_send_no_code: "Send failed ({message}). Check network and platform service status.",
+  err_send_no_code:
+    "Send failed ({message}). Check network and platform service status.",
 };
 
 export type Lang = "zh" | "en";

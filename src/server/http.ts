@@ -1,6 +1,6 @@
-// Fastify HTTP 服务。
-// M0：仅 /healthz。/mcp（Streamable HTTP + Bearer，常数时间比较）在 M3 挂载——
-// MCP 官方 SDK 的 StreamableHTTPServerTransport 基于 Node 原生 req/res，Fastify 可直接对接，零适配层。
+// Fastify HTTP 服务：/healthz、/mcp（Streamable HTTP + Bearer，常数时间比较）、
+// /ui 与 /wait。MCP 官方 SDK 的 StreamableHTTPServerTransport 基于 Node 原生
+// req/res，Fastify 可直接对接，无需适配层。
 
 import Fastify from "fastify";
 import type { AssetStore } from "../assets";
@@ -48,13 +48,13 @@ export interface ServerDeps {
   log: Logger;
   db: DB;
   repo: Repo;
-  /** M4 发送器：写工具走这里；缺省=写工具硬拒绝 */
+  /** 发送器：写工具走这里；缺省=写工具硬拒绝 */
   sender?: Sender;
   version: string;
   /** —— WebUI 依赖（齐备才挂载 /ui 与 /ui/api）—— */
   registry?: BotRegistry;
-  /** 连接器运行时（P1 收口，原 supervisor）：/ui 装配条件 + 运行时接入/摘除。
-   * http 层只消费 Supervisor 最小面（真 ConnectorRuntime 结构满足；测试假件同形） */
+  /** 连接器运行时：/ui 装配条件 + 运行时接入/摘除。
+   * http 层只消费 Supervisor 最小面（ConnectorRuntime 结构满足；测试假件同形）。 */
   connectors?: ConnectorSupervisor;
   botStatuses?: () => GatewayStatus[];
   /** MCP 工具执行全局并发上限（测试注入口；缺省 8，语义见 mcp.ts McpDeps） */
@@ -111,7 +111,7 @@ export function buildServer(deps: ServerDeps) {
     };
   });
 
-  // MCP Streamable HTTP（M3→M9）：Bearer 鉴权为「token→bot」绑定制——
+  // MCP Streamable HTTP：Bearer 鉴权为「token→bot」绑定制——
   // admin token 只通 /ui/api；一个 agent_token 只对应 bots 表中的一行。
   const handleMcp = createMcpHandler({
     log,
@@ -184,11 +184,10 @@ export function buildServer(deps: ServerDeps) {
   });
 
   // —— 管理面：POST /register（Bearer admin token，与 /ui/api 同源同闸）——
-  // 注册是管理操作（返回一次性 agent_token），2026-11-19 起退出 MCP 工具面；
-  // 无 UI 场景（宿主自举/脚本化部署）经本端点明确注册。与 WebUI「添加机器人」
-  // 同一条 registry.add 管线：官方凭据校验（连接器 verifyCredential，P5 平台
-  // 声明闸门同源——平台未在 config.toml 声明即硬拒）→ 落库 → 拉起网关。
-  // 旧 MCP 工具的 appid/secret 兼容形参不随迁：HTTP 契约只收 credentials 键值对。
+  // 注册是管理操作并返回一次性 agent_token，因此不经 MCP 工具面暴露。无 UI 场景
+  // （宿主自举/脚本化部署）经本端点明确注册。与 WebUI「添加机器人」共用
+  // registry.add 管线：官方凭据校验（连接器 verifyCredential；平台未在 config.toml
+  // 声明即硬拒）→ 落库 → 拉起网关。HTTP 契约只接收 credentials 键值对。
   app.post("/register", async (req, reply) => {
     if (deps.registry === undefined || deps.connectors === undefined) {
       return reply.code(501).send({ error: "注册功能未装配。" });
@@ -200,7 +199,7 @@ export function buildServer(deps: ServerDeps) {
           "Unauthorized：/register 用 admin token（与 /ui/api 同一把），不是 agent_token——新 bot 注册前还没有 agent_token。admin token 首次启动打印在服务日志（仅一次）。",
       });
     }
-    // B⁺ T6：请求体 zod 把关（根级形状不符 → 同款 400；字段级失败 → 字段路径文案）
+    // 请求体经 zod 把关：根级形状不符返回 400，字段级失败返回字段路径文案
     const gate = RegisterBodySchema.safeParse(req.body ?? null);
     if (!gate.success) {
       const isRoot = gate.error.issues.every((iss) => iss.path.length === 0);
@@ -289,7 +288,7 @@ export function buildServer(deps: ServerDeps) {
     }
     let parsed: WaitBody;
     try {
-      // B⁺ T6：形状（zod strictObject）+ 语义（可操作文案）两层校验
+      // 先做 strictObject 形状校验，再做语义校验并返回可操作文案
       const gate = WaitBodyWireSchema.safeParse(req.body ?? {});
       if (!gate.success) {
         throw new Error(formatZodIssues(gate.error, "请求体"));
@@ -350,7 +349,7 @@ export function buildServer(deps: ServerDeps) {
       botId: string;
       assetId: string;
     };
-    // B⁺ T6：query zod 把关（形状不符按缺省处理 → verifyPut 报 400 缺参）
+    // query 经 zod 把关；形状不符按缺省参数处理，由 verifyPut 返回 400 缺参错误
     const qg = AssetPutQuerySchema.safeParse(req.query ?? {});
     const q = qg.success ? qg.data : {};
     const code = deps.assets.verifyPut(
@@ -397,7 +396,7 @@ export function buildServer(deps: ServerDeps) {
     }
   });
 
-  // WebUI（M7）：registry+connectors+botStatuses 齐备才挂载（缺省=测试旧行为，不挂 /ui）
+  // WebUI：registry、connectors、botStatuses 齐备时才挂载 /ui
   if (
     deps.registry !== undefined &&
     deps.connectors !== undefined &&

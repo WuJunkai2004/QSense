@@ -1,6 +1,6 @@
-// 微信连接器单测（P4；B⁺ T4.2 起 FakeNetKit / policy 驱动）：零真实网络——
+// 微信连接器单测（FakeNetKit / policy 驱动）：零真实网络——
 // 轮询生命周期（游标后推进/续拉 resumed/超时=正常出口/-14 与 401 fatal/断线恢复/
-// 旧游标持续报错清空重拉/停服即时返回 + notifystop）、入站 context_token 与引用线索
+// 游标持续报错清空重拉/停服即时返回 + notifystop）、入站 context_token 与引用线索
 // 与图片解密富化真链路、net 原语（sendmessage 线格式/配文+媒体两条同 run_id/上限/
 // 句柄/节流/recall 可操作错误）、verifyCredential 分档、Sender caps 感知路由、
 // SDK conformance harness 与工具面 13。
@@ -62,7 +62,7 @@ function fakeHost(): {
   statuses: ConnectorStatus[];
   state: Map<string, string>;
 } {
-  // StatePort B⁺ T6 字符串化：值 = JSON 文本（实例侧 stringify/parseJsonWith 直通）
+  // StatePort 值 = JSON 文本（实例侧直接 stringify/parseJsonWith）
   const state = new Map<string, string>();
   const ingested: Array<RawInbound> = [];
   const statuses: ConnectorStatus[] = [];
@@ -363,7 +363,7 @@ test("网络失败 → disconnected → 退避后恢复 ready；旧游标持续�
     await waitFor(() => pollsOf(fake).length >= 3, "third poll");
     inst.stop();
     await start;
-    // 旧游标连报两次 → 第 3 次起空游标重拉（驱动 resetCursor，maxFailures=2）
+    // 同一游标连报两次 → 第 3 次起空游标重拉（驱动 resetCursor，maxFailures=2）
     assert.deepEqual(pollsOf(fake).slice(0, 3), ["OLD", "OLD", ""]);
     assert.equal(fx.state.has("poll:buf"), false);
   }

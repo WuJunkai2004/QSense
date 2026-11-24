@@ -1,10 +1,9 @@
-// 插件声明面工厂（B⁺ T6 控制反转，2026-11-24）：webuiRoute / pluginTool。
+// 插件声明面工厂：webuiRoute / webuiJsonRoute / pluginTool。
 //
 // 异构声明（每条路由/每个工具的 body·args 类型各不相同）与统一分发点（core
-// 代理/分发只见原始 JSON 文本）之间的类型矛盾，用「泛型在工厂闭包内绑定」
-// 化解：A 在工厂的类型参数处由 bodySchema/argsSchema 推断（schema 即类型），
-// 运行时闭包携带 schema 与 handler——统一接口（PluginWebuiRoute/PluginToolDecl）
-// 上 A 不可见，core 不经手任何具体 body/args 类型。
+// 只见原始 JSON 文本）之间的类型矛盾，用「泛型在工厂闭包内绑定」化解：A 由
+// bodySchema/argsSchema 推断，运行时闭包携带 schema 与 handler；统一接口上 A
+// 不可见，core 不经手任何具体 body/args 类型。
 //
 // 无请求体路由用 webuiRoute（body 恒 undefined）；带请求体路由用
 // webuiJsonRoute（bodySchema 必备，解析产物 = handler 的 req.body）。

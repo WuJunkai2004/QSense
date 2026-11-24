@@ -1,9 +1,8 @@
-// M8/M9 验收（注册表）：bots 表唯一存储、agent_token 生命周期（生成/轮换/反查）、
-// 每 bot 白名单、每 bot 认证等级（M9 落库）、注册制（M9 起无任何 env/kv 播种——
-// bot 只能经 add/注册端点进表）与 token 绑定 bot 强校验。注册入口的 HTTP 面验收
-// （POST /register）在 register.test.ts。
-// P3 多平台中立化（2026-11-16）：platform 列 + 凭据 JSON 化（凭据形状由连接器声明权威）。
-// 注：token 轮换已收归 WebUI（2026-10-27 工具面缩窄），域层 rotateToken 保留、本文件直测。
+// 注册表验收：bots 表唯一存储、agent_token 生命周期（生成/轮换/反查）、
+// 每 bot 白名单、每 bot 认证等级、注册制（无 env/kv 播种——bot 只能经 add/注册
+// 端点进表）与 token 绑定 bot 强校验。注册入口的 HTTP 面验收在 register.test.ts。
+// 多平台通过 platform 列与凭据 JSON 化支持（凭据形状由连接器声明权威）。
+// token 轮换收归 WebUI；域层 rotateToken 保留并在本文件直接测试。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -58,7 +57,7 @@ function newRegistry(
   });
 }
 
-/** 注册基座 bot 并构造绑定它的 ToolContext（M9：bot 只能经 add 注册进表） */
+/** 注册基座 bot 并构造绑定它的 ToolContext（bot 只能经 add 注册进表） */
 async function ctxOf(
   db: DB,
   reg: BotRegistry,
@@ -110,7 +109,7 @@ test("M8-B2 add：verify → 落库 + 生成 token（仅返回一次语义），
 
     const reg2 = newRegistry(fx.db);
     assert.equal(reg2.get("20002")?.name, "二号");
-    // P3：凭据 JSON 化回读（secret 物理列退役，权威在 credentials_json）
+    // 凭据 JSON 化回读：secret 物理列保留，权威在 credentials_json
     assert.deepEqual(reg2.get("20002")?.credentials, {
       appid: "20002",
       secret: "s2",

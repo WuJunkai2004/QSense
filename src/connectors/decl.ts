@@ -1,12 +1,12 @@
-// 连接器声明解析（P5 决策 #9 部署拓扑归位，2026-11-17）：config.toml 是
-// 「启用了哪些平台、用哪个包」的唯一权威（部署拓扑归配置文件；SQLite 只留业务）。
+// 连接器声明解析：config.toml 是「启用了哪些平台、用哪个包」的唯一权威。
+// 部署拓扑归配置文件，SQLite 只保存业务数据。
 // 形态：
 //   [connectors.<platform>]
 //   package = "@qsense/connector-qq"        # 动态 import 说明符（必填）
 //   range   = "^2.0.0"                      # 可选 sdkRange 钉版（插件自声明之外的二次锁）
 //   source  = "file:packages/connector-qq"  # 供应链标注（文档性）
 //
-// 三条红线（决策 #9）：
+// 三条红线：
 // - 凭据不进 toml（credentials_json 在 bots 表的唯一权威不动）
 // - platform 不在声明 → 插件不装载 → 注册入口（POST /register/WebUI）verify 硬拒绝
 // - 供应链信任边界：npmjs/github 来源须显式安装 + lockfile 钉版 + 首次人工确认；
@@ -136,7 +136,7 @@ export function loadConnectorDeclarations(path: string): ConnectorDecl[] {
 }
 
 /**
- * 启动期 fail-fast 检查（决策 #9）：每个已注册 bot 的 platform 必须有「声明且装载
+ * 启动期 fail-fast 检查：每个已注册 bot 的 platform 必须有「声明且装载
  * 成功」的连接器。声明缺失/包损坏 → 返回孤儿清单（index.ts 据此拒启并给可操作文案）。
  */
 export function missingPlatformBots(

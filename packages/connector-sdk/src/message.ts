@@ -1,12 +1,10 @@
-// 规范化产物类型族（契约 v2，2026-11-17；T2 zod 硬化 2026-11-24）：NormalizedMessage
-// 的权威定义自 core 上移 SDK——「解读权在插件」的前提是插件能直接产出成品消息形状；
-// 形状一致性由 conformance harness 的 normalize-shape 检查守 + core ingest 管线的
-// zod 网关守（生产链路运行时校验，不再只靠 CI 单样本）。
+// 规范化产物类型族：NormalizedMessage 的权威定义。插件直接产出成品消息形状，
+// 形状一致性由 conformance harness 的 normalize-shape 检查和 core ingest 的 zod
+// 网关共同保证。
 //
-// T2 契约硬化：本文件所有类型 = z.infer（schema 是单一事实源，TS 类型与运行时
-// 校验永不漂移）。清洗纪律：网关只做守门 + 机械清洗（default / catch 兜底 /
-// trim / 有限性归 null），不做语义解读（不猜秒毫秒、不重写正文——那是 parser 的
-// 职权）；atMe 三态 / scope 词表 / direction 字面量神圣不可 default。
+// 本文件所有类型 = z.infer，schema 是单一事实源。清洗纪律：网关只做守门与机械
+// 清洗（default / catch 兜底 / trim / 有限性归 null），不做语义解读（不猜秒毫秒、
+// 不重写正文）；atMe 三态、scope 词表、direction 字面量不可 default。
 //
 // 语义约定（与 core 存储层对齐，勿破坏）：
 // - scope 词表 group|chat 全链路统一（库列/工具面/发送器）
@@ -27,7 +25,7 @@ export type AttachmentKind = (typeof ATTACHMENT_KINDS)[number];
 
 export const AttachmentSchema = z
   .looseObject({
-    kind: z.enum(ATTACHMENT_KINDS).catch("file"), // 契约既定行为（message.ts 历史）：未知形状兜底 file
+    kind: z.enum(ATTACHMENT_KINDS).catch("file"), // 未知形状统一兜底为 file
     url: z.string().transform((s) => s.trim()), // 机械清洗：去尾随空白
     filename: z.string().optional(),
     width: z.number().optional(),
@@ -103,7 +101,7 @@ export const RecordSchema = z.looseObject({
 });
 export type NormalizedRecord = z.infer<typeof RecordSchema>;
 
-/** 成品消息（契约 v2 上行形状）：插件 normalize 产出，core 幂等入库 */
+/** 成品消息（上行契约）：插件 normalize 产出，core 幂等入库 */
 export const UnifiedMessageSchema = z.looseObject({
   botId: z.string().min(1),
   /** group=群聊 / chat=单聊。词表神圣：违规=可观测丢弃，不清洗 */
@@ -152,10 +150,9 @@ export const UnifiedMessageSchema = z.looseObject({
    */
   atMe: z.boolean().optional(),
   /**
-   * 平台事件原始载荷（受 LOG_CONTENT 约束，仅入库不进日志）——JSON 文本
-   * （B⁺ T6 字符串化：序列化点显式在插件侧 JSON.stringify，与 StatePort 同哲学）。
-   * core 只存 raw_json 列与迁移重演，需要读回时 parseJsonWith+平台 wire schema
-   * 解析（形状归插件 *.types.ts）。
+   * 平台事件原始载荷（受 LOG_CONTENT 约束，仅入库不进日志）——JSON 文本，由
+   * 插件在序列化点显式 JSON.stringify。core 只存 raw_json 列与迁移重演；读回时
+   * 用 parseJsonWith + 平台 wire schema 解析（形状归插件 *.types.ts）。
    */
   rawJson: z.string().min(2),
   /** 本机外发标记：1=发送成功后本地补记（省略=网关接收） */
@@ -193,8 +190,7 @@ export type NormalizedInbound = z.infer<typeof UnifiedInboundSchema>;
 
 // ---------------------------------------------------------------------------
 // 形状断言（harness / 插件自测共用）：normalize 产物不符合契约即抛错。
-// T2 起内部 = schema safeParse（补齐手写浅断言盲区：kind 词表 / url / records.text /
-// ts 有限性 / quote 字段深度），签名与抛错行为不变。
+// 内部统一走 schema safeParse，覆盖词表、必填字段、嵌套结构与数值有限性。
 // ---------------------------------------------------------------------------
 
 /** zod 校验失败 → 可读摘要（字段路径 + 首数条原因；不含数据值——防正文进日志） */

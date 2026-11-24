@@ -1,8 +1,8 @@
-// Telegram 平台一次性上线脚本（P3.5 试金石真机进场；P5 随 v13 迁移改声明来源）：
+// Telegram 平台一次性上线脚本：
 // ① BotRegistry.add 注册 bot（走真实 verifyCredential=getMe 两级校验，未过不入库）
-// ② 顺带把库迁移推到当前版本（v13+，connectors 表已退役）
+// ② 把库迁移推到当前版本
 //
-// 平台声明现在走 config.toml（[connectors.telegram]），本脚本不再写表——
+// 平台声明由 config.toml（[connectors.telegram]）负责，本脚本不写声明表。
 // 若尚无声明，启动会 fail-fast，请先在 config.toml 补：
 //   [connectors.telegram]
 //   package = "@qsense/connector-telegram"
@@ -18,7 +18,7 @@ import { BotRegistry, BotRegistryError } from "../src/bots";
 import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 
-// data_dir 来自 config.toml（唯一配置权威；env 已退役）
+// data_dir 来自 config.toml（唯一配置权威）
 const dataDir = loadConfig("config.toml").dataDir;
 
 // TELEGRAM_APPID / TELEGRAM_TOKEN 是本次调用的入参（凭据经环境变量传入，不落任何文件/git）

@@ -1,10 +1,10 @@
 // WebUI 路由（/ui）：
-// - 静态托管：ui/dist（git submodule qqbot-webui 的构建产物）；未构建时 503 给出可操作提示
-// - JSON API：/ui/api/*，Bearer 复用 MCP_TOKEN（sha256 + timingSafeEqual，同 /mcp）
-// - 写入口（添加/移除 bot、发送消息）与 MCP 工具共享同一套硬门禁与账本，无旁路
-// - 插件化（P1 收口，2026-11-15）：GET /connectors 声明端点（表单/面板按声明渲染）+
-//   /platforms/:id/* 插件 webui 路由挂载（admin 鉴权沿用、错误规范化、插件拿不到 fastify
-//   reply）；旧 /qr-bind/*、/quota 过渡期保留并委托 QQ 插件路由（P5 切声明端点后收口）
+// - 静态托管：ui/dist 构建产物；未构建时 503 给出可操作提示。
+// - JSON API：/ui/api/*，Bearer admin token（sha256 + timingSafeEqual 校验）。
+// - 写入口（添加/移除 bot、发送消息）与 MCP 工具共享同一套硬门禁与账本，无旁路。
+// - GET /connectors 提供插件声明（表单/面板按声明渲染）；/platforms/:id/* 挂载
+//   插件 webui 路由（admin 鉴权、错误规范化，插件拿不到 fastify reply）。
+//   /qr-bind/*、/quota 是兼容端点，委托 QQ 插件的 webui 路由实现。
 //
 // 安全说明：静态资源不含敏感数据（纯 JS 壳）；所有数据经 /ui/api 鉴权后读取；
 // token 由前端存 localStorage 并以 Authorization 头携带（非 cookie，无 CSRF 面）。
@@ -41,7 +41,7 @@ export interface UiDeps {
   repo: Repo;
   version: string;
   registry: BotRegistry;
-  /** 连接器运行时（P1 收口）：接入/摘除 bot + 插件上下面解析 */
+  /** 连接器运行时：接入/摘除 bot + 插件上下文解析 */
   supervisor: ConnectorSupervisor;
   /** 平台插件声明面注册表（GET /connectors 与 /platforms/:id/* 挂载用） */
   connectors: ConnectorRegistry;
@@ -51,7 +51,7 @@ export interface UiDeps {
   sender?: Sender;
   /** TTS 合成依赖（fetch 注入；缺省=直连），测试注入假端点 */
   ttsDeps?: TtsDeps;
-  /** WebUI 静态产物目录（config.toml ui_dist_dir；缺省 ./ui/dist；env UI_DIST_DIR 已退役） */
+  /** WebUI 静态产物目录（config.toml ui_dist_dir；缺省 ./ui/dist） */
   uiDistDir?: string;
 }
 
@@ -88,12 +88,11 @@ function mapError(log: Logger, e: Error): { status: number; message: string } {
   return { status: 500, message: "内部错误，请查看服务日志。" };
 }
 
-// —— wire 边界（B⁺ T6）：unknown 库类型（Fastify query/body）在入口 zod 收口 ——
-// 「语言级 unknown 来自库签名 → 立即过 zod schema」是既定例外路径（types.md §一）；
-// 解析产物即具体类型，业务检查（文案锚点）留在 handler。
+// —— wire 边界：Fastify 的 query/body 在入口用 zod 收口 ——
+// 解析产物即具体类型，业务校验与可操作文案留在 handler。
 
-/** query 字典：Fastify query（库类型 unknown，运行时为字符串/重复参数数组）→ 字符串字典
- * （数组值=重复参数，跳过——与旧 typeof 过滤语义一致）；垃圾形状兜底空字典 */
+/** query 字典：把字符串或重复参数数组归一为字符串字典；非字符串值跳过，
+ *  垃圾形状兜底为空字典。 */
 const QueryDict = z
   .record(z.string(), z.union([z.string(), z.array(z.string())]))
   .catch({})
@@ -164,7 +163,7 @@ const BotRenameWire = z.object({ name: z.string().nullish() });
 export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
   const { log, repo, registry, supervisor, connectors, version } = deps;
   const uiLog = log.child("ui");
-  // WebUI 静态产物根（config.toml ui_dist_dir；env UI_DIST_DIR 已退役）
+  // WebUI 静态产物根（config.toml ui_dist_dir）
   const distRoot = deps.uiDistDir?.trim() || "./ui/dist";
 
   /** catch 出口统一：语言级 catch 变量窄化为 Error 后映射 + 回写（15 处 catch 去样板） */
@@ -257,7 +256,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
   app.register(
     async function uiApi(plugin) {
       plugin.addHook("onRequest", async (req, reply) => {
-        // M8：WebUI 用 admin token（SQLite admin:token:v1 播种自 env MCP_TOKEN）
+        // WebUI 使用 admin token（SQLite admin:token:v1，首次启动生成）
         const admin = deps.repo.getAdminToken();
         if (admin === null || !bearerOk(req.headers.authorization, admin)) {
           reply
@@ -334,7 +333,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       plugin.post("/bots", async (req, reply) => {
         try {
           const body = bodyOf(BotCreateWire, req);
-          // 平台缺省 qq（兼容旧前端/脚本）；凭据键按该平台 credentialSchema 的属性名从
+          // 平台缺省 qq（兼容既有前端/脚本）；凭据键按该平台 credentialSchema 的属性名从
           // 请求体取字符串值——表单本身即按该 schema 渲染，宿主不感知具体键
           const platform = body.platform?.trim() || "qq";
           const target = connectors.get(platform);
@@ -375,7 +374,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             platform,
             appid: registered.bot.botId,
           });
-          // M8：agent_token 仅此一次返回——WebUI 弹窗提示"立即保存"，服务端不留展示通道
+          // agent_token 仅此一次返回——WebUI 提示立即保存，服务端不留展示通道
           return {
             ok: true,
             bot: { appid: registered.bot.botId, name: registered.bot.name },
@@ -387,8 +386,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         }
       });
 
-      // —— 插件化 API（P1 收口，2026-11-15）——
-      // GET /connectors：平台声明面（表单/面板按声明渲染，前端 P2/P5 消费）
+      // —— 插件化 API ——
+      // GET /connectors：平台声明面，前端据此渲染表单与面板
       plugin.get("/connectors", async () => ({
         connectors: connectors.list().map((p) => ({
           id: p.id,
@@ -470,9 +469,9 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               ? target.login
               : undefined;
 
-          // login=qr-pair：create 透传（task_id/connect_url 无敏感）、poll 宿主中介
-          // （completed → 宿主注册，返回与旧 /qr-bind/poll 一致的 created 形状，
-          // 凭据绝不透传浏览器）。非 POST 打到 login 路径 → 落通用匹配的 404。
+          // login=qr-pair：create 直接透传（task_id/connect_url 无敏感数据）；
+          // poll 由宿主中介，completed 时完成注册并返回 created 形状，凭据绝不
+          // 透传浏览器。非 POST 打到 login 路径时进入通用匹配并返回 404。
           if (
             login !== undefined &&
             req.method === "POST" &&
@@ -567,7 +566,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       });
 
       // —— 扫码绑定（q.qq.com lite，经 QQ 插件 webui 路由）——
-      // 旧路由过渡保留（P5 切声明端点后收口）；bind_key 在插件进程内，浏览器只见 task_id。
+      // 兼容端点：bind_key 留在插件进程内，浏览器只接触 task_id。
       const qqRoute = (
         method: WebuiMethod,
         path: string,
@@ -648,7 +647,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         }
       });
 
-      // —— M8 设置页：发送总开关 + 每 bot 白名单（全部落 SQLite）——
+      // —— 设置页：发送总开关 + 每 bot 白名单（全部落 SQLite）——
 
       const settingsPayload = () => ({
         send_enabled: deps.repo.getSendEnable(),
@@ -837,7 +836,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         }
       });
 
-      /** 轮换 agent token（管理员操作，无需旧 token）：新值仅本次返回 */
+      /** 轮换 agent token（管理员操作）：新值仅本次返回 */
       plugin.post("/bots/:appid/agent-token", async (req, reply) => {
         try {
           const appid = (req.params as { appid: string }).appid;
@@ -1145,7 +1144,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       plugin.get("/quota", async (req, reply) => {
         try {
           const botId = resolveBot(QueryDict.parse(req.query).bot);
-          // 额度水位是平台语义（QQ）：委托 QQ 插件 webui 路由（形状与旧实现一致）
+          // 额度水位是平台语义（QQ）：委托 QQ 插件的 webui 路由
           const route = qqRoute("GET", "/quota");
           if (route === undefined) {
             throw new Error("QQ 连接器未注册，额度水位不可用。");
@@ -1176,10 +1175,9 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           }
           // body.quote 已弃用（sendAuto 语义：reply_msg_id 即引用样式，自动判定被动/主动）
           const botId = resolveBot(body.bot ?? undefined);
-          // 统一走 sendAuto（caps 感知路由）：passiveWindow=true 平台窗内被动优先
-          //（reply_msg_id 作引用样式），false 平台（微信/Telegram）恒走主动——
-          // 旧形态在此直呼 sender.reply 曾对微信爆 TypeError（无被动原语）。
-          // 行为对齐工具面：窗过期自动降级主动，不再硬报错。
+          // 统一走 sendAuto（caps 感知路由）：passiveWindow=true 的平台窗内优先被动
+          //（reply_msg_id 作为引用样式）；无被动窗口的平台（微信/Telegram）恒走主动。
+          // 行为与工具面一致：窗口过期自动降级为主动发送。
           const result = await sender.sendAuto(botId, group, text, replyMsgId, kind);
           // 官方不回推 bot 自发消息：发送成功后本地补记，WebUI 刷新后仍可见。
           // 落库失败不影响发送结果（消息已出账，只记日志）。

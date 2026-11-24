@@ -1,7 +1,7 @@
 // TTS（语音合成发送）验收：
 // - 单元：endpoint 拼接（/v1 补齐/不重复/尾斜杠）、请求体与鉴权头、mp3 魔数校验、
 //   空文本/超长拒绝、上游 500/非音频响应的可操作错误
-// - HTTP 集成（buildServer + 假 TTS fetch）：config 保存/打码回显/空 key 保留旧值、
+// - HTTP 集成（buildServer + 假 TTS fetch）：config 保存/打码回显/空 key 保留原值、
 //   test 试听（草稿优先/回退/上游 502）、settings 的 tts_enabled 批量开关
 // - 工具层集成（runTool + 真 Sender + net mock）：send_media "tts:<文本>" 全链路
 //   （双闸门：未配置/未启用的可操作拒绝；合成产物按语音条上传发送）
@@ -91,7 +91,7 @@ test("tts 单元：endpoint 拼接（补 /v1、不重复、尾斜杠）", () => 
 });
 
 test("tts 单元：合成成功（缺省 wav）与显式 format=mp3，参数拒绝", async () => {
-  // 缺省（旧配置无 format 字段）→ response_format=wav，RIFF 魔数校验
+  // 配置无 format 字段时缺省为 wav，并校验 RIFF 魔数
   const fetchWav = fakeTts((_url, _body, headers) => {
     assert.equal(headers.Accept, "audio/wav");
     return okWav();

@@ -1,5 +1,5 @@
-// 内存实现：StatePort / HostApi —— 供 harness 与各 connector 仓测试使用。
-// core 侧生产实现（SQLite kv 落盘）在 P1 落地，不在此包。
+// 内存实现：StatePort / HostApi —— 供 harness 与各 connector 测试使用。
+// 生产实现（SQLite kv 落盘）在宿主侧，不在此包。
 
 import type { NetKit } from "./net";
 import { createNetKit } from "./net";
@@ -13,7 +13,7 @@ import type {
 } from "./types";
 
 export class MemoryStatePort implements StatePort {
-  /** 值 = JSON 文本（StatePort B⁺ T6 字符串化契约） */
+  /** 值 = JSON 文本（与生产 StatePort 契约一致） */
   private readonly map = new Map<string, string>();
 
   async get(key: string): Promise<string | null> {

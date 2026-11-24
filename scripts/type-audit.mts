@@ -1,15 +1,12 @@
-// 类型审计（B⁺ T0 验收工具，2026-11-24）：统计全项目 any / unknown / `as X`
-// 盲断言的分布，输出增量报告。
+// 类型审计：统计全项目弱类型与盲断言的分布。
+// 计数类别：any / unknown / 万能字典 / object / as 断言。
 //
 // 用法：npx tsx scripts/type-audit.mts [--json]
-//   默认输出人类可读报告；--json 输出机器可读汇总（供基线归档/后续对比）。
-//   退出码恒 0（本脚本是度量工具，不拦截构建；拦截在 tsc 与测试）。
+//   默认输出人类可读报告；--json 输出机器可读汇总。
+//   退出码恒 0（度量工具，不拦截构建；拦截在 tsc 与测试）。
 //
-// unknown 口径（2026-11-24 用户定案，取代早先的白名单方案）：**零容忍**。
-// 违禁项 = 源码出现 unknown / JsonValue / Record<string, unknown> / Record<string, any>
-// 等「无结构万能类型」——消除 unknown 必须按实际读取的字段定义具体 interface/联合类型，
-// 网络入口一律 zod 解析成具体类型（失败抛错/返回 null 由上层 catch）；
-// 平台原始载荷类型隔离在各插件 *.types.ts，禁止向 core 泄漏。
+// 约束：源码不出现 unknown、JsonValue、Record<string, unknown|any> 等无结构类型。
+// 动态边界用 zod 解析为具体类型；平台原始载荷类型隔离在各插件，禁止进入 core。
 // 引号内的 "unknown" 字面量（如网关状态值）与整行注释中的提及不算标注。
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -37,7 +34,7 @@ interface KindStat {
   hits: Hit[];
 }
 
-/** 四类计数：any / unknown / 万能字典（JsonValue·Record<string,unknown|any>）目标恒 0；as 盲断言白名单外清零 */
+/** 五类计数：any / unknown / 万能字典 / object 目标恒 0；as 断言逐步清零 */
 function classifyLine(line: string): {
   any: boolean;
   unknown: boolean;
@@ -59,8 +56,8 @@ function classifyLine(line: string): {
       /\bJsonValue\b/.test(code) ||
       /Record<\s*string\s*,\s*(?:unknown|any|never)\s*>/.test(code) ||
       /\[\s*key:\s*string\s*\]\??\s*:\s*(?:unknown|any)\b/.test(code),
-    // object 也是万能代指（2026-11-24 追加）：`: object` / `<object>` / `as object` /
-    // `object[]` / `Promise<object>` 一律违禁——具体形状用接口/联合/泛型表达
+    // object 是万能代指：`: object` / `<object>` / `as object` / `object[]` /
+    // `Promise<object>` 均违禁——具体形状用接口/联合/泛型表达
     weakObject:
       /:\s*object\b/.test(code) ||
       /<object>/.test(code) ||

@@ -1,7 +1,7 @@
-// Telegram parser + ingest 管线测试（P3.5 试金石；P5 契约 v2 起 parser 归 connector-telegram 包）：
-// Update → NormalizedMessage 映射形状、缩略图 data: URL 落附件、引用快照、私聊 opt-in 等价
-// 映射、群注册表、sessions 登记——入库路径走真管线（表驱动路由 → 插件 normalize → 效应落地）。
-// B⁺ T4.1：normalizeTelegramUpdate 命名导出已收口——测试一律走声明面 plugin.normalize()。
+// Telegram parser + ingest 管线测试：Update → NormalizedMessage 映射形状、缩略图
+// data: URL 落附件、引用快照、私聊 opt-in 等价映射、群注册表与 sessions 登记。
+// 入库路径走真管线（表驱动路由 → 插件 normalize → 效应落地）；测试一律走声明面
+// plugin.normalize()。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -49,7 +49,7 @@ function payloadOf(update: TelegramUpdate): TelegramInboundPayload {
   return { platform: "telegram", update };
 }
 
-// —— 声明面 normalize（T4.1 收口：不再直呼 parser 内部函数） ——
+// —— 声明面 normalize（测试经 plugin.normalize，不直呼 parser 内部函数） ——
 
 const PLUGIN = createTelegramConnector();
 
@@ -159,7 +159,7 @@ test("parser：私聊 → scope chat；handler 私聊落 C2C 开关（opt-in 等
         text: "私聊消息",
       },
     };
-    // 契约 v2：入库走真管线（信封 platform 路由 → 插件 normalize → chat-opt 效应落地）
+    // 入库走真管线（信封 platform 路由 → 插件 normalize → chat-opt 效应落地）
     makePipeline(repo)({ botId: "TG", payload: payloadOf(priv) });
     // 缓存行 + 会话注册表 + opt-in 映射
     assert.equal(repo.detectSessionKind("TG", "42"), "chat");
@@ -221,7 +221,7 @@ test("handler：群消息 → messages + groups 在册（开关=1）+ sessions �
     const db: DB = openDatabase(dir);
     runMigrations(db, migrations);
     const repo = new Repo(db);
-    // 契约 v2：群消息经真管线落库 + group-seen 效应（群注册表在册、开关=1）
+    // 群消息经真管线落库 + group-seen 效应（群注册表在册、开关=1）
     makePipeline(repo)({ botId: "TG", payload: payloadOf(GROUP_TEXT) });
     assert.equal(repo.detectSessionKind("TG", "-100999"), "group");
     const grp = db

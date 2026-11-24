@@ -1,4 +1,4 @@
-// 微信扫码登录测试（P4；B⁺ T4.2 起 FakeNetKit 驱动）：插件 webui 路由（create/poll）
+// 微信扫码登录测试（FakeNetKit 驱动）：插件 webui 路由（create/poll）
 // + 后台状态机全状态——零真实网络。
 // 覆盖：创建任务（local_token_list / 令牌不下发）、wait→scaned→confirmed 出凭据
 // （appid 安全形式 / baseurl / owner_id）、binded_redirect、need_verifycode /
@@ -165,7 +165,7 @@ function makePlugin(fx: QrFake, qr: Partial<QrOpts> = {}): QrTestPlugin {
   });
 }
 
-/** 测试假 StatePort（值 = JSON 文本，与 StatePort B⁺ T6 契约一致） */
+/** 测试假 StatePort（值 = JSON 文本，与 StatePort 契约一致） */
 function fakeStatePort(): StatePort {
   return {
     async get() {

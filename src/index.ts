@@ -1,8 +1,8 @@
-// 入口：dotenv → 配置校验（缺项报可操作错误并退出1）→ 日志 → SQLite 迁移 →
+// 入口：加载 config.toml（缺项报可操作错误并退出 1）→ 日志 → SQLite 迁移 →
 // 运行时引导（发送开关缺省 false；admin token 缺失则现场生成并打印一次）→
-// 连接器装配（P5 声明制：config.toml [connectors.*] 声明 → loadModule 动态 import →
-// 注册；单平台装载失败不炸启动，但已注册 bot 的平台缺失即 fail-fast 拒启）→
-// ConnectorRuntime 逐 bot 创建纯网络实例 → Fastify（/healthz；/mcp；/ui）→ 优雅退出。
+// 连接器装配（按 [connectors.*] 声明动态加载；单平台装载失败不炸启动，但已注册
+// bot 的平台缺失即 fail-fast 拒启）→ ConnectorRuntime 逐 bot 创建网络实例 →
+// Fastify（/healthz；/mcp；/ui）→ 优雅退出。
 
 import { loadConfig } from "./utils/config";
 import { AssetStore } from "./assets";
@@ -24,7 +24,7 @@ import { join } from "node:path";
 const VERSION = "0.2.0";
 
 async function main(): Promise<void> {
-  // 配置（唯一权威 config.toml，env 已退役）：服务参数 + 日志 + 连接器声明一次读齐。
+  // 配置唯一权威是 config.toml：服务参数、日志与连接器声明一次读齐。
   // 文件缺失/语法/类型错误 → 可操作文案 + exit 1（显态失败优于静默缺省）。
   let config;
   try {
@@ -41,10 +41,10 @@ async function main(): Promise<void> {
   const db = openDatabase(config.dataDir);
   runMigrations(db, migrations);
 
-  // 事件入库（M2）+ 发送器（M4）+ 机器人注册表（M7 运行时动态 bot）：
-  // 单一 Repo 实例贯穿缓存/账本/MCP 工具；registry 贯穿网关/发送器/工具面/UI
+  // 事件入库、发送器与机器人注册表共用同一运行实例：
+  // 单一 Repo 贯穿缓存/账本/MCP 工具；registry 贯穿网关/发送器/工具面/UI
   const repo = new Repo(db, log.child("repo"));
-  // M9 运行时引导（幂等）：发送开关缺省 false；admin token 缺失时现场生成，
+  // 运行时引导（幂等）：发送开关缺省 false；admin token 缺失时现场生成，
   // 仅在首次生成时打印一次（之后只存 kv admin:token:v1，遗失需自行轮换）。
   const boot = repo.ensureRuntime();
   if (boot.adminCreated) {
@@ -55,10 +55,10 @@ async function main(): Promise<void> {
     log.warn("initial admin token generated (printed once to stdout)");
   }
 
-  // 连接器装配（P5 决策 #9）：config.toml [connectors.*] 声明（已随上方 loadConfig
-  // 一次读齐）→ loadModule(包名) 动态 import → sdkRange 校验 → 注册。声明解析错误
-  // 已在 loadConfig 拒启；单平台装载失败先继续起服，但已注册 bot 的平台缺失会在
-  // 下方 fail-fast 检查拦截。
+  // 连接器装配：config.toml [connectors.*] 声明（已随上方 loadConfig 一次读齐）→
+  // loadModule(包名) 动态 import → sdkRange 校验 → 注册。声明解析错误已在
+  // loadConfig 拒启；单平台装载失败先继续起服，但已注册 bot 的平台缺失会在下方
+  // fail-fast 检查拦截。
   const { plugins, failed } = await loadDeclaredConnectors({
     log,
     declarations: config.connectors,
@@ -74,9 +74,9 @@ async function main(): Promise<void> {
   const registry = new BotRegistry({
     db,
     verify: async (platform, credentials) => {
-      // 注册凭据校验由对应平台连接器钩子承担（原 index.ts 内联两级校验已于 P1 迁入
-      // connector-qq）：平台插件未装载（= 不在 config.toml 声明）→ 硬拒绝（绝不静默
-      // 放行入库；防 IP 白名单 11298 假阳性语义由插件自带核对提示保留）。
+      // 注册凭据校验由对应平台连接器的 verifyCredential 钩子承担：插件未装载
+      //（= 不在 config.toml 声明）时硬拒绝，绝不静默放行入库；平台特有的核对提示
+      //（如 QQ IP 白名单）由插件自带。
       const verify = plugins.get(platform)?.hooks?.verifyCredential;
       if (verify === undefined) {
         throw new Error(
@@ -87,8 +87,8 @@ async function main(): Promise<void> {
     },
   });
 
-  // fail-fast（决策 #9）：已注册 bot 的 platform 必须有声明且装载成功的连接器——
-  // 声明改名/整节删除后存量 bot 显态拒启（优于 enabled=0 时代的隐态静默降级）。
+  // fail-fast：已注册 bot 的 platform 必须有声明且装载成功的连接器。声明改名或整节
+  // 删除后，服务会显式拒启，避免存量 bot 在无提示的情况下离线。
   const loadedPlatforms = new Set(plugins.list().map((p) => p.id));
   const orphaned = missingPlatformBots(registry.list(), loadedPlatforms);
   if (orphaned.length > 0) {
@@ -104,7 +104,7 @@ async function main(): Promise<void> {
   }
   const assets = new AssetStore(join(config.dataDir, "assets"));
 
-  // core ingest 管线（契约 v2 表驱动）：connector 上行信封 → payload.platform
+  // core ingest 管线（表驱动）：connector 上行信封 → payload.platform
   // 路由插件 normalize → 消息级去重 → 入库/效应落地（语义经插件解读，落地全在 core）
   // /wait 发布侧：去重后的入站消息逐条进事件中枢（本机外发补记 direction=1 不是事件）
   const waitHub = new WaitHub({ repo, log });

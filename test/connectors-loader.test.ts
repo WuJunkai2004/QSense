@@ -1,4 +1,4 @@
-// P5 声明制装载验收（决策 #9）：config.toml 声明清单 → loadModule → 注册。
+// 声明制装载验收：config.toml 声明清单 → loadModule → 注册。
 // - toml 解析：合法声明 / 语法错误拒启 / 未知键拒绝 / platform 键规则
 // - 装载：qq 声明 → 真 QQ 插件注册（load 注入读源码声明面，不依赖 dist 构建）
 // - 加载失败不炸启动：failed 清单可操作，registry 为空
@@ -184,13 +184,13 @@ test("多平台声明同样按声明装载（声明驱动，不硬编码平台�
 });
 
 // ---------------------------------------------------------------------------
-// 文件读取 + fail-fast（决策 #9）
+// 文件读取 + fail-fast
 // ---------------------------------------------------------------------------
 
 test("decl：文件缺失 = 零声明；存在则解析", () => {
   assert.deepEqual(loadConnectorDeclarations("no-such-dir/no-config.toml"), []);
-  // 临时 toml 断言解析行为（不依赖仓库根生产 config.toml——其内容随真实
-  // 平台接线变化，weixin 接线曾让本用例断言过期失败，2026-11-24 解耦）
+  // 使用临时 toml 断言解析行为，不依赖仓库根生产 config.toml（其内容随真实
+  // 平台接线变化）
   const dir = mkdtempSync(join(tmpdir(), "qsense-decl-test-"));
   try {
     const tomlPath = join(dir, "config.toml");

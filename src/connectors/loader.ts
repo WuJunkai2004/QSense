@@ -1,6 +1,5 @@
-// 宿主连接器装载器（P5 决策 #9 改源，2026-11-17）：config.toml 声明清单 →
-// loadModule(包名) 动态 import → validatePlugin（含 sdkRange 兼容）→ 注册。
-// 原 connectors 表（v11）随迁移 v13 退役——部署拓扑归配置文件，SQLite 只留业务。
+// 宿主连接器装载器：config.toml 声明清单 → loadModule(包名) 动态 import →
+// validatePlugin（含 sdkRange 兼容）→ 注册。部署拓扑归配置文件，SQLite 只留业务。
 //
 // 失败语义：单个平台装载失败不炸启动——记可操作错误 + failed 清单后继续起服务；
 // 后果由两道显态闸门兜底：bot 接入时 runtime 报「平台未注册」，注册入口（POST /register /

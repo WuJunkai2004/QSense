@@ -39,12 +39,12 @@ export interface HarnessOptions<S extends RawEnvelope = RawEnvelope> {
    */
   probe?(host: PluginContext, instance: ConnectorInstance): Promise<void>;
   /**
-   * 宿主 net 注入（T3）：传 FakeNetKit 驱动假端点——probe 与生命周期检查的
-   * host.net 即此假件；缺省真 NetKit。
+   * 宿主 net 注入：传 FakeNetKit 驱动假端点——probe 与生命周期检查的 host.net
+   * 即此假件；缺省为真 NetKit。
    */
   net?: NetKit;
   /**
-   * normalize 形状探针样本（契约 v2）：一份有代表性的真实载荷信封。泛型 S =
+   * normalize 形状探针样本：一份有代表性的真实载荷信封。泛型 S =
    * 连接器自有信封类型（须携带 platform 键——RawEnvelope 契约）；提供后 harness
    * 跑 normalize-shape 检查——normalize 产物过 assertNormalizedInbound 形状断言。
    * connector 仓 CI 必须提供样本。
@@ -138,7 +138,7 @@ export async function runConformance<S extends RawEnvelope>(
     fail(checks, "net-primitives", e instanceof Error ? e : new Error(String(e)));
   }
 
-  // 5. normalize 形状探针（契约 v2；样本由 connector 仓 CI 提供）
+  // 5. normalize 形状探针（样本由 connector 仓 CI 提供）
   if (opts.normalizeSample !== undefined) {
     try {
       const inbound = plugin.normalize(creds.botId, opts.normalizeSample);

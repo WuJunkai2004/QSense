@@ -1,4 +1,4 @@
-// NetKit / FakeNetKit / longPoll 驱动验收（B⁺ T3，2026-11-24）：
+// NetKit / FakeNetKit / longPoll 驱动验收：
 // - httpClient：NetError 分档（timeout/network/aborted/http）+ schema 参数化 json
 // - backoff / sniffMime：机械正确性
 // - longPoll 驱动不变量：批全摄完才推进游标 / fatal 上抛 / abort 即时 /

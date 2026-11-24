@@ -1,4 +1,4 @@
-// Telegram 连接器单测（P3.5 试金石；B⁺ T4.1 起 FakeNetKit 驱动，零真实网络）：
+// Telegram 连接器单测（FakeNetKit 驱动，零真实网络）：
 // 轮询生命周期（offset 持久化/至少一次摄取/401 与 409 fatal/退避重试）、
 // net 原语（sendMessage 形状/引用映射/媒体 multipart/句柄单次使用/上限拒绝）、
 // 缩略图富化真链路（getFile + 文件下载）、verifyCredential 三档、
@@ -41,7 +41,7 @@ function fakeHost(): {
   statuses: ConnectorStatus[];
   state: Map<string, string>;
 } {
-  // StatePort B⁺ T6 字符串化：值 = JSON 文本（实例侧 stringify/parseJsonWith 直通）
+  // StatePort 值 = JSON 文本（实例侧直接 stringify/parseJsonWith）
   const state = new Map<string, string>();
   const ingested: Array<RawInbound> = [];
   const statuses: ConnectorStatus[] = [];

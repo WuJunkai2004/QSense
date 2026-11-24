@@ -4,30 +4,23 @@
 // 契约类型必须对任何平台（QQ / 微信 iLink / Telegram…）成立，QQ 语义
 // （被动窗口、额度、群/C2C 命名空间）一律走 caps + hooks 声明，不进类型骨架。
 //
-// 上行通道收敛（2026-11-15 决策）：后端唯一上行出口 = HostApi.ingest。
-// 草案中的 instance.onRawEvent(h) 双通道已删——保「插件只拿 HostApi」。
-//
-// 契约 v2（2026-11-17 决策 #8）：解读权下沉插件——ConnectorPlugin 增 normalize
-// 声明，上行即成品 NormalizedMessage；core ingest 表驱动按 payload.platform
-// 路由，对平台零硬编码（第三方插件零 core 改动进场）。破坏性升级：SDK_VERSION
-// bump 2.0.0，sdkRange 三方锁版承担。
+// 后端唯一上行出口 = HostApi.ingest，插件只通过 HostApi 触达宿主。
+// 解读权归插件：ConnectorPlugin.normalize 产出成品 NormalizedMessage；core ingest
+// 按 payload.platform 表驱动路由，对平台零硬编码，新插件无需修改 core。
 
 import { z } from "zod";
 import type { NormalizedInbound } from "./message";
 import type { NetKit } from "./net";
 
 /** SDK 契约版本：宿主加载插件时用 satisfiesRange(SDK_VERSION, plugin.sdkRange) 校验。
- * 2.4.0（B⁺ T6）：破坏性签名变化——normalize payload 改 RawEnvelope、StatePort
- * 值域改 JSON 文本、PluginWebuiRoute.handle / PluginToolDecl.call 统一面、
- * NormalizedMessage.raw→rawJson、ark 改 ArkCard 契约（^2.x 插件兼容声明不变）。 */
+ * 破坏性签名变化必须提升版本，并由三方锁版机制（sdkRange、加载校验、config.toml
+ * range）保证宿主与插件兼容。 */
 export const SDK_VERSION = "2.4.0";
 
 // ---------------------------------------------------------------------------
 // 基座工具保留名（13）：插件工具不得与之重名（加载即硬失败）。quota 等平台
-// 扩展工具由插件声明，跨插件唯一性由 ConnectorRegistry 保证。
-// v2.2（2026-11-19）：register_bot 退出 MCP 工具面（注册是管理面操作，不再
-// 暴露给 agent）——宿主改经 HTTP POST /register（admin token）承载，保留名
-// 集合同步收窄。
+// 扩展工具由插件声明，跨插件唯一性由 ConnectorRegistry 保证。注册是管理面操作，
+// 经 HTTP POST /register 完成，不占用工具名。
 // ---------------------------------------------------------------------------
 
 export const BASE_TOOL_NAMES = [
@@ -69,7 +62,7 @@ export interface ConnectorLogger {
 }
 
 // ---------------------------------------------------------------------------
-// JSON Schema（最小具体子集，B⁺ T6 按实际读取字段裁剪）：够 credentialSchema /
+// JSON Schema（最小具体子集）：覆盖 credentialSchema /
 // inputSchema 声明与闸门校验；递归结构（properties/items 同形）。不引入 ajv。
 // ---------------------------------------------------------------------------
 
@@ -153,8 +146,8 @@ export interface RawEnvelope {
  * 原始入站载荷信封：经 HostApi.ingest 上行，core ingest 表驱动按
  * `payload.platform`（= plugin.id）路由到对应插件的 normalize 解读。
  * connector 负责给信封盖 platform 章（如 Telegram {platform:"telegram", update,…}）；
- * 解读权在插件（契约 v2），原始结构对 core 不透明。P 泛型 = 插件自有信封类型
- * （须携带 platform 键）——调用点字面量不丢字段，core 视角只见 RawEnvelope。
+ * 原始结构对 core 不透明，解读权在插件。P 泛型 = 插件自有信封类型（须携带
+ * platform 键）——调用点字面量不丢字段，core 视角只见 RawEnvelope。
  */
 export interface RawInbound<P extends RawEnvelope = RawEnvelope> {
   botId: string;
@@ -240,9 +233,8 @@ export interface SendReceipt {
 // ---------------------------------------------------------------------------
 
 /**
- * 跨重启状态（B⁺ T6 字符串化）：值 = JSON 文本（消费方 parseJsonWith + 具体
- * schema 解析——存取两侧都见具体类型，序列化纪律在调用侧显式）。
- * 宿主实现落 SQLite kv；缺失返回 null，坏数据由消费方 schema 解析失败兜底。
+ * 跨重启状态：值 = JSON 文本，消费方用 parseJsonWith + 具体 schema 解析。
+ * 宿主实现落 SQLite kv；缺失返回 null，坏数据由消费方的 schema 解析失败兜底。
  */
 export interface StatePort {
   /** 缺失返回 null；值为 JSON 文本 */
@@ -284,8 +276,8 @@ export interface BotCreds {
 }
 
 /**
- * 每 bot 平台配置快照（宿主提供）：P1/P2 = bots 表列投影（authLevel/allowGroups/
- * sendEnabled/name）；P3 起 = bots.config_json 投影。插件不得假设可选键的存在性。
+ * 每 bot 平台配置快照（宿主提供）：bots 注册表字段与全局发送开关的只读投影。
+ * 插件不得假设可选键的存在性。
  */
 export interface BotConfigSnapshot {
   authLevel?: string;
@@ -497,9 +489,9 @@ export interface ConnectorInstance {
 // ---------------------------------------------------------------------------
 
 /**
- * 发送错误语义（契约 v2.2.2 可选面）：平台官方错误码 → core 中立词汇 +
- * 平台自包含文案（「包内文案自包含」纪律——core i18n 不翻译平台错误码）。
- * extractBizCode 的 bizCode 字段约定是 core 与各连接器共用的通用协议。
+ * 发送错误语义：平台官方错误码 → core 中立词汇 + 平台自包含文案
+ * （core i18n 不翻译平台错误码）。bizCode 字段约定是 core 与各连接器共用的
+ * 通用协议。
  */
 export interface SendErrorSemantics {
   /** 平台判定：受理进入人工审核（core 置 pending_audit 等平台事件回填，勿重发） */
@@ -519,7 +511,7 @@ export interface ConnectorPlugin {
   title: string;
   caps: PlatformCaps;
   /**
-   * 发送错误语义（契约 v2.2.2 可选面）：平台官方错误 → core 中立词汇。
+   * 发送错误语义：平台官方错误 → core 中立词汇。
    * core 发送器按「先问插件、后通用兜底」次序使用；未声明=平台无对应语义
    * （如 Telegram 无审核/降级概念），全部走 core 通用文案。
    */
@@ -534,21 +526,20 @@ export interface ConnectorPlugin {
   webui?: PluginWebuiRoute[];
   hooks?: ConnectorHooks;
   /**
-   * 上行解读（契约 v2 必备）：原始载荷信封 → 成品消息 + 会话效应。
+   * 上行解读：原始载荷信封 → 成品消息 + 会话效应。
    * core ingest 按 payload.platform 表驱动路由到此（路由已保证 platform 匹配本
-   * 插件）；载荷完整形状由插件侧 wire schema safeParse 把关（RawEnvelope 只是
-   * 最小信封契约）。返回 null = 载荷无法解读/无需落地（容错丢弃）；parser 内部
-   * 不得抛错逃逸由 core 兜底 warn。
+   * 插件）；载荷完整形状由插件侧 wire schema safeParse 把关。返回 null = 载荷
+   * 无法解读/无需落地；parser 抛错由 core 捕获并 warn。
    */
   normalize(botId: string, payload: RawEnvelope): NormalizedInbound | null;
   /**
-   * 实例工厂（T3 起 ctx: PluginContext = HostApi + net）。结构类型向后兼容：
-   * 声明 (host: HostApi) => … 的旧插件照常接收并忽略 net（双轨期渐进迁移）。
+   * 实例工厂：ctx = PluginContext（HostApi + net）。结构类型兼容只声明
+   * (host: HostApi) 的实现，后者可忽略 net。
    */
   create(ctx: PluginContext, creds: BotCreds): ConnectorInstance;
 }
 
-/** 宿主注入面 v3（B⁺ T3）：HostApi + NetKit。旧插件零破坏（结构类型子集） */
+/** 宿主注入面：HostApi + NetKit；对仅依赖 HostApi 的实现保持结构兼容 */
 export interface PluginContext extends HostApi {
   /** 协议无关传输机械（超时/中止/重试/节流/物化/嗅探/休眠/长轮询驱动） */
   readonly net: NetKit;

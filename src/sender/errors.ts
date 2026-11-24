@@ -1,5 +1,5 @@
 // 发送错误文案：core 只保留平台无关兜底；平台官方码语义经 SDK SendErrorSemantics
-// （契约 v2.2.2）由连接器声明（QQ=qqSendError）。「先问插件、后通用兜底」。
+// 由连接器声明（QQ=qqSendError）。顺序为「先问插件、后通用兜底」。
 // bizCode 字段约定是 core 与各连接器共用的通用协议（ApiError / TelegramApiError）。
 
 import { t } from "../i18n";

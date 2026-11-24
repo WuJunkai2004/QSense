@@ -1,6 +1,5 @@
 // 连接器运行时（宿主侧编排）：per-bot 实例生命周期（启动/接入/摘除）、状态聚合、
-// 发送原语与插件钩子的按 bot 解析。多 bot 管理是宿主职责；连接器实例是纯网络。
-// （P1 收口：原 GatewaySupervisor 的多 bot 编排段迁此，协议段已下沉 connector-qq。）
+// 发送原语与插件钩子的按 bot 解析。多 bot 管理是宿主职责，连接器实例是纯网络。
 
 import type {
   BotConfigSnapshot,
@@ -102,7 +101,7 @@ export class ConnectorRuntime {
     if (e === undefined) return;
     this.entries.delete(botId);
     e.instance.stop();
-    // 会话与 token 缓存一并清理（重加即全新 IDENTIFY，同旧 DELETE /bots/:appid 语义）
+    // 会话与 token 缓存一并清理；重新接入时执行全新 IDENTIFY
     void e.host.state.delete("gw:session");
     const plugin = this.deps.plugins.get(e.platform) as
       | { forget?: (botId: string) => void }
@@ -150,7 +149,7 @@ export class ConnectorRuntime {
     return this.deps.plugins.get(this.platformOf(botId))?.caps;
   }
 
-  /** 每 bot 发送错误语义面（契约 v2.2.2；未知 bot/平台/未声明=undefined 走通用兜底） */
+  /** 每 bot 发送错误语义面；未知 bot/平台或插件未声明时为 undefined，走通用兜底 */
   sendErrorFor(
     botId: string,
   ): import("@qsense/connector-sdk").SendErrorSemantics | undefined {
@@ -212,7 +211,7 @@ export class ConnectorRuntime {
       credential: bot.credentials,
     });
     const start = instance.start().finally(() => {
-      // 致命结束（非 stop/remove）时清理占位，允许 addBot 重新接入（旧 supervisor 纪律）
+      // 致命结束（非 stop/remove）时清理占位，允许后续 addBot 重新接入
       if (!this.stopping && this.entries.get(bot.botId)?.instance === instance) {
         this.entries.delete(bot.botId);
       }

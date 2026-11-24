@@ -1,4 +1,4 @@
-// M4 验收：发送器——幂等重放（同 msg_seq 只发一条）、被动窗口、额度不足明确报错不重试、
+// 发送器验收：幂等重放（同 msg_seq 只发一条）、被动窗口、额度不足明确报错不重试、
 // 双重门禁硬拒绝、304036 降级、304023 审核 pending + MESSAGE_AUDIT 回填、错误码翻译。
 
 import { test } from "node:test";
@@ -59,7 +59,7 @@ interface NetMock {
   proactives: ProactiveWire[];
   recalls: RecallWire[];
   uploads: UploadMediaWire[];
-  /** replies+proactives 总数（等价旧 calls.length） */
+  /** replies+proactives 总数 */
   sentCount(): number;
 }
 
@@ -163,8 +163,7 @@ function setupDb(): Fixture {
   const db = openDatabase(dir);
   runMigrations(db, migrations);
   const repo = new Repo(db);
-  // M9：无 env 播种——基座 bot 直接入 bots 表（白名单含 GROUP，等价旧 ALLOW_GROUPS）；
-  // 发送开关走库并置 true（等价旧 SEND_ENABLE=true）。
+  // 基座 bot 直接入 bots 表（白名单含 GROUP），发送开关走库并置 true。
   db.prepare(
     `INSERT INTO bots(appid, name, secret, agent_token, allow_groups, auth_level, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -410,7 +409,7 @@ test("M4-5 双重门禁：开关关/白名单外 → 硬拒绝，API 零调用",
       bots: fx.registry,
       transportFor: () => mock.mock,
     });
-    // M8：门禁权威在 SQLite（config.sendEnabled 已不参与判定）——落库关开关
+    // 门禁权威在 SQLite（config.sendEnabled 不参与判定）——落库关开关
     fx.repo.setSendEnable(false);
     await assert.rejects(
       () => sender.proactive(BOT, GROUP, "hi"),
@@ -541,8 +540,8 @@ test("M4-9 304023 → pending_audit；MESSAGE_AUDIT_PASS 事件回填 audit_pass
       .prepare("SELECT status FROM sends WHERE kind='proactive'")
       .get() as { status: string };
     assert.equal(row.status, "pending_audit");
-    // 审核通过事件（契约 v2：信封 → 插件 normalize 效应 → repo 回填；
-    // 完整信封形状经 JSON.parse 边界进入——normalize 内 wire schema 把关）
+    // 审核通过事件：信封 → 插件 normalize 效应 → repo 回填。完整信封形状经
+    // JSON.parse 边界进入，由 normalize 内的 wire schema 把关。
     const inbound = normalizeQqEnvelope(
       BOT,
       JSON.parse(
@@ -696,7 +695,7 @@ test("runTool 未知工具名 → isError 快速失败（并发闸集成测试�
   try {
     // runTool 是工具分发层：未知工具名不走任何实现，直接 isError。
     // mcp.ts CallToolRequestSchema 包装层的并发闸（active >= maxConcurrent → 服务繁忙）
-    // 由 mcp.test.ts M6-14 以 maxConcurrent=1 + 挂起发送器做真实覆盖。
+    // 由 mcp.test.ts 的并发闸用例以 maxConcurrent=1 + 挂起发送器做真实覆盖。
     const bad = await runTool("no_such_tool", "{}", { repo: fx.repo });
     assert.equal(bad.isError, true);
   } finally {
@@ -732,7 +731,7 @@ test("M4-12 经 runTool/插件路由：额度耗尽报配额不足、快照进 q
     assert.equal(exceeded.isError, true);
     assert.ok(exceeded.text.includes("日额度不足"));
 
-    // quota 是平台扩展工具（QQ 插件声明，P1 收口）：经 ToolRouter 路由（名单仍 15，见 mcp.test）
+    // quota 是平台扩展工具（QQ 插件声明）：经 ToolRouter 路由（工具名单见 mcp.test）
     const router = new ToolRouter(BASE_TOOL_NAMES);
     router.registerPlugin(qq.plugin);
     const route = router.resolve("quota");
@@ -756,7 +755,7 @@ test("M4-12 经 runTool/插件路由：额度耗尽报配额不足、快照进 q
   }
 });
 
-// —— sendAuto 路由矩阵（M4-14）：被动/主动换道 + 引用块，全部落在已真机验证形态 ——
+// —— sendAuto 路由矩阵：被动/主动换道 + 引用块，全部落在已真机验证形态 ——
 
 function makeSender(
   fx: ReturnType<typeof setupDb>,
@@ -1229,8 +1228,8 @@ test("M4-21 单聊被动窗次数上限 4 次；撤回走 c2c scope", async () =
 });
 
 // ---------------------------------------------------------------------------
-// B⁺ caps 感知收口（2026-11-24 微信真机验收爆雷修复）：
-// 被动/opt-in 都是 QQ C2C 语义，caps 声明必须真正驱动 core 路由与门禁。
+// caps 感知收口：被动窗口与 opt-in 都是 QQ C2C 语义，caps 声明必须真正驱动
+// core 的路由与门禁。
 // ---------------------------------------------------------------------------
 
 test("caps 感知门禁：proactiveOptIn=false 平台跳过 opt-in 校验（微信语义：能对话即能发）", async () => {

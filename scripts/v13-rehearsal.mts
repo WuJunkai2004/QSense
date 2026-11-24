@@ -1,5 +1,4 @@
-// v13 迁移演练（决策 #9 connectors 表退役）：对一份生产库副本跑 runMigrations，
-// 打印前后对账数据。
+// v13 迁移演练：对一份生产库副本跑 runMigrations，打印前后对账数据。
 // 用法：npx tsx scripts/v13-rehearsal.mts <副本目录或副本db路径>
 // 对账关卡：connectors 表删除、bots/sessions/messages/kv connector 状态键完好、版本=13。
 // 副本制作（服务停止后）：cp data/qqbot.db* <临时目录>/（含 -wal/-shm）。

@@ -30,7 +30,7 @@ export interface WaitFacts {
   scope: WaitScope;
   /** 会话 id（私聊=对方 openid，群=群 openid，同 list_all 的 conversations[].id） */
   scopeId: string;
-  /** @本bot 权威判定（契约 v2.1 atMe；undefined=平台无法权威判定） */
+  /** @本bot 权威判定；undefined=平台无法权威判定 */
   atMe: boolean | undefined;
   /** 消息含 @ 实体数（mention 从宽兜底用） */
   mentionCount: number;
@@ -69,8 +69,8 @@ const TIMEOUT_RESPONSE: WaitResponse = { timeout: true, events: [], unread: [] }
 export { TIMEOUT_RESPONSE };
 
 // ---------------------------------------------------------------------------
-// 校验（B⁺ T6：两层——线上形状 zod strictObject 把关（未知键硬拒），语义校验
-// 保既有可操作文案。路由层用 WaitBodyWireSchema.safeParse(req.body) 入口。）
+// 校验分两层：线上形状由 zod strictObject 把关（未知键硬拒），随后做语义校验
+// 并保留可操作文案。路由层以 WaitBodyWireSchema.safeParse(req.body) 为入口。
 // ---------------------------------------------------------------------------
 
 const MAX_FILTER_TERMS = 10;
@@ -78,7 +78,7 @@ const MAX_ID_LIST = 50;
 const HOLD_DEFAULT_S = 30;
 const HOLD_MAX_S = 600;
 
-/** 单条过滤谓词的线上形状（字段集 = WaitFilter 的线上前身；值域语义校验在下方） */
+/** 单条过滤谓词的线上形状；值域语义校验在下方 */
 export const WaitFilterWireSchema = z.strictObject({
   scope: z.string().optional(),
   sessions: z.array(z.string()).optional(),

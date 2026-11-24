@@ -1,4 +1,4 @@
-// M2 验收：事件规范化 + 缓存 + 名册 + 开关状态（灌官方样例形状 + 自造合并转发/语音/卡片事件，SQL 查回断言）。
+// 事件规范化 + 缓存 + 名册 + 开关状态验收（灌官方样例形状 + 自造合并转发/语音/卡片事件，SQL 查回断言）。
 // 2026-11-08 存储重构后：text/content 分列、引用结构化（quote）、聊天记录拍平（records）、
 // 附件 kind 归一、群/私聊合一（scope 列）、users 身份权威（QQ 昵称 last-write-wins）。
 
@@ -69,9 +69,8 @@ const ev = (type: string, data: QqEventData = {}, botId = "10001"): QqEvent => (
 });
 
 /**
- * 原 core handler（P5 契约 v2 已下沉 connector-qq）：测试改为走真管线——
- * 信封 {platform:"qq"} → 表驱动路由 → 插件 normalize → 消息入库 + 效应落地。
- * 既有 M2 断言（群注册表/名册/users 语义）原样保留，验证的是端到端路径。
+ * 走真管线：信封 {platform:"qq"} → 表驱动路由 → 插件 normalize → 消息入库 +
+ * 效应落地。既有群注册表/名册/users 断言验证的是端到端路径。
  */
 function handleGatewayEvent(repo: Repo, event: QqEvent): void {
   makePipeline(repo)(event.type, event.data, event.botId);
@@ -482,7 +481,7 @@ test("M2-10 媒体占位符与引用结构化：媒体前置/103 内嵌媒体收
   assert.equal(mix!.content, "![附件1]\n图片和文字");
 
   // 引用元素（真机 103 形状）：原文结构化进 quote；被引图片归 quote.attachments，
-  // 不混入本条正文/附件（2026-11-24 真机 bug 修复：被引图曾被误当本条 ![附件1]）
+  // 不混入本条正文/附件
   const quote = normalizeMessage(
     ev("GROUP_MESSAGE_CREATE", {
       ...groupMsgShape,

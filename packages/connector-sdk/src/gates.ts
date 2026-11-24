@@ -6,10 +6,9 @@
 // 3. 管线不可绕过 —— 结构性闸门（PluginToolCtx/HostApi 类型里没有 DB/reply），
 //    无法运行时校验，靠类型契约表达；本文件注释即为规格。
 //
-// B⁺ T6（2026-11-24）：入参一律具体契约类型（ConnectorPlugin / JsonSchema / …）。
-// 加载边界（loadModule 动态 import）的不可信形状由 zod customs 在 registry.ts 收口；
-// 本文件保留的 typeof/形状检查是运行时防线（JS 插件 / 越过静态类型的动态面），
-// 文案与历史完全一致。
+// 入参使用具体契约类型（ConnectorPlugin / JsonSchema / …）。加载边界（loadModule
+// 动态 import）的不可信形状先由 registry.ts 的 zod custom 收口；本文件的
+// typeof/形状检查是运行时防线，覆盖 JS 插件与越过静态类型的动态面。
 
 import {
   type ConnectorPlugin,
@@ -323,11 +322,11 @@ export function validatePlugin(plugin: ConnectorPlugin): ConnectorPlugin {
   if (typeof plugin.create !== "function") {
     throw new GateError(`插件 ${plugin.id}：create(host, creds) 必须是函数。`);
   }
-  // 契约 v2（决策 #8）：上行解读权在插件——normalize 缺位 = 该平台消息无法进
-  // core 管线，加载即拒（显态失败优于运行期静默丢消息）。
+  // 上行解读权在插件：normalize 缺位会使该平台消息无法进入 core 管线，因此加载
+  // 即拒，显式失败优于运行期静默丢消息。
   if (typeof plugin.normalize !== "function") {
     throw new GateError(
-      `插件 ${plugin.id}：normalize(botId, payload) 必须是函数（契约 v2：上行解读权在插件）。`,
+      `插件 ${plugin.id}：normalize(botId, payload) 必须是函数（上行解读权在插件）。`,
     );
   }
 

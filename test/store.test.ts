@@ -1,4 +1,4 @@
-// M0 验收：SQLite 打开/WAL/迁移框架——建表、版本记录、幂等重跑、增量迁移。
+// SQLite 打开/WAL/迁移框架验收：建表、版本记录、幂等重跑、增量迁移。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -45,7 +45,7 @@ test("迁移框架：建表、版本记录、WAL 生效、重复执行幂等", (
 
     // 版本已记录（…/ v7 msg_idx / v8 存储重构：messages 合一+users+records+FTS 换源 /
     // v12 多平台中立化：bots platform+凭据 JSON 化、sessions 注册表、gw:session 键平移 /
-    // v13 connectors 表退役：部署拓扑归 config.toml）
+    // v13 删除 connectors 表：部署拓扑归 config.toml）
     const rows = db
       .prepare("SELECT version, name FROM schema_migrations")
       .all();
@@ -152,7 +152,7 @@ test("v13 connectors 表退役：v12 声明行平移 config.toml 后删表（升
     runMigrations(db, [
       migrations.find((m) => m.version === 13)!,
     ]);
-    // connectors 表已退役
+    // connectors 表已删除
     const tables = db
       .prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='connectors'",
@@ -340,7 +340,7 @@ test("v12 升级路径：bots 凭据回填 / gw:session 键平移 / sessions 历
       `INSERT INTO bots(appid, name, secret, agent_token, allow_groups, auth_level, created_at)
        VALUES ('B9', '存量bot', 'sk-legacy', 'tok-legacy', '[]', 'certified', 1)`,
     );
-    // P1 时代的 gw:session 物理键 + C2C 开关键
+    // v12 前的 gw:session 物理键 + C2C 开关键
     const kv = db.prepare("INSERT INTO kv(k, v) VALUES (?, ?)");
     kv.run("gw:session:B9", '{"sessionId":"sess-1","lastSeq":7}');
     kv.run("c2c:switch:B9:U1", "1");
@@ -369,7 +369,7 @@ test("v12 升级路径：bots 凭据回填 / gw:session 键平移 / sessions 历
     });
     assert.equal(bot.secret, "sk-legacy"); // 历史列原样保留（追加式迁移不删改）
 
-    // ② gw:session 旧物理键平移进 connector: 命名空间（RESUME 连续性）
+    // ② gw:session 键平移进 connector: 命名空间（保持 RESUME 连续性）
     const moved = db
       .prepare("SELECT v FROM kv WHERE k = 'connector:qq:B9:gw:session'")
       .get() as { v: string } | undefined;
@@ -382,7 +382,7 @@ test("v12 升级路径：bots 凭据回填 / gw:session 键平移 / sessions 历
       0,
     );
 
-    // ③ sessions 历史登记：messages 权威缓存 + groups + C2C 开关
+    // ③ sessions 回填：messages 缓存 + groups + C2C 开关
     const sessions = db
       .prepare("SELECT session_id, kind FROM sessions ORDER BY session_id")
       .all() as Array<{ session_id: string; kind: string }>;

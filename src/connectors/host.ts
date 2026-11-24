@@ -21,10 +21,9 @@ export interface KvStatePortOpts {
 }
 
 /**
- * kv 表 StatePort 实现（B⁺ T6 字符串化：get/set 直通 JSON 文本——插件侧
- * parseJsonWith+schema 解析；历史值本就是 JSON.stringify 产物，零迁移兼容）。
- * 物理键统一命名空间：`connector:{platform}:{botId}:{key}`（P3 起；v12 迁移已把
- * P1 时代的旧物理键 gw:session:{botId} 平移进来，无 shim、无双键名）。
+ * kv 表 StatePort 实现：get/set 直接读写 JSON 文本，结构由插件用
+ * parseJsonWith + schema 解析。
+ * 物理键统一命名空间：`connector:{platform}:{botId}:{key}`，无别名与兼容 shim。
  */
 export function kvStatePort(opts: KvStatePortOpts): StatePort {
   const phys = (key: string): string =>
@@ -61,12 +60,15 @@ export interface BotHostOpts {
 }
 
 /** 每 bot HostApi（core Logger 结构兼容 ConnectorLogger，可直接传入）。
- * T3 起返回 PluginContext（HostApi + net 注入）——结构类型是 HostApi 超集，
- * 旧声明面零改动。 */
+ * 返回 PluginContext：HostApi 加 NetKit 注入，是 HostApi 的结构超集。 */
 export function createBotHost(opts: BotHostOpts): PluginContext {
   const host: PluginContext = {
     log: opts.log,
-    state: kvStatePort({ db: opts.db, platform: opts.platform, botId: opts.botId }),
+    state: kvStatePort({
+      db: opts.db,
+      platform: opts.platform,
+      botId: opts.botId,
+    }),
     ingest: (raw) => opts.ingest(raw),
     reportStatus: (s) => opts.onStatus(s),
     net: createNetKit(),
@@ -74,7 +76,7 @@ export function createBotHost(opts: BotHostOpts): PluginContext {
   return host;
 }
 
-/** 每 bot 平台配置快照（P1/P2 = bots 表列投影；P3 起 = bots.config_json） */
+/** 每 bot 平台配置快照（bots 注册表字段与全局发送开关的只读投影） */
 export function configSnapshotOf(
   repo: Repo,
   registry: BotRegistry,

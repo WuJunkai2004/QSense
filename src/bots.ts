@@ -1,19 +1,14 @@
-// 机器人注册表：SQLite bots 表是唯一权威存储（2026-10-25 用户定案）。
+// 机器人注册表：SQLite bots 表是唯一权威存储。bot 只能经 WebUI 或 HTTP POST
+// /register 注册；重启后按 bots 表连接全部 bot。
 //
-// 演进：M7 = QQ_APPS env 基座 + kv 动态列表；M8 = env/旧 kv 降级为「首次播种源」；
-// M9 起（用户定案）播种彻底退役——bot 只能经注册入口（WebUI 添加 / HTTP POST /register，
-// 2026-11-19 起 register_bot 已退出 MCP 工具面）或 WebUI 添加/移除，
-// 重启后以 bots 表为准连接全部 bot，env 里不再有任何 bot 相关字段。
-// P3 多平台中立化（2026-11-16，迁移 v12）：bots 表加 platform 列 + 凭据 JSON 化——
-// 凭据形状由各连接器 credentialSchema 权威（QQ={appid,secret}），宿主不感知具体键；
-// appid 列语义扩展为「平台账号 id」（仍是主键，跨平台假定唯一）。
-//
-// - 每个 bot 一个 agent_token（明文落库，用户拍板不做加密）：/mcp Bearer 按表反查绑定 bot；
-//   轮换后旧 token 立即失效，新值只返回一次，由调用方（智能体/WebUI）自行保存。
+// - platform 列标识连接器；凭据统一存 credentials_json，形状由该平台连接器的
+//   credentialSchema 定义，宿主不感知具体键。appid 列是平台账号 id（主键）。
+// - 每个 bot 一个 agent_token（明文落库）：/mcp Bearer 按表反查绑定 bot；轮换后
+//   原 token 立即失效，新值只返回一次，由调用方自行保存。
 // - 每 bot 独立发送白名单 allow_groups（与「一个 token 一个 bot」的权限域一致）。
-// - 每 bot 独立认证等级 auth_level（M9 落库，原 env QQ_AUTH_LEVEL 全局档位退役）：
-//   决定主动消息频控预算 certified=60qpm / uncertified=30qpm，缺省未认证（保守）。
-// - 纪律：本模块不 log 任何 secret/token（logger 兜底剥离仅是最后防线，源头不打）；
+// - 每 bot 独立认证等级 auth_level：决定主动消息频控预算 certified=60qpm /
+//   uncertified=30qpm，缺省未认证（保守）。
+// - 纪律：本模块不 log 任何 secret/token（logger 兜底剥离仅是最后防线）。
 // - add 必过 verify（平台连接器 hooks.verifyCredential），未验证不入库。
 
 import { randomBytes } from "node:crypto";
@@ -265,7 +260,7 @@ export class BotRegistry {
       .run(
         accountId,
         name,
-        "", // 旧物理列退役：凭据权威在 credentials_json（v12），列仅为追加式迁移保留
+        "", // secret 物理列为追加式迁移保留；凭据权威在 credentials_json
         agentToken,
         JSON.stringify(input.allowGroups ?? []),
         authLevel,

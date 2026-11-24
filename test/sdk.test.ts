@@ -1,5 +1,5 @@
-// @qsense/connector-sdk 契约测试：semver-lite / 声明面闸门 / 工具路由 / 注册表 / 内存宿主 / harness。
-// P0 验收：本文件全绿 + 既有 112 用例不受影响（diff 纯新增）。
+// @qsense/connector-sdk 契约测试：semver-lite / 声明面闸门 / 工具路由 / 注册表 /
+// 内存宿主 / harness。
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -259,7 +259,7 @@ describe("sdk/gates", () => {
     assert.throws(() => validatePlugin(p), /sdkRange/);
   });
 
-  it("normalize 缺位即拒（契约 v2：上行解读权在插件）", () => {
+  it("normalize 缺位即拒（上行解读权在插件）", () => {
     const p = makePlugin({ normalize: undefined as never });
     assert.throws(() => validatePlugin(p), /normalize/);
   });
@@ -376,7 +376,7 @@ describe("sdk/registry", () => {
     );
   });
 
-  it("loadModule：默认导出为工厂时注入 init 执行（P2 声明制加载路径）", async () => {
+  it("loadModule：默认导出为工厂时注入 init 执行", async () => {
     // 临时 .mjs：默认导出工厂，校验 init 透传 + 声明面过闸门
     const file = join(
       mkdtempSync(join(tmpdir(), "qsense-sdk-factory-")),
@@ -459,7 +459,7 @@ describe("sdk/memory+harness", () => {
     h.host.ingest({ botId: "b1", payload: { platform: "t", n: 2 } });
     assert.equal(h.ingested.length, 2);
     assert.deepEqual(h.ingested[1]?.payload, { platform: "t", n: 2 });
-    // StatePort 值 = JSON 文本（B⁺ T6 字符串化）
+    // StatePort 值 = JSON 文本
     await h.state.set("s", JSON.stringify({ a: [1, 2] }));
     assert.deepEqual(JSON.parse((await h.state.get("s")) ?? "null"), {
       a: [1, 2],

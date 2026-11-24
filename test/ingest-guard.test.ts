@@ -1,10 +1,9 @@
-// T1 ingest 管线加固验收（2026-11-24）：形状违规消息不得炸整批、不得触发
-// 「标记后入库失败→重拉全滤→游标推进→静默丢批」失败链、告警不得含消息正文。
+// ingest 管线防护验收：形状违规消息不得炸整批、不得触发「标记后入库失败→重拉
+// 全滤→游标推进→静默丢批」失败链、告警不得含消息正文。
 //
-// 失败链背景（架构审查 §1.3）：旧管线 BoundedDedup.isNew 检查即标记，单条
-// saveMessage 抛错（如 undefined 绑定撞 better-sqlite3 TypeError）时该键已进
-// 去重窗口——连接器重拉同批时全部命中去重被滤、游标照样推进，进程生命周期内
-// 永久静默丢失。加固后：检查/标记两段式 + 逐条 try/catch 隔离 + 入库成功才标记。
+// 关键约束：BoundedDedup.isNew 只检查不标记，单条 saveMessage 抛错（如 undefined
+// 绑定撞 better-sqlite3 TypeError）时不能把该键提前放进去重窗口。管线采用检查/
+// 标记两段式 + 逐条 try/catch 隔离，并且只在入库成功后标记。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

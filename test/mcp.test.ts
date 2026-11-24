@@ -1,4 +1,4 @@
-// M3 验收：MCP 客户端 SDK 直连 /mcp——
+// MCP 验收：客户端 SDK 直连 /mcp——
 // 鉴权（401）、listTools、会话列表→取新消息（拉取即已读，水位自动推进）→搜历史闭环、
 // context/browse。
 
@@ -120,8 +120,8 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
   repo.setGroupSwitch("10001", GROUP, true);
   repo.addGroup("10001", "GROUP_OPENID_G2");
 
-  // M9：env 不再读取——admin token 现场生成即可（本文件只测 401，不需要有效值），
-  // bot 注册入表，发送开关走库
+  // admin token 现场生成即可（本文件只测 401，不需要有效值）；bot 注册入表，
+  // 发送开关走库
   repo.ensureRuntime();
   if (opts.sendEnabled === true) repo.setSendEnable(true);
   const registry = new BotRegistry({ db });
@@ -143,7 +143,7 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
     tgAgentToken = registry.rotateToken("9167497677");
   }
 
-  // 可选：挂起的发送器——net.reply 阻塞到 release()，供 M6-14 并发闸测试占住并发槽
+  // 可选：挂起的发送器——net.reply 阻塞到 release()，供并发闸测试占住并发槽
   let releaseHang: () => void = () => {};
   let sender: Sender | undefined;
   if (opts.hangSend === true) {
@@ -175,7 +175,7 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
     });
   }
 
-  // 平台扩展工具（quota）声明面：真 QQ 插件注册（M3-2 名单 15 锚点依赖）
+  // 平台扩展工具（quota）声明面：真 QQ 插件注册（工具名单断言依赖）
   const plugins = new ConnectorRegistry();
   plugins.register(createQqConnector({ log: createLogger("error") }));
   if (opts.telegramBot === true) {

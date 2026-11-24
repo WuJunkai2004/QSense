@@ -1,7 +1,7 @@
 // 迁移定义：version 递增，up 为 DDL（exec 可执行多语句）；run 为可选 JS 步骤（数据重演，
 // v8 起支持——纯 SQL 表达不了的 normalize 重演走这里），与 up 同事务同成败。
 // 新结构一律追加新版本，禁止修改历史迁移（已应用的版本按 version 跳过）。
-// M2 的业务表（groups/members/messages/messages_fts/c2c/sends/quota_daily）作为 version 2 追加。
+// 基础业务表（groups/members/messages/messages_fts/c2c/sends/quota_daily）作为 version 2 追加。
 
 import { normalizeQqMessage } from "@qsense/connector-qq";
 import type { MsgScope } from "@qsense/connector-sdk";
@@ -159,9 +159,9 @@ export const migrations: Migration[] = [
   {
     version: 5,
     name: "bots-registry",
-    // M8 机器人注册表：唯一 bot 权威存储（.env QQ_APPS / 旧 kv bots:dynamic:v1 只作首次播种源）。
-    // agent_token 明文存储（2026-10-25 用户拍板：单机管理面，不做加密）；每个 token 只绑定一个 bot，
-    // WebUI 设置页 / token_refresh 可轮换，旧 token 立即失效，新值仅返回一次。
+    // 机器人注册表：bot 的唯一权威存储。
+    // agent_token 明文存储（单机管理面）；每个 token 只绑定一个 bot，
+    // WebUI 设置页可轮换，原 token 立即失效，新值仅返回一次。
     up: `
       CREATE TABLE bots(
         appid TEXT PRIMARY KEY,
@@ -176,7 +176,7 @@ export const migrations: Migration[] = [
   {
     version: 6,
     name: "bots-auth-level",
-    // M9：认证等级 per-bot 落库（env QQ_AUTH_LEVEL 全局档位退役）。
+    // 认证等级按 bot 落库。
     // 主动消息 bot 级频控预算：certified=60qpm / uncertified=30qpm，缺省未认证（保守）。
     up: `ALTER TABLE bots ADD COLUMN auth_level TEXT NOT NULL DEFAULT 'uncertified';`,
   },
@@ -196,14 +196,14 @@ export const migrations: Migration[] = [
   {
     version: 8,
     name: "storage-refactor",
-    // 2026-11-08 存储重构（用户定案「存语义，渲染留派生；身份归身份，内容归内容」）：
-    // - messages 群/私聊合一（scope 列），c2c_messages 退役；content 不再糅引用与记录转写，
-    //   新增 text（本条纯文本，FTS 唯一检索源）/ quote_json（结构化引用）/ records_count
-    // - users 表：QQ 昵称唯一权威（openid 不变、昵称 last-write-wins）；members 砍 username 列
-    //   （群昵称只在 mention 里出现且一人多昵称，当身份名必然混乱）
-    // - message_records：聊天记录（102）拍平子消息出列，宿主 content 只留条数标记
-    // - FTS 换源 text 列；elements_json 废弃（raw_json 有完整元素树，不再存派生副本）
-    // - 历史 raw_json 全量重演（normalize 新管线），outgoing 补记行（无 raw）直接平移
+    // 存储语义化：存语义，渲染留派生；身份归身份，内容归内容。
+    // - messages 群/私聊合一（scope 列）；content 不混入引用与记录转写，
+    //   并增加 text（本条纯文本，FTS 唯一检索源）/ quote_json（结构化引用）/ records_count。
+    // - users 表是 QQ 昵称唯一权威（openid 不变、昵称 last-write-wins）；members 只存
+    //   群成员关系事实——群昵称一人多群，不适合当身份名。
+    // - message_records：聊天记录（102）拍平为子消息，content 只留条数标记。
+    // - FTS 改以 text 为源；raw_json 保留完整元素树，不再存 elements_json 派生副本。
+    // - 既有 raw_json 全量重演 normalize，outgoing 补记行（无 raw）直接平移。
     up: `
       DROP TRIGGER IF EXISTS messages_fts_ai;
       DROP TRIGGER IF EXISTS messages_fts_ad;
@@ -378,7 +378,7 @@ export const migrations: Migration[] = [
           return;
         }
         // 正常行：从 raw_json 全量重演（QQ parser 新管线产出 text/quote/records/干净 content；
-        // parser 已下沉 connector-qq（契约 v2），此处命名导出复用同一实现）
+        // 复用 connector-qq 的同一 normalize 实现）
         let m = null;
         try {
           m = normalizeQqMessage({
@@ -529,12 +529,11 @@ export const migrations: Migration[] = [
   {
     version: 9,
     name: "cursor-rebase",
-    // 2026-11-08 真机踩坑：kv 已读水位存的是 messages 表 rowid（get_new 写入 rows[last].rid）。
-    // v7 旧表因官方重推（INSERT OR IGNORE 失败仍消耗 rowid）积累了 rowid 空洞，计数器曾到 7882；
-    // v8 重建 messages 表后 rowid 从 1 连续重排，而 kv 游标值原样保留——旧游标（如 7881/7882）
-    // 大于新表全部 rowid，get_new 永远查空，增量拉取哑火直到 rowid 涨过旧值（真机复现：
-    // E8CD87 群 9 条新消息 get_new 返回空）。
-    // 修复：游标重定基 = 各会话在新表的当前 MAX(rowid)（历史视为已读；水位键名不变，此后增量恢复）。
+    // kv 已读水位存 messages 表 rowid。重建 messages 表后 rowid 从 1 连续重排，而
+    // 原游标值可能大于新表全部 rowid，导致 get_new 永远查空、增量拉取失效，直到
+    // rowid 涨过旧值。
+    // 修复：游标重定基为各会话在新表的当前 MAX(rowid)（历史视为已读；水位键名不变，
+    // 此后增量恢复）。
     up: "",
     run: (db: DB): void => {
       const rows = db
@@ -579,11 +578,10 @@ export const migrations: Migration[] = [
   {
     version: 11,
     name: "connector-registry",
-    // P2 分仓+声明制（2026-11-15）：connector 声明表——启用了哪些平台、用哪个包、
-    // 平台配置（config_json，P3 起接 BotConfigSnapshot 权威）。宿主启动读本表
-    // enabled=1 行 → loadModule(包名) 动态 import → sdkRange 校验 → 注册。
-    // 包安装拓扑（node_modules / file: 依赖）属部署层，env 不承担任何平台语义。
-    // QQ 是基座平台：INSERT OR IGNORE 播种一行（新库/存量库都保证声明存在）。
+    // connector 声明表：记录启用了哪些平台、使用哪个包及平台配置。
+    // 宿主启动时读取 enabled=1 的行，动态 import 包并校验 sdkRange 后注册。
+    // 包安装拓扑（node_modules / file: 依赖）属于部署层。
+    // QQ 是基座平台：INSERT OR IGNORE 播种一行，确保新库与存量库都包含该声明。
     up: `
       CREATE TABLE connectors(
         platform TEXT PRIMARY KEY,
@@ -602,17 +600,15 @@ export const migrations: Migration[] = [
   {
     version: 12,
     name: "multi-platform-bots",
-    // P3 存储/工具面中立化（2026-11-16）：
-    // - bots 表加 platform 列（缺省 'qq'）+ credentials_json（凭据 JSON 化，形状由各
-    //   连接器 credentialSchema 权威：QQ={appid,secret}）。存量 QQ 行由 run 步骤原地
-    //   回填 JSON；appid/secret 物理列保留（追加式迁移不删列），appid 列语义扩展为
-    //   「平台账号 id」（仍是主键——QQ appid / 各平台唯一账号标识，假定跨平台不撞）。
+    // 存储与工具面多平台中立化：
+    // - bots 表增加 platform 列（缺省 'qq'）与 credentials_json（形状由各连接器
+    //   credentialSchema 定义：QQ={appid,secret}）。存量 QQ 行由 run 步骤原地回填
+    //   JSON；appid/secret 物理列保留，appid 仍主键并作为平台账号 id。
     // - 新增 sessions 显式会话注册表：(bot_id, session_id) → kind。ingest 入库即登记，
-    //   detectSessionKind 先查注册表、原探测三件套降级为兜底——消除对「群 openid 与
-    //   用户 openid 命名空间互斥」这一 QQ 保证的依赖（其他平台同值 id 可能群/私并存）。
-    // - P1 迁移债清算：旧物理键 gw:session:{botId} 平移进 connector:qq:{botId}:gw:session
-    //   （StatePort 统一命名空间），宿主 kvStatePort 的键名 shim 随之拆除。
-    //   平移保生产 RESUME 连续性（重启凭旧会话补发断线事件，不丢消息）。
+    //   detectSessionKind 先查注册表，缓存/开关探测仅作兜底——不依赖「群 openid 与
+    //   用户 openid 命名空间互斥」的平台保证。
+    // - StatePort 键迁入统一命名空间 connector:qq:{botId}:gw:session；平移保持
+    //   RESUME 连续性，重启后可凭原会话补发断线事件。
     up: `
       ALTER TABLE bots ADD COLUMN platform TEXT NOT NULL DEFAULT 'qq';
       ALTER TABLE bots ADD COLUMN credentials_json TEXT NOT NULL DEFAULT '{}';
@@ -631,7 +627,7 @@ export const migrations: Migration[] = [
         "UPDATE bots SET credentials_json = json_object('appid', appid, 'secret', secret)",
       );
 
-      // ② gw:session 旧物理键平移（P1 shim 拆除的前置）
+      // ② 把 gw:session 键平移进 StatePort 统一命名空间
       const kvRows = db
         .prepare("SELECT k, v FROM kv WHERE k LIKE 'gw:session:%'")
         .all() as Array<{ k: string; v: string }>;
@@ -675,11 +671,10 @@ export const migrations: Migration[] = [
   {
     version: 13,
     name: "connectors-toml",
-    // P5 决策 #9（2026-11-17）部署拓扑归位：connectors 表（v11）退役——「插件从
-    // 哪里加载」是部署拓扑，权威迁 config.toml [connectors.*] 声明（package/range/
-    // source）。存量声明行（qq / telegram）由部署侧平移进 config.toml（本仓已带
-    // 样例，含全文件凭据红线：凭据唯一权威仍在 bots.credentials_json）。
-    // bots.platform 改为声明名外键：声明缺失由启动期 fail-fast 拒启（显态失败）。
+    // 部署拓扑迁入 config.toml：「插件从哪里加载」属于部署配置，权威为
+    // [connectors.*] 声明（package/range/source）。声明行由部署侧迁移进 config.toml
+    // （仓库提供样例）；凭据唯一权威仍在 bots.credentials_json。
+    // bots.platform 对应声明名，声明缺失时由启动期 fail-fast 拒启。
     up: `
       DROP TABLE IF EXISTS connectors;
     `,

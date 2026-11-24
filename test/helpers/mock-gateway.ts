@@ -1,5 +1,5 @@
 // Mock QQ 网关：本机 ws 服务，按官方 op 语义模拟 HELLO/IDENTIFY/READY/心跳/DISPATCH/RESUME/op9/关闭码。
-// 用途：M1 验收——不依赖真实QQ消息即可端到端验证接入器（含断线补发不丢消息）。
+// 用途：不依赖真实 QQ 消息即可端到端验证接入器（含断线补发不丢消息）。
 
 import { createServer, type Server } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";

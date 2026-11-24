@@ -346,7 +346,7 @@ test("qrbind 平台路由（P2 声明制）：/platforms/qq/login/qr/* 同语义
     );
     assert.deepEqual(await poll1.json(), { status: "pending" });
 
-    // 扫码确认 → 宿主中介注册：created 形状与旧 /qr-bind/poll 一致，
+    // 扫码确认 → 宿主中介注册：created 形状与兼容端点 /qr-bind/poll 一致，
     // 且响应体绝不含 credential/secret（AppSecret 不出本进程）
     fx.upstream.scanned = true;
     const poll2 = await fetch(

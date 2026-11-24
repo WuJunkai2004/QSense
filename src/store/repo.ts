@@ -1,13 +1,10 @@
 // 仓储层：SQLite 状态的唯一读写口（better-sqlite3 同步 API，单进程）。
-// 2026-11-08 存储重构（用户定案）：
-// - messages 群/私聊合一（scope 列 group|chat），c2c_messages 镜像表退役——sender 早已统一，
-//   存储终于对齐；repo 层 *C2c 镜像方法全灭，一套方法吃 scope 参数
-// - users 表 = QQ 昵称唯一权威（openid 对同一 bot 不变，昵称 last-write-wins）；
-//   members 只存群成员关系事实（砍 username 列——群昵称只在 mention 里出现且一人多昵称，
-//   当身份名必然混乱），展示名一律 join users
-// - 引用结构化（quote_json，ingest 提取 + 缓存 enrich + 读取懒补），resolveQuotes 内联/逐行
-//   比对家族全灭；聊天记录拍平（message_records 表）
-// - 热路径 stmt 构造器缓存（对齐既定模式）；管理面低频操作 inline prepare
+// - messages 群聊/单聊合一（scope 列 group|chat），一套方法按 scope 参数工作。
+// - users 表是昵称唯一权威（openid 在同一 bot 内稳定，昵称 last-write-wins）；
+//   members 只记录群成员关系，展示名一律 join users。
+// - 引用以 quote_json 结构化存储（ingest 提取 + 缓存补全 + 读取懒补）；聊天记录
+//   拍平到 message_records。
+// - 热路径缓存 statement；管理面低频操作就地 prepare。
 
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
@@ -23,11 +20,10 @@ import type { Logger } from "../utils/logger";
 import type { TtsConfig } from "../tts";
 import type { DB } from "./db";
 
-// B⁺ T6：better-sqlite3 v13 内建双泛型 prepare<Params, Result>——行类型进语句，
-// 读取端零盲转型。位置参数用字面量元组（Database.Statement<[...], R>），命名参数
-// 用对象接口包一层元组（Database.Statement<[XxxParams], R>；P 与 SQL @占位一一对应，
-// better-sqlite3 对缺失键抛错、多余键忽略）。不设本地别名——约束留在库类型里，
-// 本文件零 unknown/any 字样。
+// better-sqlite3 双泛型 prepare<Params, Result> 让行类型进入语句，读取端不需要
+// 类型断言。位置参数用字面量元组（Database.Statement<[...], R>），命名参数用对象
+// 接口包一层元组（Database.Statement<[XxxParams], R>）。P 与 SQL @占位一一对应：
+// 缺失键抛错、多余键忽略。
 
 /** messages 行写入参数（命名绑定） */
 interface InsertMsgParams {
@@ -262,7 +258,7 @@ export class Repo {
   private readonly detectGroupMsgStmt: Database.Statement<[string, string]>;
   private readonly detectChatMsgStmt: Database.Statement<[string, string]>;
   private readonly detectGroupRegStmt: Database.Statement<[string, string]>;
-  /** P3：会话注册表（sessions 表）——kind 裁决权威源 + ingest 登写 */
+  /** 会话注册表（sessions 表）：kind 裁决权威源，ingest 负责登记 */
   private readonly sessionKindStmt: Database.Statement<
     [string, string],
     { kind: string }
@@ -317,7 +313,7 @@ export class Repo {
         @author_openid, @author_name, @ts, @text, @quote_json, @attachments_json
       )
     `);
-    // QQ 昵称唯一权威：openid 不变、昵称 last-write-wins（载荷没给名字时保留旧值）
+    // QQ 昵称唯一权威：openid 不变、昵称 last-write-wins（载荷未提供名字时保留已有值）
     this.upsertUserStmt = db.prepare(`
       INSERT INTO users(bot_id, openid, name, first_seen, last_seen)
       VALUES (@bot_id, @openid, @name, @now, @now)
@@ -415,7 +411,7 @@ export class Repo {
     this.detectGroupRegStmt = db.prepare(
       "SELECT 1 FROM groups WHERE bot_id = ? AND group_openid = ? LIMIT 1",
     );
-    // P3 会话注册表：显式登记 (bot_id, session_id) → kind，探测降级为兜底
+    // 会话注册表：显式登记 (bot_id, session_id) → kind，探测仅作兜底
     this.sessionKindStmt = db.prepare<[string, string], { kind: string }>(
       "SELECT kind FROM sessions WHERE bot_id = ? AND session_id = ?",
     );
@@ -548,7 +544,7 @@ export class Repo {
             rec.attachments.length > 0 ? JSON.stringify(rec.attachments) : null,
         });
       }
-      // P3：会话注册表登记（detectSessionKind 的权威源；upsert 幂等）
+      // 会话注册表登记（detectSessionKind 的权威源；upsert 幂等）
       this.registerSession(m.botId, m.scopeId, m.scope);
       if (m.scope === "group" && m.authorOpenid !== "") {
         this.upsertMemberStmt.run({
@@ -611,7 +607,7 @@ export class Repo {
   /**
    * quote_msg 数据（读取端）：quote_json 直读，被引晚到（只有锚没有身份）时查缓存懒补并回写。
    * body 已按「首行 + ≤50 字符（码点计，超出加 …）」截断——被引原文是别人的话，不整段进上下文。
-   * B⁺ T6：落盘 JSON 过 SDK QuoteSchema（z.infer 即落库形状），坏档按缺失处理 + warn。
+   * 落盘 JSON 用 SDK QuoteSchema 解析；坏档按缺失处理并告警。
    */
   quoteOf(row: MsgRow): QuoteMsgData | null {
     if (row.quote_json === null) return null;
@@ -665,7 +661,7 @@ export class Repo {
   // —— 群注册表 / 成员名册 ——
 
   /**
-   * 会话注册表登记（P3）：任何「该 bot 存在此会话」的证据路径都登记——
+   * 会话注册表登记：任何「该 bot 存在此会话」的证据路径都登记——
    * 消息入库（saveMessage 事务内）、群注册/开关事件、C2C 开关事件。
    * 只登记侧别事实（kind），不携带任何业务状态；同 id 同 kind 重复登记幂等。
    */
@@ -745,8 +741,8 @@ export class Repo {
   // 每 bot 使用开关：kv tts:<appid>（"enable"/"disable"，无键=关——新 bot 缺省禁用）。
 
   /** 全局 TTS 配置；null=未配置（send_media tts: 将被可操作拒绝）。
-   *  B⁺ T6：JSON 过 zod schema，坏档/字段缺失按未配置处理（安全默认）。
-   *  format 缺省=旧配置（字段加入前保存的）→ 按 "wav" 处理。 */
+   *  JSON 经 zod schema 解析，坏档或字段缺失按未配置处理（安全默认）。
+   *  format 缺省时按 "wav" 处理，兼容早期保存的配置。 */
   getTtsConfig(): TtsConfig | null {
     const row = this.kvGetStmt.get(TTS_CONFIG_KEY);
     if (row === undefined) return null;
@@ -801,7 +797,7 @@ export class Repo {
       .all(botId);
   }
 
-  /** WebUI 单聊会话列表：openid + 最后一条消息摘要（名字=users 权威，旧名册反查 hack 已死） */
+  /** WebUI 单聊会话列表：openid + 最后一条消息摘要（名字以 users 表为权威） */
   listChatsWithLast(botId: string): ChatWithLastRow[] {
     return this.db
       .prepare<[string], ChatWithLastRow>(
@@ -932,13 +928,11 @@ export class Repo {
   }
 
   /**
-   * 会话侧别自动探测（读写工具的 type 参数退役后的裁决源）：
-   * P3 起权威源 = sessions 显式注册表（ingest 入库/开关事件即登记）——
-   * 不再依赖「群 openid 与用户 openid 命名空间互斥」这一 QQ 保证
-   * （其他平台同值 id 可能群/私并存，注册表按登记侧别唯一裁决）。
-   * 注册表未命中（迁移前历史数据/异常路径）→ 原探测三件套兜底：
-   * group 证据=群消息缓存或群注册表；chat 证据=单聊消息缓存或 C2C 开关记录。
-   * null=两侧均无。
+   * 会话侧别自动探测。权威源是 sessions 显式注册表（ingest 入库/开关事件即登记），
+   * 不依赖「群 openid 与用户 openid 命名空间互斥」这一 QQ 保证——其他平台的同值
+   * id 可能在群/私聊并存，注册表按登记侧别唯一裁决。
+   * 注册表未命中（存量数据或异常路径）时用三类证据兜底：群消息缓存、群注册表、
+   * 单聊消息缓存或 C2C 开关记录。两侧均无返回 null。
    */
   detectSessionKind(botId: string, id: string): "group" | "chat" | null {
     const hit = this.sessionKindStmt.get(botId, id);
@@ -1137,7 +1131,8 @@ export class Repo {
   /**
    * 已读水位：某会话已被拉取到的 rowid 位置。语义 = "拉取即已读"：get_new 成功后由服务端
    * 自动推进，不暴露给 MCP 工具面。null = 从未拉取（全部消息算未读）。
-   * 键延续历史：群 scope 为 groupOpenid，私聊为 `c2c:{userOpenid}`（保持存量水位连续性）。
+   * 键格式保持稳定：群 scope 为 groupOpenid，私聊为 `c2c:{userOpenid}`，保证存量
+   * 已读水位连续。
    */
   getCursor(botId: string, key: string): string | null {
     const row = this.kvGetStmt.get(`cursor:${botId}:${key}`);
@@ -1149,12 +1144,12 @@ export class Repo {
     this.kvSetStmt.run(`cursor:${botId}:${key}`, cursor);
   }
 
-  // —— M6 合规退出：整群删除（唯一人工清理通道，仅 WebUI 触发） ——
+  // —— 整群删除（唯一人工清理通道，仅 WebUI 触发） ——
 
   /**
    * 删除某群全部缓存：消息（FTS 触发器随行清理）、记录子消息、名册、注册表、已读水位。
    * sends 发送账本保留（运维审计）；users 身份**不删**（跨会话存续）。返回各类删除行数。
-   * 原为 MCP 工具 forget，现仅经 WebUI（/ui/api DELETE /groups/:id，admin token + 人工确认）触发。
+   * 仅经 WebUI（/ui/api DELETE /groups/:id，admin token + 人工确认）触发。
    */
   purgeGroupAll(
     botId: string,
@@ -1284,7 +1279,7 @@ export class Repo {
     this.incrQuotaStmt.run(botId, targetOpenid, date);
   }
 
-  /** 当日主动消息已发总量（M4 写路径负责记账，此处只读水位） */
+  /** 当日主动消息已发总量（写路径负责记账，此处只读水位） */
   proactiveSentToday(botId: string, dateStr: string): number {
     return (
       this.db
@@ -1325,7 +1320,7 @@ export class Repo {
     return true;
   }
 
-  // —— M8 运行时设置（kv）：bots 表归 BotRegistry 管，这里只管非 bot 维度设置 ——
+  // —— 运行时设置（kv）：bots 表归 BotRegistry 管，这里只管非 bot 维度设置 ——
 
   /** 发送总开关（kv settings:runtime:v1）。缺省=关闭（安全默认）；坏档按关闭处理 */
   getSendEnable(): boolean {
@@ -1340,7 +1335,7 @@ export class Repo {
   }
 
   /**
-   * M9 启动引导（幂等）：发送总开关缺省 false（硬约束4：写操作默认关）；
+   * 启动引导（幂等）：发送总开关缺省 false（写操作默认关闭）；
    * admin token 缺失时现场生成（48hex，与 agent_token 同规格），created=true 时
    * 调用方必须打印一次（仅此一次，之后只存 kv admin:token:v1）。
    */
