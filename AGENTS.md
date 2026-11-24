@@ -67,17 +67,17 @@ QQ / Telegram 官方机器人 + 微信（iLink）→ MCP 网关。本文件是�
 ## 分仓拓扑 / `packages/`
 
 - `packages/connector-sdk`：三面契约（connector/hooks/tools+webui + normalize）+ 闸门（validatePlugin/sdkRange，normalize 必备）+ ToolRouter + conformance harness（normalize-shape 形状断言，connector 仓 CI 须给 normalizeSample）。**宿主自有**，随宿主 bundle 打包，不出包不 external。`NormalizedMessage`/`InboundEffect` 类型族权威在此（`src/message.ts`）。
-- `packages/connector-qq`（sdkRange ^2.x，独立仓形态，物理拆出零改动）：
+- `packages/connector-qq`（sdkRange ^2.x；**2026-11-25 起为 submodule**：gitlink → 本仓库 `connector/qq` 分支（根=包目录），`.gitmodules` url=QSense.git；clone 需 `git submodule update --init --recursive`）：
   - root deps 以 `file:packages/connector-qq` 声明（npm workspaces 符号链接进 node_modules）；esbuild external，独立 dist 由 build.mjs 第二构建产出（`exports.default → dist/index.js`，**`npm start` 前必须先 `npm run build`**）。
   - **默认导出 = 工厂** `(init?: {log}) => ConnectorPlugin`；命名导出（createQrBindTask/dailyCountOf/QrBindError/normalizeQqEnvelope/normalizeQqMessage 等）供宿主/测试按需引用——迁移 v8 raw_json 历史重演经 `normalizeQqMessage` 复用。
   - **B⁺ T4.3 起**：`/gateway` 与扫码 lite 走 NetKit schema 参数化（`fetchGatewayUrl(http,…)`/`createQrBindTask(http)`）；`QqOverrides` 只剩官方 SDK 边界缝（getAccessToken/clearTokenCache/reconnect/apiFor——SDK 内部自管网络，注明理由保留）；旧 getGatewayUrl/qrBind fetch 注入已删，测试改经插件 `opts.net`（FakeNetKit 脚本化 /gateway 应答与 lite 上游）。
   - QQ parser 在包内（`src/normalize.ts` + `src/expand.ts`；B⁺ T5 起事件线格式 schema 在 `src/wire.ts`——元素判别联合 0/3/101/102/103 + 容错字段/容错数组，防御 typeof 已退役）；额度记账走 StatePort 计数器 `qq:quota:{date}`（北京时间自然日）；包内文案自包含（`src/texts.ts`）。
   - 包内文件：plugin.ts 声明面 / instance.ts 每 bot 网络实例 / net.ts 线格式（wire→msg_type 0/2/7 + message_reference + file_info）/ quota.ts 令牌桶+日额度 / qrbind.ts 扫码绑定 / token.ts·url.ts·intents.ts / errors.ts 发送错误语义 / texts.ts。
   - 协议事实（线格式/官方限制）改动必须先核对本文「QQ 官方 API 关键事实」与 `test/connector-qq-net.test.ts` 规格（真机验证形态，勿改断言）。
-- `packages/connector-telegram`（试金石，真机闭环；零运行时依赖）：getUpdates 长轮询 + StatePort 持久化 poll offset（断线补拉）+ 发送 1.2s 节流；parser 在包内（`src/parser.ts`）；ingest 时顺带富化图片缩略图 data: URL。**B⁺ T4.1 起传输机械走 SDK NetKit**（longPoll 驱动/throttle/materialize/魔数嗅探/时钟），wire 类型 zod 化（轮询路径只守结构不守词表；信封保真手解——错误文案锚点在 description）；测试驱动 = FakeNetKit（`opts.net` 控制面 + `ctx.net` 数据面），包内零 overrides；getMe 身份内聚在 plugin（create 时 fire-and-forget），instance 不感知身份。
-- `packages/connector-weixin`（P4，实验性；零运行时依赖，**不用 openclaw-weixin 包本体**——只作协议说明书自研）：iLink bot API——扫码配对（服务端后台状态机 + `login: qr-pair` 路由）+ getupdates 长轮询（StatePort 持久化 `poll:buf` 游标 / `ctx-tokens` 会话令牌 / `quote-cache` 引用缓存）+ sendmessage 发送（配文与媒体分两条、同 run_id）+ CDN AES-128-ECB 加密媒体；入站图片摄取期解密内联（中图 ≤2MB，否则缩略图）。caps：仅 chat / 无被动窗口 / 无额度 / 无撤回；文本上限 4000 码点。协议基准常量 `ILINK_CHANNEL_VERSION`=2.4.10（勿随包版本漂移）。独立 dist 由 build.mjs 第四构建产出；core 不静态 import 它（不在 esbuild external），经 config.toml 声明 loadModule 动态加载。协议速查、设计决策、风险声明与待真机验证清单在包内 `README.md`。
-- **新增一个平台 connector 的完整清单（契约 v2 终态，core 零改动）**：建 `packages/connector-<平台>`（默认导出工厂 + 声明面，**必须实现 normalize**）→ `config.toml` 加一节 `[connectors.<平台>]`（package 必填；npm/github 来源显式安装）→ harness 验收进场。P4 微信进场的实际账本：协议面 core 零改动成立；只为「多平台并存的产品面」做了三处**平台中立**泛化——`ui.ts` mapError 按鸭子类型识别连接器自带错误的状态（连接器对 SDK 只能类型导入，`instanceof ConnectorError` 跨包不成立，否则可操作文案会被通用 500 文案吞掉）、`POST /ui/api/bots` 按平台 credentialSchema 取凭据（缺省平台 qq）、`defs.ts` 工具输出不回显内联 data:URL 的 base64 载荷（库列不动）。
-- 协同纪律（对齐 ui worktree 工作法）：物理拆仓时用 `git subtree split`/复制 + 版本号编排；sdkRange 兼容声明 + 加载时校验 + config.toml range 钉版是三方锁版机制；插件升级先过 harness 再进宿主。
+- `packages/connector-telegram`（sdkRange ^2.x；**submodule → `connector/tg` 分支**，根=包目录；零运行时依赖）：getUpdates 长轮询 + StatePort 持久化 poll offset（断线补拉）+ 发送 1.2s 节流；parser 在包内（`src/parser.ts`）；摄取时顺带富化图片缩略图 data: URL。**B⁺ T4.1 起传输机械走 SDK NetKit**（longPoll 驱动/throttle/materialize/魔数嗅探/时钟），wire 类型 zod 化（轮询路径只守结构不守词表；信封保真手解——错误文案锚点在 description）；测试驱动 = FakeNetKit（`opts.net` 控制面 + `ctx.net` 数据面），包内零 overrides；getMe 身份内聚在 plugin（create 时 fire-and-forget），instance 不感知身份。
+- `packages/connector-weixin`（P4，实验性；**submodule → `connector/wx` 分支**，根=包目录；零运行时依赖，**不用 openclaw-weixin 包本体**——只作协议说明书自研）：iLink bot API——扫码配对（服务端后台状态机 + `login: qr-pair` 路由）+ getupdates 长轮询（StatePort 持久化 `poll:buf` 游标 / `ctx-tokens` 会话令牌 / `quote-cache` 引用缓存）+ sendmessage 发送（配文与媒体分两条、同 run_id）+ CDN AES-128-ECB 加密媒体；入站图片摄取期解密内联（中图 ≤2MB，否则缩略图）。caps：仅 chat / 无被动窗口 / 无额度 / 无撤回；文本上限 4000 码点。协议基准常量 `ILINK_CHANNEL_VERSION`=2.4.10（勿随包版本漂移）。独立 dist 由 build.mjs 第四构建产出；core 不静态 import 它（不在 esbuild external），经 config.toml 声明 loadModule 动态加载。协议速查、设计决策、风险声明与待真机验证清单在包内 `README.md`。
+- **新增一个平台 connector 的完整清单（契约 v2 终态，core 零改动）**：建独立分支 `connector/<平台>`（根=包目录）→ submodule 挂 `packages/connector-<平台>`（url=QSense.git，branch=connector/<平台>）→ 默认导出工厂 + 声明面，**必须实现 normalize** → `config.toml` 加一节 `[connectors.<平台>]`（package 必填；npm/github 来源显式安装）→ harness 验收进场。P4 微信进场的实际账本：协议面 core 零改动成立；只为「多平台并存的产品面」做了三处**平台中立**泛化——`ui.ts` mapError 按鸭子类型识别连接器自带错误的状态（连接器对 SDK 只能类型导入，`instanceof ConnectorError` 跨包不成立，否则可操作文案会被通用 500 文案吞掉）、`POST /ui/api/bots` 按平台 credentialSchema 取凭据（缺省平台 qq）、`defs.ts` 工具输出不回显内联 data:URL 的 base64 载荷（库列不动）。
+- 协同纪律（对齐 ui worktree 工作法）：连接器包改动在**其分支**提交（`packages/connector-qq` 等目录是 submodule，主仓只推进 gitlink：`git add packages/connector-qq` 单独提交）；sdkRange 兼容声明 + 加载时校验 + config.toml range 钉版是三方锁版机制；插件升级先过 harness 再进宿主。
 
 ## QQ 官方 API 关键事实（已核实，改动协议代码前先对这段）
 
@@ -158,6 +158,7 @@ npm run dev        # build + node --watch
 # 停服：netstat -ano | grep ':8787' | grep LISTENING → taskkill //PID <pid> //F
 # 单工具调试（token 传某 bot 的 agent_token，admin token 过不了 /mcp）：
 #   MCP_TOKEN=<agent_token> CALL_TOOL=list_all CALL_ARGS='{}' npx tsx scripts/mcp-call.mts
+# clone 后（含 ui 与三个连接器）：git submodule update --init --recursive && npm install
 ```
 
 ## 踩坑清单（极易复发，改代码前先读）
@@ -189,12 +190,13 @@ npm run dev        # build + node --watch
 25. **类类型的测试假件**：`ConnectorRuntime` 是带私有成员的 class（名义型），对象字面量赋值必失败、`as` 也因不可比对报错——**别写 `as unknown as ConnectorRuntime`**；用 `ConnectorSupervisor` 最小消费面接口（runtime.ts）注解假件（真 class 结构满足、假件同形注入）。SQLite 行读取用 `prepare<[], Row 类型>` 泛型，不写 `as unknown as Row[]`。
 26. **库类型不手抄**：官方 SDK / fetch / stdout 的形参/返回若带 `unknown` 扩展面，用 `Parameters<>` / `z.infer` / `z.input<>` 提取（qq/logmeta.ts、mcp.ts `Parameters<handleRequest>[2]` 先例）；zod `safeParse` 的输入本就是 unknown 面，直接把库值喂进去是合法的 schema 化路径。
 27. **审计脚本口径**：引号/反引号内整段字符串剥离（日志文案里的英文 "unknown" 不算标注）；catch 变量无字面不算；计数是纪律指标不是语义证明——最终验收靠 tsc + zod 运行时 schema + 契约测试（types.md §四.3）。
+28. **连接器/UI 是 submodule（2026-11-25 起）**：`packages/connector-qq|telegram|weixin` 与 `ui/` 都是 gitlink → 各自分支（`connector/qq|tg|wx`、`webui`）。包改动在**子模块目录内提交并推对应分支**，主仓只 `git add packages/connector-xx` 推进指针（严禁把包源码再提交进 main）；**严禁 `git submodule update`** 覆盖本地 worktree（同 ui 纪律，会毁掉本地未推改动）；clone 后必须 `git submodule update --init --recursive` 才能构建。
 
 ## 路线图 / 待办
 
 - **P4 微信 connector（已落地并真机验收；实验性）**：
   - **Spike 结论：可行（无需降级握手）**——2026-11-24 解包 `@tencent-weixin/openclaw-weixin` 2.4.10 核对：纯 HTTPS + JSON + Bearer，无签名/设备指纹绑定；握手段已对微信官方服务端实测通过。详见「微信 iLink 协议关键事实」。
-  - 形态：`packages/connector-weixin` 纯网络包——按契约 v2 进场（声明 + normalize + harness 验收通过），`config.toml` 一节 `[connectors.weixin]` 声明即启用；core 侧只有三处平台中立的产品面泛化（见「分仓拓扑」）。分仓暂存分支 `connector/wx`（孤儿分支，只承载该包，同 `connector/qq`、`connector/tg`）。
+  - 形态：`packages/connector-weixin` 纯网络包——按契约 v2 进场（声明 + normalize + harness 验收通过），`config.toml` 一节 `[connectors.weixin]` 声明即启用；core 侧只有三处平台中立的产品面泛化（见「分仓拓扑」）。独立分支 `connector/wx`（孤儿分支，根=包目录；2026-11-25 起为 `packages/connector-weixin` submodule 源，同 `connector/qq`、`connector/tg`）。
   - 红线：**不得使用 openclaw-weixin 包本体、不得桥接 OneBot 微信实现**（全是注入式，违反硬约束 #1）——只作协议说明书逆向自研。
   - 风险：iLink 协议非公开文档化（协议漂移）、腾讯条款保留控制权（条款灰度）——协议基准版本钉死（`ILINK_CHANNEL_VERSION`）、未知扫码状态宽容、发送软频控默认开启、包内 README 风险声明。
   - 平台语义：仅 chat、无被动窗口、无额度、无 recall、无 opt-in（`proactiveOptIn: false`——iLink 无 opt 事件概念，「能对话即能发」；chat-opt 等价映射由插件入站落地，core gate 按 caps 跳过 QQ 式校验）；文本上限 4000 码点。注意基座工具面恒 13——`recall` 仍在名单里，微信 bot 调用得到可操作错误（caps 只让 core 不要求该原语，并不会把工具摘掉）。
