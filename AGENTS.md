@@ -69,6 +69,7 @@ QQ / Telegram 官方机器人 + 微信（iLink）→ MCP 网关。本文件是�
 - `packages/connector-qq`（sdkRange ^2.x，独立仓形态，物理拆出零改动）：
   - root deps 以 `file:packages/connector-qq` 声明（npm workspaces 符号链接进 node_modules）；esbuild external，独立 dist 由 build.mjs 第二构建产出（`exports.default → dist/index.js`，**`npm start` 前必须先 `npm run build`**）。
   - **默认导出 = 工厂** `(init?: {log}) => ConnectorPlugin`；命名导出（createQrBindTask/dailyCountOf/QrBindError/normalizeQqEnvelope/normalizeQqMessage 等）供宿主/测试按需引用——迁移 v8 raw_json 历史重演经 `normalizeQqMessage` 复用。
+  - **B⁺ T4.3 起**：`/gateway` 与扫码 lite 走 NetKit schema 参数化（`fetchGatewayUrl(http,…)`/`createQrBindTask(http)`）；`QqOverrides` 只剩官方 SDK 边界缝（getAccessToken/clearTokenCache/reconnect/apiFor——SDK 内部自管网络，注明理由保留）；旧 getGatewayUrl/qrBind fetch 注入已删，测试改经插件 `opts.net`（FakeNetKit 脚本化 /gateway 应答与 lite 上游）。
   - QQ parser 在包内（`src/normalize.ts` + `src/expand.ts`）；额度记账走 StatePort 计数器 `qq:quota:{date}`（北京时间自然日）；包内文案自包含（`src/texts.ts`）。
   - 包内文件：plugin.ts 声明面 / instance.ts 每 bot 网络实例 / net.ts 线格式（wire→msg_type 0/2/7 + message_reference + file_info）/ quota.ts 令牌桶+日额度 / qrbind.ts 扫码绑定 / token.ts·url.ts·intents.ts / errors.ts 发送错误语义 / texts.ts。
   - 协议事实（线格式/官方限制）改动必须先核对本文「QQ 官方 API 关键事实」与 `test/connector-qq-net.test.ts` 规格（真机验证形态，勿改断言）。
