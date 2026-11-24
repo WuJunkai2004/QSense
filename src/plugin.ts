@@ -89,6 +89,7 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
       recall: true,
       passiveWindow: true,
       quota: true,
+      proactiveOptIn: true, // QQ C2C：主动消息需用户同意（C2C_MSG_RECEIVE 置位）
     },
     // 发送错误语义面（契约 v2.2.2）：官方码判定 + 包内文案，core 委托翻译
     sendError: qqSendError,
