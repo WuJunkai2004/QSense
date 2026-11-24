@@ -6,8 +6,8 @@ QQ / Telegram 官方机器人 + 微信（iLink）→ MCP 网关。本文件是�
 
 - **v1 全部里程碑（M0–M9）完成**（v0.2.0）：官方 WS 接入、SQLite 缓存、MCP 工具面、发送器、WebUI、多 bot 运行时、富媒体/资产上传、C2C 单聊、扫码配对、`/wait` 长轮询。
 - **多平台解耦已完成**：P0 契约 SDK → P1 QQ 收口 → P2 分仓声明制 → P3 存储中立化（迁移 v12）→ P3.5 Telegram 试金石（真机双平台闭环）→ P5 契约 v2（parser 下沉插件、ingest 表驱动）+ 配置 toml 化（迁移 v13，env/`.env` 全面退役）。
-- **P4 微信 connector 已落地（实验性；收发段待真机验收）**：`packages/connector-weixin`——iLink bot API 长轮询 + 扫码配对 + CDN 加密媒体，零运行时依赖，协议参照 `@tencent-weixin/openclaw-weixin` 2.4.10 解包自研（不用包本体）。配对握手段已对微信官方服务端实测通过。见「分仓拓扑」与「微信 iLink 协议关键事实」。
-- 测试基线 **269/269**（`npm test`，零真实网络依赖）。改完必跑。
+- **P4 微信 connector 已落地并真机验收（实验性；2026-11-24 收发段全通）**：`packages/connector-weixin`——iLink bot API 长轮询 + 扫码配对 + CDN 加密媒体，零运行时依赖，协议参照 `@tencent-weixin/openclaw-weixin` 2.4.10 解包自研（不用包本体）。配对握手、收发主链路、媒体双链路（入站解密内联 / 出站 CDN 直传）、发送路由 caps 收口均已实测通过。见「分仓拓扑」与「微信 iLink 协议关键事实」。
+- 测试基线 **293/293**（`npm test`，零真实网络依赖）。改完必跑。
 
 ## 硬约束（违反即返工）
 
@@ -163,13 +163,13 @@ npm run dev        # build + node --watch
 
 ## 路线图 / 待办
 
-- **P4 微信 connector（已落地，实验性；收发段待真机验收）**：
+- **P4 微信 connector（已落地并真机验收；实验性）**：
   - **Spike 结论：可行（无需降级握手）**——2026-11-24 解包 `@tencent-weixin/openclaw-weixin` 2.4.10 核对：纯 HTTPS + JSON + Bearer，无签名/设备指纹绑定；握手段已对微信官方服务端实测通过。详见「微信 iLink 协议关键事实」。
   - 形态：`packages/connector-weixin` 纯网络包——按契约 v2 进场（声明 + normalize + harness 验收通过），`config.toml` 一节 `[connectors.weixin]` 声明即启用；core 侧只有三处平台中立的产品面泛化（见「分仓拓扑」）。分仓暂存分支 `connector/wx`（孤儿分支，只承载该包，同 `connector/qq`、`connector/tg`）。
   - 红线：**不得使用 openclaw-weixin 包本体、不得桥接 OneBot 微信实现**（全是注入式，违反硬约束 #1）——只作协议说明书逆向自研。
   - 风险：iLink 协议非公开文档化（协议漂移）、腾讯条款保留控制权（条款灰度）——协议基准版本钉死（`ILINK_CHANNEL_VERSION`）、未知扫码状态宽容、发送软频控默认开启、包内 README 风险声明。
   - 平台语义：仅 chat、无被动窗口、无额度、无 recall、无 opt-in（`proactiveOptIn: false`——iLink 无 opt 事件概念，「能对话即能发」；chat-opt 等价映射由插件入站落地，core gate 按 caps 跳过 QQ 式校验）；文本上限 4000 码点。注意基座工具面恒 13——`recall` 仍在名单里，微信 bot 调用得到可操作错误（caps 只让 core 不要求该原语，并不会把工具摘掉）。
-  - **待办（按优先级）**：① 真人扫码后的收发段验收（清单见包内 README「待真机验证」）；② 配对码二次校验（`need_verifycode`）的输入通道（WebUI 目前以可操作错误终止）；③ 凭据热更新（token 失效 / `binded_redirect` 后免移除重绑）；④ 出站引用与语音条发送的线上形状核实；⑤ 微信版告知义务模板。
+  - **待办（按优先级）**：① ~~真人扫码后的收发段验收~~ **已完成（2026-11-24）**：收发主链路 + 媒体双链路 + 发送路由修复全通，清单见包内 README「待真机验证」；剩余观察项（语音消息 / need_verifycode / token 失效信号）随运行收集。② 配对码二次校验（`need_verifycode`）的输入通道（WebUI 目前以可操作错误终止）；③ 凭据热更新（token 失效 / `binded_redirect` 后免移除重绑）；④ 语音条发送的线上形状核实（当前按文件附件降级）；⑤ 微信版告知义务模板。
 - **P5 收尾遗留**：sender core 残留 QQ 专属文案清理；WebUI 设置页按平台 caps 渲染收尾（quota/认证等级=QQ 专属面板；「添加机器人」的平台选择 / 多平台表单 / 多平台扫码已于 2026-11-24 完成）；npmjs/github 插件来源安装流程文档（decl.ts 校验已在，装包步骤待写）。
 - **勿回退的既定决策**：契约 v2（normalize 必备 + ingest 表驱动 + parser 在插件仓）；config.toml 唯一配置权威（env 退役）；上行唯一出口 host.ingest；基座工具名单恒定 + 注册/删除不进工具面；凭据只落 SQLite；迁移只追加 version N。
 
