@@ -4,6 +4,10 @@ data/
 config.toml
 *.log
 
+# 工作文档（本地留存，不入库）
+/todo.md
+/types.md
+
 # 调试输出
 *.out.txt
 m*-out.txt
