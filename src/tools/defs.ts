@@ -162,7 +162,7 @@ function msgOut(
       msg_id: quote.msgId,
       content: quote.body,
       ...(quote.attachments !== undefined
-        ? { attachments: quote.attachments }
+        ? { attachments: quote.attachments.map(compactInlineUrl) }
         : {}),
     };
   }
@@ -178,9 +178,42 @@ function msgOut(
       return name !== undefined ? { id: m.id, name } : { id: m.id };
     });
   }
-  if (row.attachments_json) out.attachments = JSON.parse(row.attachments_json);
+  if (row.attachments_json) out.attachments = compactAttachments(row.attachments_json);
   if (row.ark_json) out.ark = JSON.parse(row.ark_json);
   return out;
+}
+
+/**
+ * 内联 data:URL 附件（摄取期富化的图：微信 CDN 解密图 / Telegram 缩略图）的 base64 载荷
+ * **不回显进工具输出**——agent 经 get_media 取图像块，回显只会把 browse/context/get_new 的
+ * 输出撑爆上下文（微信内联中图单张可达 MB 级）。url 换成带体积的占位说明；库列不动
+ * （WebUI 聊天窗仍直接用 attachments_json 内联渲染）。
+ */
+function compactInlineUrl<T extends object>(att: T): T {
+  const rec = att as Record<string, unknown>;
+  const url = rec["url"];
+  if (typeof url !== "string" || !url.startsWith("data:")) return att;
+  const comma = url.indexOf(",");
+  if (comma < 0) return att;
+  const meta = url.slice(5, comma); // 形如 image/jpeg;base64
+  const bytes = Math.round(((url.length - comma - 1) * 3) / 4);
+  const size =
+    bytes >= 1024 * 1024
+      ? `${(bytes / 1024 / 1024).toFixed(1)}MB`
+      : `${Math.max(1, Math.round(bytes / 1024))}KB`;
+  return { ...att, url: `data:${meta},…(内联 ${size}，图像经 get_media 获取)` };
+}
+
+/** attachments_json 列 → 工具输出形状（逐项压缩内联 data:URL；非数组原样透出） */
+function compactAttachments(raw: string): unknown {
+  const parsed = JSON.parse(raw) as unknown;
+  return Array.isArray(parsed)
+    ? parsed.map((att) =>
+        att !== null && typeof att === "object"
+          ? compactInlineUrl(att as Record<string, unknown>)
+          : att,
+      )
+    : parsed;
 }
 
 function rowsOut(
@@ -611,7 +644,7 @@ export const TOOLS: ToolDef[] = [
             };
           }
           if (r.attachments_json) {
-            out.attachments = JSON.parse(r.attachments_json);
+            out.attachments = compactAttachments(r.attachments_json);
           }
           return out;
         }),

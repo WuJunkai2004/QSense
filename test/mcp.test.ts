@@ -991,6 +991,85 @@ test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消�
   }
 });
 
+test("M3-6b 内联 data:URL 附件：工具输出不回显 base64 载荷（带体积占位），get_media 仍出图像块，库列不动", async () => {
+  const fx = await setupServer();
+  let client: Client | null = null;
+  try {
+    // 摄取期富化的内联图（微信 CDN 解密图 / Telegram 缩略图）形态
+    const payload = Buffer.from(
+      Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    ).toString("base64");
+    const dataUrl = `data:image/png;base64,${payload}`;
+    new Repo(fx.db).saveMessage({
+      botId: "10001",
+      scope: "group",
+      scopeId: GROUP,
+      msgId: "MD2",
+      authorOpenid: "U_A",
+      authorName: "画师",
+      authorRole: "member",
+      ts: Date.now(),
+      text: "截图",
+      content: "![附件1]\n![附件2]\n截图",
+      quote: {
+        msgId: "MD1",
+        body: "看图",
+        attachments: [{ kind: "image", url: dataUrl, content_type: "image/png" }],
+      },
+      records: [],
+      mentions: [],
+      attachments: [
+        { kind: "image", url: dataUrl, content_type: "image/png" },
+        { kind: "image", url: "https://cdn.example/b.png", content_type: "image/png" },
+      ],
+      raw: {},
+    });
+    client = await connectClient(fx.baseUrl, fx.agentToken);
+    const res = payloadOf(
+      (await client.callTool({
+        name: "browse",
+        arguments: { id: GROUP, limit: 1 },
+      })) as never,
+    );
+    const msg = (res.messages as Array<Record<string, unknown>>)[0]!;
+    assert.equal(msg.msg_id, "MD2");
+    const atts = msg.attachments as Array<{ url: string; content_type: string }>;
+    assert.match(
+      atts[0]!.url,
+      /^data:image\/png;base64,…\(内联 \d+KB，图像经 get_media 获取\)$/,
+    );
+    assert.equal(atts[0]!.content_type, "image/png"); // 其余元数据保留
+    assert.equal(atts[1]!.url, "https://cdn.example/b.png"); // 非内联 URL 原样
+    const quoteMsg = msg.quote_msg as {
+      attachments: Array<{ url: string }>;
+    };
+    assert.match(quoteMsg.attachments[0]!.url, /内联/); // 被引内联图同样压缩
+    assert.equal(JSON.stringify(res).includes(payload), false); // 载荷不进工具输出
+
+    // get_media 仍从库列取图（data:URL 可被通用 fetch）
+    const media = (await client.callTool({
+      name: "get_media",
+      arguments: { id: GROUP, msg_id: "MD2", n: 1 },
+    })) as { isError?: boolean; content: Array<Record<string, unknown>> };
+    assert.equal(media.isError, undefined);
+    assert.equal(media.content[0]!.type, "image");
+    assert.equal(media.content[0]!.data, payload);
+
+    // 库列不动（WebUI 聊天窗直接用 attachments_json 内联渲染）
+    const row = fx.db
+      .prepare("SELECT attachments_json FROM messages WHERE msg_id = 'MD2'")
+      .get() as { attachments_json: string };
+    assert.equal(row.attachments_json.includes(payload), true);
+  } finally {
+    try {
+      await client?.close();
+    } catch {
+      /* 已关闭则忽略 */
+    }
+    await fx.close();
+  }
+});
+
 test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防模型接自己的话", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
