@@ -16,8 +16,11 @@ import { z } from "zod";
 import type { NormalizedInbound } from "./message";
 import type { NetKit } from "./net";
 
-/** SDK 契约版本：宿主加载插件时用 satisfiesRange(SDK_VERSION, plugin.sdkRange) 校验 */
-export const SDK_VERSION = "2.3.0";
+/** SDK 契约版本：宿主加载插件时用 satisfiesRange(SDK_VERSION, plugin.sdkRange) 校验。
+ * 2.4.0（B⁺ T6）：破坏性签名变化——normalize payload 改 RawEnvelope、StatePort
+ * 值域改 JSON 文本、PluginWebuiRoute.handle / PluginToolDecl.call 统一面、
+ * NormalizedMessage.raw→rawJson、ark 改 ArkCard 契约（^2.x 插件兼容声明不变）。 */
+export const SDK_VERSION = "2.4.0";
 
 // ---------------------------------------------------------------------------
 // 基座工具保留名（13）：插件工具不得与之重名（加载即硬失败）。quota 等平台

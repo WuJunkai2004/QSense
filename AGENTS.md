@@ -2,11 +2,12 @@
 
 QQ / Telegram 官方机器人 + 微信（iLink）→ MCP 网关。本文件是项目**唯一文档**：架构决策、官方 API 事实、开发约束、踩坑清单都在这里；人类向介绍见 README.md。改代码前先通读本文。
 
-## 当前状态（2026-11-24）
+## 当前状态（2026-11-25）
 
 - **v1 全部里程碑（M0–M9）完成**（v0.2.0）：官方 WS 接入、SQLite 缓存、MCP 工具面、发送器、WebUI、多 bot 运行时、富媒体/资产上传、C2C 单聊、扫码配对、`/wait` 长轮询。
 - **多平台解耦已完成**：P0 契约 SDK → P1 QQ 收口 → P2 分仓声明制 → P3 存储中立化（迁移 v12）→ P3.5 Telegram 试金石（真机双平台闭环）→ P5 契约 v2（parser 下沉插件、ingest 表驱动）+ 配置 toml 化（迁移 v13，env/`.env` 全面退役）。
 - **P4 微信 connector 已落地并真机验收（实验性；2026-11-24 收发段全通）**：`packages/connector-weixin`——iLink bot API 长轮询 + 扫码配对 + CDN 加密媒体，零运行时依赖，协议参照 `@tencent-weixin/openclaw-weixin` 2.4.10 解包自研（不用包本体）。配对握手、收发主链路、媒体双链路（入站解密内联 / 出站 CDN 直传）、发送路由 caps 收口均已实测通过。见「分仓拓扑」与「微信 iLink 协议关键事实」。
+- **B⁺ T6 类型系统改造完成（2026-11-25）**：零 unknown / 零万能字典 / 零 object（audit 三类恒 0），控制反转落地（SDK 工厂闭包 + JSON 文本跨界），SDK_VERSION 2.4.0；设计权威见 `types.md`，纪律见下文「类型系统纪律」。
 - 测试基线 **293/293**（`npm test`，零真实网络依赖）。改完必跑。
 
 ## 硬约束（违反即返工）
@@ -117,6 +118,29 @@ QQ / Telegram 官方机器人 + 微信（iLink）→ MCP 网关。本文件是�
 - 存储更好-sqlite3（同步API，单进程）；FTS5 用 trigram（中文检索），<3 字符查询降级 LIKE。
 - 代码风格：全局引擎单例、显式 validate 函数、中文 i18n 文案表（`src/i18n.ts`）、错误消息可操作。所有文件 UTF-8；注释与文档用中文。
 
+## 类型系统纪律（B⁺ T6，2026-11-25 终态；设计权威 = `types.md`）
+
+- **三条零容忍（审计目标恒 0）**：禁 `unknown` 字面（含 `z.unknown()` / `[key: string]: unknown` /
+  `as unknown`）、禁万能字典（`JsonValue` / `Record<string, unknown|any|never>`）、禁 `object`
+  万能代指。验收：`node scripts/type-audit.mts`（any/unknown/万能字典/object/as 五类计数）。
+- **控制反转**（解决「异构声明 × 统一分发点」）：泛型在 SDK 工厂闭包内绑定，统一接口面非泛型，
+  core 只喂 JSON 文本——`webuiRoute`/`webuiJsonRoute<A>`（`handle(PluginWebuiInput)`）、
+  `pluginTool<A>`（`call(rawArgs)`）；基座工具 `defineTool<A>`（defs.ts）同型。
+- **字符串化边界**（core 不该懂的结构跨界的唯一形式）：`StatePort` 值=`JSON 文本`、
+  `NormalizedMessage.rawJson`、webui `rawBody`、工具 `rawArgs`——消费方 `parseJsonWith(schema)`
+  或 zod `safeParse` 收口；历史 kv 零迁移兼容。
+- **平台载荷类型隔离在插件**：core 只见最小契约（`RawEnvelope{platform}` / SDK message 类型）；
+  平台 wire 形状（QQ/TG/WX）永不进 core 签名。库输出的弱类型（`JSON.parse` any / SDK 的
+  `[x:string]: unknown`）在调用点立即过 schema 或在 proxy 点只做 `JSON.stringify`。
+- **库类型不抄进我们的签名**：用 `Parameters<>` / `z.infer` / `z.input<>` 提取（例：
+  qq/logmeta.ts 提取官方 logger meta、mcp.ts `Parameters<handleRequest>[2]`、
+  `Parameters<typeof fetch>[0]`）。
+- **错误边界**：显式参数收 `Error`，catch 点 `e instanceof Error ? e : new Error(String(e))`
+  窄化后传入；鸭子类型（跨包 ConnectorError）用 `in` 运行时窄化取 status，不写 `as`。
+- 语言级例外（不写违禁字面，不算标注）：catch 变量、`assert.rejects` 回调参数、
+  `JSON.parse`/动态 `import()` 返回 any——立即 schema 化或 typeof 现场窄化。
+- `SDK_VERSION` = **2.4.0**（T6 破坏性签名变化）；三包 sdkRange `^2.0.0` 兼容。
+
 ## 测试与验收
 
 - 每个功能必须有可重复的自动化验证（mock ws网关单测、resume补发、MCP/发送器/UI API 集成测试），不依赖真实QQ消息。真实联调只在用户可控的测试群（可开全量消息权限）。
@@ -127,7 +151,8 @@ QQ / Telegram 官方机器人 + 微信（iLink）→ MCP 网关。本文件是�
 
 ```bash
 npm run build      # tsc --noEmit + esbuild 四构建（改代码后先跑这个）
-npm test           # 269 用例全量
+npm test           # 293 用例全量
+node scripts/type-audit.mts   # 类型审计：any/unknown/万能字典/object/as 五类计数（前三类目标恒 0）
 npm start          # 起服务（读 config.toml，自动连官方 WS 网关；默认 127.0.0.1:8787）
 npm run dev        # build + node --watch
 # 停服：netstat -ano | grep ':8787' | grep LISTENING → taskkill //PID <pid> //F
@@ -161,6 +186,9 @@ npm run dev        # build + node --watch
 22. 工具输出不回显内联 data:URL 的 base64 载荷（微信内联中图单张可达 MB 级，一次 browse 就能撑爆上下文）——新增任何输出附件的位置都走 `defs.ts` 的 `compactAttachments`。
 23. 包名导入测的是 dist：改 `connector-telegram` / `connector-weixin` 源码后先 `npm run build`，否则测的是旧产物（tsc 过不代表 dist 新）。
 24. Node 把请求头名归一为小写：`iLink-App-ClientVersion` 在 `req.headers` 里是 `ilink-app-clientversion`——断言头名别照抄驼峰。
+25. **类类型的测试假件**：`ConnectorRuntime` 是带私有成员的 class（名义型），对象字面量赋值必失败、`as` 也因不可比对报错——**别写 `as unknown as ConnectorRuntime`**；用 `ConnectorSupervisor` 最小消费面接口（runtime.ts）注解假件（真 class 结构满足、假件同形注入）。SQLite 行读取用 `prepare<[], Row 类型>` 泛型，不写 `as unknown as Row[]`。
+26. **库类型不手抄**：官方 SDK / fetch / stdout 的形参/返回若带 `unknown` 扩展面，用 `Parameters<>` / `z.infer` / `z.input<>` 提取（qq/logmeta.ts、mcp.ts `Parameters<handleRequest>[2]` 先例）；zod `safeParse` 的输入本就是 unknown 面，直接把库值喂进去是合法的 schema 化路径。
+27. **审计脚本口径**：引号/反引号内整段字符串剥离（日志文案里的英文 "unknown" 不算标注）；catch 变量无字面不算；计数是纪律指标不是语义证明——最终验收靠 tsc + zod 运行时 schema + 契约测试（types.md §四.3）。
 
 ## 路线图 / 待办
 
