@@ -53,9 +53,9 @@ await esbuild.build({
   sourcemap: true,
 });
 
-// connector-weixin 独立构建：零运行时依赖（Node 20 全局 fetch + node:crypto），对 SDK
-// 只做类型导入（编译期消失）。协议参照 @tencent-weixin/openclaw-weixin 2.4.10 解包自研，
-// 不使用参照包本体。
+// connector-weixin 独立构建：零运行时依赖（Node 20 全局 fetch + node:crypto）。对 SDK 以类型
+// 导入为主，运行期仅用 parseJsonWith 等纯函数（随本包 bundle 内联，产物不残留 SDK 依赖）。
+// 协议参照 @tencent-weixin/openclaw-weixin 2.4.10 解包自研，不使用参照包本体。
 await esbuild.build({
   entryPoints: ["packages/connector-weixin/src/index.ts"],
   outfile: "packages/connector-weixin/dist/index.js",

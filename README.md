@@ -24,6 +24,8 @@ QQ / Telegram / 微信 官方服务器
 AI 客户端（OpenCode 等）· cron 定时任务
 ```
 
+**插件边界（契约 v2）**：连接器包是纯网络插件，只经宿主注入的 `PluginContext` 触达系统——日志、kv 状态、传输机械（`NetKit`）与**唯一上行出口 `host.ingest`**；原始事件由 core 按 `platform` 路由回插件自己的 `normalize` 解读，再统一过校验、去重、入库。连接器不 import 宿主代码，也不直接写库。QQ 数据面由官方 SDK 自管 WS（NetKit 只用于网关地址与扫码控制面），Telegram / 微信数据面全部走注入的 NetKit。
+
 ## 快速开始
 
 前置：Node.js ≥ 20。
@@ -118,9 +120,11 @@ admin token 登录。功能：多机器人管理（运行时添加/移除、多�
 
 ```bash
 npm run build   # tsc --noEmit + esbuild 四构建（宿主 + 三个 connector dist）
-npm test        # 269 用例全量（零真实网络依赖），改完必跑
+npm test        # 293 用例全量（零真实网络依赖），改完必跑
 npm start       # 起服务（读 config.toml，自动连官方网关）
 ```
+
+连接器包是 submodule（`packages/connector-qq|telegram|weixin` → `connector/qq|tg|wx` 分支），`ui/` 同理；clone 后先 `git submodule update --init --recursive` 再 `npm install`。连接器测试统一用 FakeNetKit 注入假端点（`packages/connector-sdk/src/net-fake.ts`），包内无测试专用 fetch 缝；改连接器源码后必须先 `npm run build` 再跑测试（包名导入解析到 dist）。包改动在子模块内提交并推对应分支，主仓只 `git add packages/connector-*` 推进指针。
 
 目录速览：
 
@@ -128,9 +132,9 @@ npm start       # 起服务（读 config.toml，自动连官方网关）
 | ------------------------------ | ---------------------------------------------------- |
 | `src/`                         | core：MCP / 存储 / 发送编排 / WebUI 后端（平台中立） |
 | `packages/connector-sdk/`      | 三面契约 + 加载闸门 + conformance harness            |
-| `packages/connector-qq/`       | QQ 连接器插件（WS 网关 / 线格式 / 额度 / 扫码配对）  |
-| `packages/connector-telegram/` | Telegram 连接器插件                                  |
-| `packages/connector-weixin/`   | 微信连接器插件（iLink 长轮询 / 扫码配对 / CDN 加密媒体；实验性） |
+| `packages/connector-qq/`       | QQ 连接器插件（submodule → connector/qq；WS 网关 / 线格式 / 额度 / 扫码配对） |
+| `packages/connector-telegram/` | Telegram 连接器插件（submodule → connector/tg；长轮询） |
+| `packages/connector-weixin/`   | 微信连接器插件（submodule → connector/wx；iLink 长轮询 / 扫码配对 / CDN 加密媒体；实验性） |
 | `ui/`                          | WebUI 前端（submodule，webui 分支）                  |
 | `test/`                        | 全量测试                                             |
 | `scripts/`                     | 运维 / 迁移演练 / 单工具调试脚本                     |

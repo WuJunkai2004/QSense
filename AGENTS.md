@@ -22,7 +22,8 @@ QQ / Telegram 官方机器人 + 微信（iLink）→ MCP 网关。本文件是�
 ## 架构速览
 
 - **core（`src/`）平台中立**：MCP 传输与鉴权（Bearer→bot）、基座工具面、存储、发送编排、WebUI 后端。各层 Deps（ToolContext/SenderDeps/SupervisorDeps/UiDeps/ServerDeps/McpDeps）**不持有 Config**——既定解耦形态，别往回传。
-- **connector 插件（`packages/connector-*`）纯网络**：连接生命周期、线格式、平台扩展工具与钩子；对 SDK 只允许类型导入，包内文案自包含，不得 import 宿主 `src/`。
+- **connector 插件（`packages/connector-*`）纯网络**：连接生命周期、线格式、平台扩展工具与钩子；对 SDK 只允许类型导入（NetKit 等运行时值随包 bundle 内联），包内文案自包含，不得 import 宿主 `src/`。
+- **注入面 = `PluginContext`（v3 = HostApi + NetKit）**：core 每 bot 造一份（`src/connectors/host.ts`）——`log` 分域、`state` 走 kv（物理键 `connector:{platform}:{botId}:{key}`，值=JSON 文本）、`ingest` = core 管线、`reportStatus` = 状态聚合、`net` = 协议无关传输机械（http/longPoll/throttle/materialize/sniffMime/backoff/sleep/now）。插件只经此面触达宿主：DB/repo/sender/fastify 在类型上不可达。**例外（如实记录）**：QQ 数据面由官方 SDK 自管 WS/发送/token，NetKit 只用于 `/gateway` 与扫码控制面；微信/Telegram 数据面全部走 `ctx.net`。
 - **上行唯一出口 = `host.ingest`**：插件 `normalize`（契约 v2 必备声明）产出成品 `NormalizedMessage` → 信封盖 `platform` 章 → ingest 表驱动按 `payload.platform` 路由 → 通用消息级去重（键=bot:scope:scopeId:msgId）→ 入库 + 效应落地。**新平台 core 零改动进场**。
 - **会话侧别权威 = sessions 注册表**（v12）：ingest 入库/开关事件即登记 `(bot_id, session_id) → kind`；`detectSessionKind` 注册表先行、缓存/开关探测降级为兜底——不依赖「群 openid 与用户 openid 命名空间互斥」这一 QQ 保证。
 - **发送器不变量**（`src/sender/`，策略半在 core、传输半在插件）：
@@ -111,6 +112,7 @@ QQ / Telegram 官方机器人 + 微信（iLink）→ MCP 网关。本文件是�
 ## 技术栈与风格
 
 - TypeScript + Node.js ≥ 20，ESM。esbuild external **六件套**：`better-sqlite3`/`fastify`/`@tencent-connect/qqbot-nodejs`/`ws`/`@qsense/connector-qq`/`@qsense/connector-telegram`（CJS 依赖链打进 ESM bundle 会 "Dynamic require of node:*" 崩溃；better-sqlite3 是原生 .node；connector 包独立出 dist，运行时经 node_modules 解析）。`@qsense/connector-sdk` 随 bundle 打包不 external；`smol-toml` 纯 JS 随 bundle 打包。`@qsense/connector-weixin` 不在 external（core 不静态 import 它，经 config.toml 声明动态加载），独立 dist 由 build.mjs 第四构建产出。
+- **zod v4 = 运行时校验与类型的单一事实源**（root 依赖）：wire 形状 / 环境边界 / 工具入参 / StatePort 值全部用 schema 声明，类型用 `z.infer` 取；JSON 文本跨界唯一入口是 `parseJsonWith(schema, text)`（`packages/connector-sdk/src/json.ts`）。打包结论（T3-D2）：SDK 随宿主 bundle；三个连接器各自独立 dist（esbuild bundle，zod 内联进包），宿主**不**静态打包它们。
 - s 序号/心跳/RESUME/关闭码语义由官方 SDK `@tencent-connect/qqbot-nodejs` 协议层权威实现；本项目层负责消息级 id 去重、token 生命周期、会话持久化、状态告警。
 - better-sqlite3 语句类型必须显式 `Database.Statement<[...参数元组]>`；热路径语句构造器缓存（构造器 prepare，禁 inline 反复 prepare）。
 - tsconfig 开着 `noUnusedLocals`/`noUnusedParameters`——死导入/死参数编译期即报。
@@ -144,6 +146,8 @@ QQ / Telegram 官方机器人 + 微信（iLink）→ MCP 网关。本文件是�
 ## 测试与验收
 
 - 每个功能必须有可重复的自动化验证（mock ws网关单测、resume补发、MCP/发送器/UI API 集成测试），不依赖真实QQ消息。真实联调只在用户可控的测试群（可开全量消息权限）。
+- **连接器测试驱动统一 = FakeNetKit**（`packages/connector-sdk/src/net-fake.ts`）：插件级 `opts.net` 管控制面、实例级 `ctx.net` 管数据面，脚本化 HTTP 应答 / longPoll 条目 / 时钟；包内零 overrides（QQ 官方 SDK 的 4 个边界缝除外，见分仓拓扑）。改 tg/wx/qq 源码后先 `npm run build` 再测（包名导入解析到 dist）。
+- **conformance harness**（`packages/connector-sdk/src/harness.ts`）检查项 = 声明面形状（id/sdkRange/caps/tools/webui）+ 必备 `normalize` + 提供的 `normalizeSample` 产出须过 `UnifiedMessageSchema`（契约 v2 起）；新增平台必须过 harness 才进场。
 - **加/删 MCP 工具必须同步**：`test/mcp.test.ts` 的 listTools 名单断言（已多次因工具数断言过期翻车）+ README 工具面清单。
 - MCP 测试的 `client.close()` 必须放 finally（否则 `app.close()` 挂死，表现为测试文件级无输出挂死）；测试清理 rmSync 用 try/catch best-effort（EPERM 会顶掉真正的断言错误）。
 - **后台循环必须由用例收尾**：连接器测试里的长轮询实例（`inst.stop()`）与扫码状态机（推进到终态）若遗留，会不断重新武装定时器——用例全部跑完但进程不退出，表现为整轮 `npm test` 挂死且管道无输出（2026-11-24 微信扫码测试踩过）。排查法：逐文件加硬超时 `timeout 45 node --import tsx --test --test-isolation=none test/x.test.ts`（exit=124 即挂起）。连接器的纯超时定时器一律 `unref()`，不独自撑住事件循环。
@@ -191,6 +195,7 @@ npm run dev        # build + node --watch
 26. **库类型不手抄**：官方 SDK / fetch / stdout 的形参/返回若带 `unknown` 扩展面，用 `Parameters<>` / `z.infer` / `z.input<>` 提取（qq/logmeta.ts、mcp.ts `Parameters<handleRequest>[2]` 先例）；zod `safeParse` 的输入本就是 unknown 面，直接把库值喂进去是合法的 schema 化路径。
 27. **审计脚本口径**：引号/反引号内整段字符串剥离（日志文案里的英文 "unknown" 不算标注）；catch 变量无字面不算；计数是纪律指标不是语义证明——最终验收靠 tsc + zod 运行时 schema + 契约测试（types.md §四.3）。
 28. **连接器/UI 是 submodule（2026-11-25 起）**：`packages/connector-qq|telegram|weixin` 与 `ui/` 都是 gitlink → 各自分支（`connector/qq|tg|wx`、`webui`）。包改动在**子模块目录内提交并推对应分支**，主仓只 `git add packages/connector-xx` 推进指针（严禁把包源码再提交进 main）；**严禁 `git submodule update`** 覆盖本地 worktree（同 ui 纪律，会毁掉本地未推改动）；clone 后必须 `git submodule update --init --recursive` 才能构建。
+29. **事件次序与重放纪律（至少一次）**：WS RESUME 补发、游标清空重拉、长轮询重投都会重复投递——去重只能靠 `(bot,scope,scopeId,msgId)`，且必须「入库成功才标记」（检查即标记曾造成整批静默丢失）；长轮询驱动「整批摄取完才推进游标」（onItem 抛错 → 游标不动）。回放/重演（`scripts/replay-normalize.mts`、迁移 v8）必须复用插件 `normalize`，不得在脚本里另写解析；会改写状态的效应（开关/审核）按事件到达序单条落地，禁止批量重排。
 
 ## 路线图 / 待办
 
