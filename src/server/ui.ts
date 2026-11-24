@@ -1154,22 +1154,14 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           reply.code(400).send({ error: "参数 group 与 text 均不能为空。" });
           return;
         }
-        const quote = body.quote === true;
+        // body.quote 已弃用（sendAuto 语义：reply_msg_id 即引用样式，自动判定被动/主动）
         try {
           const botId = resolveBot(body.bot);
-          const result =
-            replyMsgId !== undefined
-              ? await sender.reply(
-                  botId,
-                  group,
-                  replyMsgId,
-                  text,
-                  false,
-                  quote,
-                  undefined,
-                  kind,
-                )
-              : await sender.proactive(botId, group, text, undefined, undefined, kind);
+          // 统一走 sendAuto（caps 感知路由）：passiveWindow=true 平台窗内被动优先
+          //（reply_msg_id 作引用样式），false 平台（微信/Telegram）恒走主动——
+          // 旧形态在此直呼 sender.reply 曾对微信爆 TypeError（无被动原语）。
+          // 行为对齐工具面：窗过期自动降级主动，不再硬报错。
+          const result = await sender.sendAuto(botId, group, text, replyMsgId, kind);
           // 官方不回推 bot 自发消息：发送成功后本地补记，WebUI 刷新后仍可见。
           // 落库失败不影响发送结果（消息已出账，只记日志）。
           try {

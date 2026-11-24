@@ -37,6 +37,8 @@ const zh = {
     "平台 {platform} 效应 {kind} 落地失败，已跳过：{reason}",
   ingest_effect_shape_fail:
     "平台 {platform} 效应未过契约校验，已丢弃：{reason}",
+  send_reply_unsupported:
+    "当前平台未实现被动回复原语（net.reply，无被动窗口的平台不实现）；发送应走主动通道——工具面用 send/send_auto 自动路由，WebUI 测试发送已统一走该路由。",
   // —— 退出 ——
   shutdown_done: "已优雅退出。",
   // —— 发送器（M4） ——
@@ -109,6 +111,8 @@ const en: Translation = {
     "Effect {kind} failed to apply for platform {platform}; skipped: {reason}",
   ingest_effect_shape_fail:
     "Effect failed contract validation for platform {platform}; dropped: {reason}",
+  send_reply_unsupported:
+    "This platform does not implement the passive reply primitive (net.reply; platforms without a passive window do not). Sending must use the proactive channel — tools should use send/send_auto, and the WebUI test-send already routes through it.",
   shutdown_done: "Graceful shutdown complete.",
   send_disabled:
     "Sending is disabled, rejected. Writes require the master send switch enabled (managed in the WebUI settings) and the target conversation meeting send conditions (group = in the bot's allowlist; direct message = recipient has not rejected messages). Current switch {enabled}, allowlisted groups {allow}.",

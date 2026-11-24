@@ -251,7 +251,7 @@ function validateCaps(caps: unknown): void {
       throw new GateError(`caps.media.${k} 必须是布尔。`);
     }
   }
-  for (const k of ["recall", "passiveWindow", "quota"] as const) {
+  for (const k of ["recall", "passiveWindow", "quota", "proactiveOptIn"] as const) {
     if (typeof c[k] !== "boolean") {
       throw new GateError(`caps.${k} 必须是布尔。`);
     }

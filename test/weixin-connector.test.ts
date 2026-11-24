@@ -674,6 +674,7 @@ test("插件声明面：caps / credentialSchema / login / 无扩展工具 → �
     recall: false,
     passiveWindow: false,
     quota: false,
+    proactiveOptIn: false,
   });
   assert.deepEqual(plugin.credentialSecrets, ["token"]);
   assert.deepEqual(plugin.login, {
@@ -748,17 +749,20 @@ test("Sender caps 路由：passiveWindow=false 恒主动通道（新鲜入站消
       transportFor: () => inst.net,
       capsFor: (botId) => (botId === BOT ? plugin.caps : undefined),
     });
-    // 未 opt-in：主动消息被门禁硬拒
-    await assert.rejects(() => sender.sendAuto(BOT, USER, "hi", undefined, "chat"), /未开启/);
-    assert.equal(sendsOf(fake).length, 0);
-    // 入站消息落地 chat-opt（opt-in 等价映射）后可发，且恒走主动通道
+    // proactiveOptIn=false（2026-11-24 caps 化）：opt-in 开关从未置位也放行——
+    // iLink 无 opt 事件概念，「能对话即能发」；chat-opt 等价映射仍由插件入站落地
+    const r0 = await sender.sendAuto(BOT, USER, "hi", undefined, "chat");
+    assert.equal(r0.channel, "proactive");
+    assert.equal(r0.status, "sent");
+    assert.equal(sendsOf(fake).length, 1);
+    // chat-opt 置位后照常发送，恒走主动通道
     repo.setC2cSwitch(BOT, USER, true);
     const r = await sender.sendAuto(BOT, USER, "hello wx", undefined, "chat");
     assert.equal(r.channel, "proactive");
     assert.equal(r.status, "sent");
-    assert.equal(r.provider_msg_id, "9001");
+    assert.equal(r.provider_msg_id, "9002");
     // 自发消息本地补记（direction=1，作者标 yourself）
-    const outgoing = repo.getMessageByMsgId(BOT, "chat", USER, "9001");
+    const outgoing = repo.getMessageByMsgId(BOT, "chat", USER, "9002");
     assert.ok(outgoing);
     assert.equal(Number(outgoing.direction), 1);
   } finally {

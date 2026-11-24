@@ -73,6 +73,7 @@ function makeFakePlugin(
       recall: false,
       passiveWindow: false,
       quota: false,
+      proactiveOptIn: false,
     },
     credentialSchema: { type: "object", properties: {} },
     credentialSecrets: [],

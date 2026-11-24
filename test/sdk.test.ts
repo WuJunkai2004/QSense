@@ -51,6 +51,7 @@ function makePlugin(over: Partial<ConnectorPlugin> = {}): ConnectorPlugin {
       recall: false,
       passiveWindow: true,
       quota: true,
+      proactiveOptIn: true,
     },
     normalize: (botId, payload) => {
       // 最小 normalize：识别测试信封 {kind:"msg", id, scope…} → 成品消息
@@ -387,6 +388,7 @@ describe("sdk/registry", () => {
     recall: false,
     passiveWindow: false,
     quota: false,
+    proactiveOptIn: false,
   },
   credentialSchema: { type: "object", properties: {}, required: [] },
   credentialSecrets: [],
@@ -543,6 +545,7 @@ describe("sdk/memory+harness", () => {
         recall: false,
         passiveWindow: false,
         quota: false,
+        proactiveOptIn: false,
       },
       tools: [],
       create: (host, creds) => ({

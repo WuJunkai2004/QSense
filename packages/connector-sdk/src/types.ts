@@ -114,6 +114,12 @@ export interface PlatformCaps {
   passiveWindow: boolean;
   /** 平台额度语义存在（门禁/记账归插件 hooks.proactiveGate/Record；WebUI 渲染 quota 面板） */
   quota: boolean;
+  /**
+   * 主动私聊消息是否要求用户 opt-in 事件（QQ C2C 语义：C2C_MSG_RECEIVE 置位 /
+   * C2C_MSG_REJECT 撤权，core gate 校验 kv 开关）。false（微信 iLink / Telegram）
+   * =平台无 opt 概念——「能对话即能发」，core 跳过 opt-in 校验。
+   */
+  proactiveOptIn: boolean;
 }
 
 // ---------------------------------------------------------------------------

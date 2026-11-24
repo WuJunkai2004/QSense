@@ -181,7 +181,15 @@ export class Sender {
       );
     }
     return {
-      reply: net.reply!,
+      // 消灭 `net.reply!` 非空断言（曾让 passiveWindow=false 平台的 reply 直呼
+      // 变成 TypeError "reply is not a function"——2026-11-24 微信真机爆雷）：
+      // 未实现原语 → 可操作错误。正常路由不会触达（resolveChannel 的 caps 收口
+      // 使 passiveWindow=false 平台恒走 proactive）；此兜底防未来新的直呼入口。
+      reply:
+        net.reply ??
+        (async (): Promise<{ providerMsgId: string }> => {
+          throw new Error(t("send_reply_unsupported"));
+        }),
       proactive: net.proactive!,
       recall: net.recall!,
       uploadMedia: net.uploadMedia!,
@@ -216,7 +224,13 @@ export class Sender {
       if (optIn === false) {
         throw new Error(t("send_c2c_optout", { user: targetId }));
       }
-      if (requireOptIn && optIn !== true) {
+      // opt-in 校验是 QQ C2C 语义（C2C_MSG_RECEIVE 置位）；平台声明无 opt 概念
+      // （proactiveOptIn=false，微信 iLink / Telegram）→ 跳过，「能对话即能发」
+      if (
+        requireOptIn &&
+        optIn !== true &&
+        this.deps.capsFor?.(botId)?.proactiveOptIn !== false
+      ) {
         throw new Error(t("send_c2c_not_optin", { user: targetId }));
       }
     }

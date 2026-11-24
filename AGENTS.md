@@ -168,7 +168,7 @@ npm run dev        # build + node --watch
   - 形态：`packages/connector-weixin` 纯网络包——按契约 v2 进场（声明 + normalize + harness 验收通过），`config.toml` 一节 `[connectors.weixin]` 声明即启用；core 侧只有三处平台中立的产品面泛化（见「分仓拓扑」）。分仓暂存分支 `connector/wx`（孤儿分支，只承载该包，同 `connector/qq`、`connector/tg`）。
   - 红线：**不得使用 openclaw-weixin 包本体、不得桥接 OneBot 微信实现**（全是注入式，违反硬约束 #1）——只作协议说明书逆向自研。
   - 风险：iLink 协议非公开文档化（协议漂移）、腾讯条款保留控制权（条款灰度）——协议基准版本钉死（`ILINK_CHANNEL_VERSION`）、未知扫码状态宽容、发送软频控默认开启、包内 README 风险声明。
-  - 平台语义：仅 chat、无被动窗口、无额度、无 recall；文本上限 4000 码点。注意基座工具面恒 13——`recall` 仍在名单里，微信 bot 调用得到可操作错误（caps 只让 core 不要求该原语，并不会把工具摘掉）。
+  - 平台语义：仅 chat、无被动窗口、无额度、无 recall、无 opt-in（`proactiveOptIn: false`——iLink 无 opt 事件概念，「能对话即能发」；chat-opt 等价映射由插件入站落地，core gate 按 caps 跳过 QQ 式校验）；文本上限 4000 码点。注意基座工具面恒 13——`recall` 仍在名单里，微信 bot 调用得到可操作错误（caps 只让 core 不要求该原语，并不会把工具摘掉）。
   - **待办（按优先级）**：① 真人扫码后的收发段验收（清单见包内 README「待真机验证」）；② 配对码二次校验（`need_verifycode`）的输入通道（WebUI 目前以可操作错误终止）；③ 凭据热更新（token 失效 / `binded_redirect` 后免移除重绑）；④ 出站引用与语音条发送的线上形状核实；⑤ 微信版告知义务模板。
 - **P5 收尾遗留**：sender core 残留 QQ 专属文案清理；WebUI 设置页按平台 caps 渲染收尾（quota/认证等级=QQ 专属面板；「添加机器人」的平台选择 / 多平台表单 / 多平台扫码已于 2026-11-24 完成）；npmjs/github 插件来源安装流程文档（decl.ts 校验已在，装包步骤待写）。
 - **勿回退的既定决策**：契约 v2（normalize 必备 + ingest 表驱动 + parser 在插件仓）；config.toml 唯一配置权威（env 退役）；上行唯一出口 host.ingest；基座工具名单恒定 + 注册/删除不进工具面；凭据只落 SQLite；迁移只追加 version N。

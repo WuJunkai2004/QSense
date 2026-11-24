@@ -1213,3 +1213,93 @@ test("M4-21 单聊被动窗次数上限 4 次；撤回走 c2c scope", async () =
     fx.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// B⁺ caps 感知收口（2026-11-24 微信真机验收爆雷修复）：
+// 被动/opt-in 都是 QQ C2C 语义，caps 声明必须真正驱动 core 路由与门禁。
+// ---------------------------------------------------------------------------
+
+test("caps 感知门禁：proactiveOptIn=false 平台跳过 opt-in 校验（微信语义：能对话即能发）", async () => {
+  const fx = setupDb();
+  try {
+    const wxCaps = {
+      scopes: ["chat"],
+      media: { image: false, voice: false, video: false, file: false },
+      recall: false,
+      passiveWindow: false,
+      quota: false,
+      proactiveOptIn: false,
+    };
+    // opt-in 开关从未置位（微信无 opt 事件）→ caps 声明无 opt 概念 → 放行
+    const sender = new Sender({
+      log: createLogger("error"),
+      repo: fx.repo,
+      bots: fx.registry,
+      transportFor: () => makeNetMock().mock,
+      capsFor: (botId) => (botId === BOT ? wxCaps : undefined),
+    });
+    const r = await sender.sendAuto(BOT, "U_WX", "hi", undefined, "chat");
+    assert.equal(r.channel, "proactive");
+    assert.equal(r.status, "sent");
+    // 对照：QQ 语义（proactiveOptIn=true）未 opt-in 仍硬拒——现行为不变
+    const qqCaps = {
+      scopes: ["group", "c2c"],
+      media: { image: true, voice: true, video: false, file: false },
+      recall: true,
+      passiveWindow: true,
+      quota: true,
+      proactiveOptIn: true,
+    };
+    const qqSender = new Sender({
+      log: createLogger("error"),
+      repo: fx.repo,
+      bots: fx.registry,
+      transportFor: () => makeNetMock().mock,
+      capsFor: (botId) => (botId === BOT ? qqCaps : undefined),
+    });
+    await assert.rejects(
+      () => qqSender.sendAuto(BOT, "U_QQ", "hi", undefined, "chat"),
+      /未开启/,
+    );
+  } finally {
+    fx.close();
+  }
+});
+
+test("transport 兜底：net.reply 未实现 → 可操作错误（消灭 TypeError 'reply is not a function'）", async () => {
+  const fx = setupDb();
+  try {
+    // seed 窗内消息：穿过 reply() 的缓存/窗口校验，抵达 transport 调用点
+    seedInbound(fx.repo, "M1", 60_000);
+    // passiveWindow=false 平台（必备性校验不要求 reply）但原语确实缺失
+    const bareNet: ConnectorNet = {
+      proactive: async () => ({ providerMsgId: "P1" }),
+      recall: async () => undefined,
+      uploadMedia: async () => ({ handle: "h" }),
+    };
+    const sender = new Sender({
+      log: createLogger("error"),
+      repo: fx.repo,
+      bots: fx.registry,
+      transportFor: () => bareNet,
+      capsFor: (botId) =>
+        botId === BOT
+          ? {
+              scopes: ["chat"],
+              media: { image: false, voice: false, video: false, file: false },
+              recall: false,
+              passiveWindow: false,
+              quota: false,
+              proactiveOptIn: false,
+            }
+          : undefined,
+    });
+    await assert.rejects(
+      () => sender.reply(BOT, GROUP, "M1", "hi", false, false, undefined, "group"),
+      (e: Error) => e.message.includes("net.reply"),
+      "兜底错误必须可操作（点名 net.reply），而非 TypeError",
+    );
+  } finally {
+    fx.close();
+  }
+});
