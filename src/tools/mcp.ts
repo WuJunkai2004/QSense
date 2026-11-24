@@ -25,7 +25,7 @@ import type { BotRegistry } from "../bots";
 import type { Logger } from "../utils/logger";
 import type { Sender } from "../sender";
 import type { Repo } from "../store/repo";
-import { TOOLS, runTool } from "./defs";
+import { TOOLS, runTool, type ToolCallResult } from "./defs";
 
 export interface McpDeps {
   log: Logger;
@@ -156,7 +156,8 @@ export function createMcpHandler(
     }));
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const name = req.params.name;
-      const args = (req.params.arguments ?? {}) as Record<string, unknown>;
+      // MCP SDK 的 params.arguments 已是 Record<string, unknown> | undefined——协议线格式边界
+      const args = req.params.arguments ?? {};
       // M6 限流：全局并发上限（单用户场景够用），超限快速失败不排队
       if (active >= maxConcurrent) {
         mcpLog.warn("tool call rejected (busy)", { tool: name, active });
@@ -173,7 +174,7 @@ export function createMcpHandler(
       active += 1;
       try {
         const route = router.resolve(name);
-        let result: { isError?: boolean; text: string; content?: unknown[] };
+        let result: ToolCallResult;
         if (route === null) {
           // 跨平台可操作性：工具名存在于其他平台的扩展声明时，明确指出归属
           //（如 telegram bot 调 quota——它在 QQ 平台的工具面上）

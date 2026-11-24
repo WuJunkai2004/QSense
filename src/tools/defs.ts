@@ -18,6 +18,14 @@ import type { BotRegistry } from "../bots";
 import type { Sender, SendResult } from "../sender";
 import { synthesizeSpeech } from "../tts";
 import type { MsgRow, Repo } from "../store/repo";
+import {
+  AttachmentSchema,
+  MentionSchema,
+  QuoteSchema,
+  type NormalizedAttachment,
+} from "@qsense/connector-sdk";
+import { z } from "zod";
+import { jsonParseOf } from "../utils/json";
 import { Buffer } from "node:buffer";
 
 /** 图像内容块（MCP content）：多模态客户端会作为真实图像喂给模型 */
@@ -43,14 +51,23 @@ export class MediaResult {
 /** 工具参数错误：消息必须可操作（告诉调用方怎么改） */
 export class ToolError extends Error {}
 
+// —— B⁺ T6 声明面边界（语义化别名，审计白名单固化对象） ——
+// ToolArgs：MCP JSON-RPC params.arguments 线格式——协议层不解构，各 handler 首行经
+// str/optStr/optInt 显式把关（错误可操作，是测试断言锚点；zod 同源收口按 todo 后置）。
+export type ToolArgs = Record<string, unknown>;
+// JsonSchemaObject：MCP inputSchema 线格式（协议要求逐工具 JSON Schema 声明）。
+type JsonSchemaObject = Record<string, unknown>;
+// ToolJson：工具输出 JSON 文档——整体 JSON.stringify 进 MCP text 块，字段集逐工具异构。
+type ToolJson = Record<string, unknown>;
+
 interface ToolDef {
   name: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  inputSchema: JsonSchemaObject;
   handler: (
-    args: Record<string, unknown>,
+    args: ToolArgs,
     ctx: ToolContext,
-  ) => unknown | Promise<unknown>;
+  ) => ToolJson | MediaResult | Promise<ToolJson | MediaResult>;
 }
 
 export interface ToolContext {
@@ -73,7 +90,7 @@ export interface ToolContext {
 
 // —— 参数校验（显式 validate，错误可操作） ——
 
-function str(args: Record<string, unknown>, key: string, what: string): string {
+function str(args: ToolArgs, key: string, what: string): string {
   const v = args[key];
   if (typeof v !== "string" || v.trim() === "") {
     throw new ToolError(`参数 ${key} 缺失或非字符串：需要 ${what}。`);
@@ -81,10 +98,7 @@ function str(args: Record<string, unknown>, key: string, what: string): string {
   return v.trim();
 }
 
-function optStr(
-  args: Record<string, unknown>,
-  key: string,
-): string | undefined {
+function optStr(args: ToolArgs, key: string): string | undefined {
   const v = args[key];
   if (v === undefined || v === null || v === "") return undefined;
   if (typeof v !== "string") throw new ToolError(`参数 ${key} 必须是字符串。`);
@@ -92,7 +106,7 @@ function optStr(
 }
 
 function optInt(
-  args: Record<string, unknown>,
+  args: ToolArgs,
   key: string,
   min: number,
   max: number,
@@ -155,13 +169,13 @@ function msgOut(
   repo: Repo,
   botId: string,
   row: MsgRow,
-): Record<string, unknown> {
+): ToolJson {
   // author.name 一律 users 最新 QQ 昵称（2026-11-08 定案：改名后旧消息也跟着变）；行快照兜底
   const authorName =
     (row.author_openid !== null
       ? repo.userNameOf(botId, row.author_openid)
       : null) ?? row.author_name;
-  const out: Record<string, unknown> = {
+  const out: ToolJson = {
     msg_id: row.msg_id,
     ts: row.ts !== null ? new Date(row.ts).toISOString() : null,
     author: {
@@ -184,18 +198,18 @@ function msgOut(
   }
   if (row.records_count > 0) out.records_count = row.records_count;
   if (row.mentions_json) {
-    const mentions = JSON.parse(row.mentions_json) as Array<{
-      id: string;
-      name?: string;
-    }>;
-    // mention 矫正：官方 username 是群昵称（一人多群昵称必混乱），一律以 users QQ 昵称为准
-    out.mentions = mentions.map((m) => {
-      const name = repo.userNameOf(botId, m.id) ?? m.name;
-      return name !== undefined ? { id: m.id, name } : { id: m.id };
-    });
+    // B⁺ T6：mentions_json 过 SDK MentionSchema（入库源即该形状）；坏档按缺失
+    const m = z.array(MentionSchema).safeParse(jsonParseOf(row.mentions_json));
+    if (m.success) {
+      // mention 矫正：官方 username 是群昵称（一人多群昵称必混乱），一律以 users QQ 昵称为准
+      out.mentions = m.data.map((mm) => {
+        const name = repo.userNameOf(botId, mm.id) ?? mm.name;
+        return name !== undefined ? { id: mm.id, name } : { id: mm.id };
+      });
+    }
   }
   if (row.attachments_json) out.attachments = compactAttachments(row.attachments_json);
-  if (row.ark_json) out.ark = JSON.parse(row.ark_json);
+  if (row.ark_json) out.ark = jsonParseOf(row.ark_json); // ark=平台原始卡片不透明边界
   return out;
 }
 
@@ -205,10 +219,9 @@ function msgOut(
  * 输出撑爆上下文（微信内联中图单张可达 MB 级）。url 换成带体积的占位说明；库列不动
  * （WebUI 聊天窗仍直接用 attachments_json 内联渲染）。
  */
-function compactInlineUrl<T extends object>(att: T): T {
-  const rec = att as Record<string, unknown>;
-  const url = rec["url"];
-  if (typeof url !== "string" || !url.startsWith("data:")) return att;
+function compactInlineUrl(att: NormalizedAttachment): NormalizedAttachment {
+  const url = att.url;
+  if (!url.startsWith("data:")) return att;
   const comma = url.indexOf(",");
   if (comma < 0) return att;
   const meta = url.slice(5, comma); // 形如 image/jpeg;base64
@@ -220,16 +233,15 @@ function compactInlineUrl<T extends object>(att: T): T {
   return { ...att, url: `data:${meta},…(内联 ${size}，图像经 get_media 获取)` };
 }
 
-/** attachments_json 列 → 工具输出形状（逐项压缩内联 data:URL；非数组原样透出） */
-function compactAttachments(raw: string): unknown {
-  const parsed = JSON.parse(raw) as unknown;
-  return Array.isArray(parsed)
-    ? parsed.map((att) =>
-        att !== null && typeof att === "object"
-          ? compactInlineUrl(att as Record<string, unknown>)
-          : att,
-      )
-    : parsed;
+/** attachments_json 列解析（SDK AttachmentSchema 把关；坏档按缺失=[]） */
+function attachmentsOf(raw: string): NormalizedAttachment[] {
+  const r = z.array(AttachmentSchema).safeParse(jsonParseOf(raw));
+  return r.success ? r.data : [];
+}
+
+/** attachments_json 列 → 工具输出形状（逐项压缩内联 data:URL） */
+function compactAttachments(raw: string): NormalizedAttachment[] {
+  return attachmentsOf(raw).map(compactInlineUrl);
 }
 
 function rowsOut(
@@ -238,7 +250,7 @@ function rowsOut(
   _kind: "group" | "chat",
   _scopeId: string,
   rows: MsgRow[],
-): Record<string, unknown>[] {
+): ToolJson[] {
   return rows.map((r) => msgOut(repo, botId, r));
 }
 
@@ -248,7 +260,7 @@ function isoTs(ts: number | null | undefined): string | null {
     : null;
 }
 
-function optType(args: Record<string, unknown>): "chat" | "group" | "all" {
+function optType(args: ToolArgs): "chat" | "group" | "all" {
   const v = optStr(args, "type") ?? "all";
   if (v !== "chat" && v !== "group" && v !== "all") {
     throw new ToolError(`参数 type 只接受 chat/group/all，收到：${v}。`);
@@ -261,7 +273,7 @@ function optType(args: Record<string, unknown>): "chat" | "group" | "all" {
  * 与 list_all/list_new 返回值 conversations[].id 对齐；传旧名 group 未传 id 时给
  * 可操作的更名提示，存量调用模式（含模型上下文里的旧示例）可立即自愈。
  */
-function scopeIdArg(args: Record<string, unknown>): string {
+function scopeIdArg(args: ToolArgs): string {
   const legacy = optStr(args, "group");
   if (legacy !== undefined) {
     throw new ToolError(
@@ -295,7 +307,7 @@ function detectKind(
 /** 会话三元组一站式解析（读写工具共用样板）：botId（token 绑定）→ id 取参（旧名报错）→ 侧别探测 */
 function resolveSession(
   ctx: ToolContext,
-  args: Record<string, unknown>,
+  args: ToolArgs,
 ): { botId: string; scopeId: string; kind: "group" | "chat" } {
   const botId = resolveBotId(ctx);
   const scopeId = scopeIdArg(args);
@@ -327,13 +339,20 @@ function anchorOf(
  * 会话列表统一输出（list_all/list_new 共用 envelope）：
  * 条目形状 { type, id, unread, last_msg_ts }，恒按 last_msg_ts 倒序（null 最后）。
  */
+interface ConversationItem {
+  type: "chat" | "group";
+  id: string;
+  unread: number;
+  last_msg_ts: string | null;
+}
+
 function conversationsOut(
   ctx: ToolContext,
   type: "chat" | "group" | "all",
   onlyNew: boolean,
-): Record<string, unknown> {
+): ToolJson {
   const botId = resolveBotId(ctx);
-  const items: Array<Record<string, unknown>> = [];
+  const items: ConversationItem[] = [];
   for (const c of ctx.repo.listConversations(botId)) {
     if (type !== "all" && c.scope !== type) continue;
     items.push({
@@ -343,7 +362,7 @@ function conversationsOut(
       last_msg_ts: isoTs(c.last_ts),
     });
   }
-  const list = onlyNew ? items.filter((i) => (i.unread as number) > 0) : items;
+  const list = onlyNew ? items.filter((i) => i.unread > 0) : items;
   list.sort((a, b) =>
     String(b.last_msg_ts ?? "").localeCompare(String(a.last_msg_ts ?? "")),
   );
@@ -637,7 +656,7 @@ export const TOOLS: ToolDef[] = [
             (r.author_openid !== null
               ? ctx.repo.userNameOf(botId, r.author_openid)
               : null) ?? r.author_name;
-          const out: Record<string, unknown> = {
+          const out: ToolJson = {
             ord: r.ord,
             depth: r.depth,
             author: {
@@ -648,16 +667,16 @@ export const TOOLS: ToolDef[] = [
             text: r.text,
           };
           if (r.quote_json !== null) {
-            const q = JSON.parse(r.quote_json) as {
-              msgIdx?: string;
-              body?: string;
-            };
-            const ref = ctx.repo.resolveQuoteRef(botId, kind, scopeId, q);
-            out.quote_msg = {
-              id: ref.id,
-              msg_id: ref.msgId,
-              content: ref.body,
-            };
+            // B⁺ T6：子行引用过 SDK QuoteSchema（入库源即该形状）；坏档按缺失
+            const q = QuoteSchema.safeParse(jsonParseOf(r.quote_json));
+            if (q.success && q.data !== null) {
+              const ref = ctx.repo.resolveQuoteRef(botId, kind, scopeId, q.data);
+              out.quote_msg = {
+                id: ref.id,
+                msg_id: ref.msgId,
+                content: ref.body,
+              };
+            }
           }
           if (r.attachments_json) {
             out.attachments = compactAttachments(r.attachments_json);
@@ -691,9 +710,7 @@ export const TOOLS: ToolDef[] = [
       const msgId = str(args, "msg_id", "消息 id");
       const n = optInt(args, "n", 1, 50, 1);
       const row = anchorOf(ctx, botId, kind, scopeId, msgId);
-      const atts: Array<Record<string, unknown>> = row.attachments_json
-        ? JSON.parse(row.attachments_json)
-        : [];
+      const atts = attachmentsOf(row.attachments_json ?? "");
       const att = atts[n - 1];
       if (att === undefined) {
         throw new ToolError(
@@ -912,12 +929,19 @@ export const TOOLS: ToolDef[] = [
   },
 ];
 
+/** 单工具调用结果（MCP CallToolResult 同形子集：文本块 / 可选图像块） */
+export interface ToolCallResult {
+  isError?: boolean;
+  text: string;
+  content?: ContentBlock[];
+}
+
 /** 工具执行入口（统一错误翻译；返回 MCP CallToolResult.content）。写工具经 Sender，故为异步。 */
 export async function runTool(
   name: string,
-  args: Record<string, unknown>,
+  args: ToolArgs,
   ctx: ToolContext,
-): Promise<{ isError?: boolean; text: string; content?: ContentBlock[] }> {
+): Promise<ToolCallResult> {
   const def = TOOLS.find((t) => t.name === name);
   if (def === undefined) {
     return {

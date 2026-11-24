@@ -20,6 +20,7 @@ import {
   type MsgScope,
 } from "@qsense/connector-sdk";
 import type { Logger } from "../utils/logger";
+import { jsonParseOf } from "../utils/json";
 import type { TtsConfig } from "../tts";
 import type { DB } from "./db";
 
@@ -98,15 +99,6 @@ interface UpsertMemberParams {
   member_openid: string;
   member_role: string | null;
   now: number;
-}
-
-/** JSON.parse 容错：坏 JSON → undefined（统一交 schema safeParse 按缺失处理） */
-function jsonParseOf(raw: string): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
 }
 
 /** 运行时设置（kv settings:runtime:v1）——读端 schema 把关，坏档按安全默认 */
