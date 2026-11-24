@@ -16,7 +16,7 @@
 // 启动期 fail-fast 检查（missingPlatformBots）拒启——显态失败优于静默降级。
 
 import { readFileSync } from "node:fs";
-import { parse } from "smol-toml";
+import { parse, type TomlTable, type TomlValue } from "smol-toml";
 
 /** 平台声明键规则（与 ConnectorPlugin.id 同一正则） */
 const PLATFORM_KEY_RE = /^[a-z][a-z0-9-]*$/;
@@ -39,13 +39,16 @@ export interface ConnectorDecl {
   source?: string;
 }
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+/** TOML 值 → 纯表判定（TomlDate/数组/原始值不算表；smol-toml 强类型自带判别基础） */
+function isTomlTable(v: TomlValue): v is TomlTable {
+  return (
+    typeof v === "object" && v !== null && !Array.isArray(v) && !(v instanceof Date)
+  );
 }
 
 /** config.toml 源文 → 声明清单；语法/结构错误抛 DeclError（拒启，可操作文案） */
 export function parseConnectorsToml(source: string): ConnectorDecl[] {
-  let doc: unknown;
+  let doc: TomlTable;
   try {
     doc = parse(source);
   } catch (e) {
@@ -57,13 +60,10 @@ export function parseConnectorsToml(source: string): ConnectorDecl[] {
 }
 
 /** 已解析的 config.toml 顶层文档 → 连接器声明清单（loadConfig 复用，避免二次 parse） */
-export function connectorDeclsOf(doc: unknown): ConnectorDecl[] {
-  if (!isPlainObject(doc)) {
-    throw new DeclError("config.toml：顶层必须是 TOML 表。");
-  }
+export function connectorDeclsOf(doc: TomlTable): ConnectorDecl[] {
   const conns = doc["connectors"];
   if (conns === undefined) return []; // 无 [connectors] 节 = 零声明（合法）
-  if (!isPlainObject(conns)) {
+  if (!isTomlTable(conns)) {
     throw new DeclError(
       "config.toml：[connectors] 必须是表（形如 [connectors.qq]）。",
     );
@@ -75,7 +75,7 @@ export function connectorDeclsOf(doc: unknown): ConnectorDecl[] {
         `config.toml：connectors.${platform} 平台名非法（须匹配 ${PLATFORM_KEY_RE}）。`,
       );
     }
-    if (!isPlainObject(raw)) {
+    if (!isTomlTable(raw)) {
       throw new DeclError(
         `config.toml：connectors.${platform} 必须是表（package = "…"）。`,
       );
@@ -127,8 +127,7 @@ export function loadConnectorDeclarations(path: string): ConnectorDecl[] {
   try {
     source = readFileSync(path, "utf8");
   } catch (e) {
-    const code = (e as { code?: unknown }).code;
-    if (code === "ENOENT") return [];
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw new DeclError(
       `config.toml 读取失败：${e instanceof Error ? e.message : String(e)}`,
     );

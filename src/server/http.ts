@@ -14,15 +14,35 @@ import { Repo } from "../store/repo";
 import { bearerOk, createMcpHandler } from "../tools/mcp";
 import { registerUiRoutes } from "./ui";
 import { DOCS_MARKDOWN } from "./docs";
+import { formatZodIssues } from "@qsense/connector-sdk";
+import { z } from "zod";
 import {
   TIMEOUT_RESPONSE,
   validateWaitBody,
+  WaitBodyWireSchema,
+  type WaitBody,
   type WaitHub,
   type WaitResponse,
 } from "./wait";
 import type { TtsDeps } from "../tts";
 
 const ASSET_MAX_BYTES = 20 * 1024 * 1024;
+
+/** /register 请求体线上形状（凭据键值对按各平台 credentialSchema 渲染，值恒字符串） */
+const RegisterBodySchema = z.strictObject({
+  platform: z.string().optional(),
+  credentials: z.record(z.string(), z.string().min(1)).optional(),
+  /** 展示名（缺省=appid） */
+  name: z.string().optional(),
+  /** 认证等级（certified/uncertified；parseAuthLevel 权威校验） */
+  auth_level: z.string().optional(),
+});
+
+/** /assets PUT 票据校验 query（exp/sig 十六进制令牌字符串） */
+const AssetPutQuerySchema = z.strictObject({
+  exp: z.string().optional(),
+  sig: z.string().optional(),
+});
 
 export interface ServerDeps {
   log: Logger;
@@ -49,8 +69,8 @@ export interface ServerDeps {
 }
 
 /** Authorization: Bearer <token> 提取；无效返回 null */
-function bearerOf(header: unknown): string | null {
-  if (typeof header !== "string" || !header.startsWith("Bearer ")) return null;
+function bearerOf(header: string | undefined): string | null {
+  if (header === undefined || !header.startsWith("Bearer ")) return null;
   const t = header.slice(7).trim();
   return t === "" ? null : t;
 }
@@ -179,40 +199,22 @@ export function buildServer(deps: ServerDeps) {
           "Unauthorized：/register 用 admin token（与 /ui/api 同一把），不是 agent_token——新 bot 注册前还没有 agent_token。admin token 首次启动打印在服务日志（仅一次）。",
       });
     }
-    const body: unknown = req.body;
-    if (
-      body === null ||
-      body === undefined ||
-      typeof body !== "object" ||
-      Buffer.isBuffer(body)
-    ) {
+    // B⁺ T6：请求体 zod 把关（根级形状不符 → 同款 400；字段级失败 → 字段路径文案）
+    const gate = RegisterBodySchema.safeParse(req.body ?? null);
+    if (!gate.success) {
+      const isRoot = gate.error.issues.every((iss) => iss.path.length === 0);
       return reply.code(400).send({
-        error: "请求体必须是 JSON 对象（Content-Type: application/json）。",
+        error: isRoot
+          ? "请求体必须是 JSON 对象（Content-Type: application/json）。"
+          : formatZodIssues(gate.error, "参数"),
       });
     }
-    const args = body as Record<string, unknown>;
+    const args = gate.data;
     const platform =
-      typeof args.platform === "string" && args.platform.trim() !== ""
+      args.platform !== undefined && args.platform.trim() !== ""
         ? args.platform.trim()
         : "qq";
-    const credRaw = args.credentials;
-    let credentials: Record<string, string> = {};
-    if (credRaw !== undefined && credRaw !== null) {
-      if (typeof credRaw !== "object" || Array.isArray(credRaw)) {
-        return reply.code(400).send({
-          error:
-            '参数 credentials 必须是键值对对象（如 {"appid":"…","secret":"…"}）。',
-        });
-      }
-      for (const [k, v] of Object.entries(credRaw as Record<string, unknown>)) {
-        if (typeof v !== "string" || v === "") {
-          return reply.code(400).send({
-            error: `参数 credentials.${k} 必须是非空字符串（凭据值不得缺省或为其他类型）。`,
-          });
-        }
-        credentials[k] = v;
-      }
-    }
+    const credentials: Record<string, string> = { ...(args.credentials ?? {}) };
     if (Object.keys(credentials).length === 0) {
       return reply.code(400).send({
         error:
@@ -284,9 +286,14 @@ export function buildServer(deps: ServerDeps) {
         error: `Forbidden：bot ${botId} 的 MCP 访问已在 WebUI 设置页禁用（同闸覆盖 /wait）。`,
       });
     }
-    let parsed;
+    let parsed: WaitBody;
     try {
-      parsed = validateWaitBody(req.body);
+      // B⁺ T6：形状（zod strictObject）+ 语义（可操作文案）两层校验
+      const gate = WaitBodyWireSchema.safeParse(req.body ?? {});
+      if (!gate.success) {
+        throw new Error(formatZodIssues(gate.error, "请求体"));
+      }
+      parsed = validateWaitBody(gate.data);
     } catch (e) {
       return reply
         .code(400)
@@ -342,12 +349,15 @@ export function buildServer(deps: ServerDeps) {
       botId: string;
       assetId: string;
     };
+    // B⁺ T6：query zod 把关（形状不符按缺省处理 → verifyPut 报 400 缺参）
+    const qg = AssetPutQuerySchema.safeParse(req.query ?? {});
+    const q = qg.success ? qg.data : {};
     const code = deps.assets.verifyPut(
       botId,
       assetId,
       deps.registry.agentTokenOf(botId),
-      (req.query as Record<string, unknown>).exp,
-      (req.query as Record<string, unknown>).sig,
+      q.exp,
+      q.sig,
     );
     if (code !== null) {
       const why: Record<number, string> = {

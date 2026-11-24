@@ -15,6 +15,8 @@
 
 import type { Logger } from "../utils/logger";
 import type { Repo } from "../store/repo";
+import { formatZodIssues } from "@qsense/connector-sdk";
+import { z } from "zod";
 
 // ---------------------------------------------------------------------------
 // 形状
@@ -67,77 +69,70 @@ const TIMEOUT_RESPONSE: WaitResponse = { timeout: true, events: [], unread: [] }
 export { TIMEOUT_RESPONSE };
 
 // ---------------------------------------------------------------------------
-// 校验（未知键硬拒——与 config/decl 同哲学；错误消息可操作）
+// 校验（B⁺ T6：两层——线上形状 zod strictObject 把关（未知键硬拒），语义校验
+// 保既有可操作文案。路由层用 WaitBodyWireSchema.safeParse(req.body) 入口。）
 // ---------------------------------------------------------------------------
 
-const FILTER_KEYS = new Set(["scope", "sessions", "authors", "mention"]);
 const MAX_FILTER_TERMS = 10;
 const MAX_ID_LIST = 50;
 const HOLD_DEFAULT_S = 30;
 const HOLD_MAX_S = 600;
 
-function assertObject(v: unknown, label: string): Record<string, unknown> {
-  if (v === null || typeof v !== "object" || Array.isArray(v)) {
-    throw new Error(`${label}：必须是对象`);
-  }
-  return v as Record<string, unknown>;
-}
+/** 单条过滤谓词的线上形状（字段集 = WaitFilter 的线上前身；值域语义校验在下方） */
+export const WaitFilterWireSchema = z.strictObject({
+  scope: z.string().optional(),
+  sessions: z.array(z.string()).optional(),
+  authors: z.array(z.string()).optional(),
+  mention: z.boolean().optional(),
+});
 
-function idArrayOf(v: unknown, label: string): string[] {
-  if (!Array.isArray(v) || v.length === 0) {
+/** 请求体线上形状（DNF：filter 单对象或对象数组；未知键硬拒） */
+export const WaitBodyWireSchema = z.strictObject({
+  filter: z
+    .union([WaitFilterWireSchema, z.array(WaitFilterWireSchema)])
+    .optional(),
+  hold: z.number().int().optional(),
+});
+
+export type WaitFilterWire = z.infer<typeof WaitFilterWireSchema>;
+export type WaitBodyWire = z.infer<typeof WaitBodyWireSchema>;
+
+function idArrayOf(v: string[], label: string): string[] {
+  if (v.length === 0) {
     throw new Error(`${label}：必须是非空字符串数组`);
   }
   if (v.length > MAX_ID_LIST) {
     throw new Error(`${label}：最多 ${MAX_ID_LIST} 个`);
   }
   for (const item of v) {
-    if (typeof item !== "string" || item === "") {
+    if (item === "") {
       throw new Error(`${label}：必须是非空字符串数组`);
     }
   }
-  return v as string[];
+  return v;
 }
 
-function validateFilterTerm(raw: unknown, label: string): WaitFilter {
-  const obj = assertObject(raw, label);
-  const unknown = Object.keys(obj).filter((k) => !FILTER_KEYS.has(k));
-  if (unknown.length > 0) {
-    throw new Error(
-      `${label}：未知字段 ${unknown.join("/")}（可用 scope/sessions/authors/mention）`,
-    );
-  }
-  const scope = obj["scope"];
+function validateFilterTerm(raw: WaitFilterWire, label: string): WaitFilter {
+  const scope = raw.scope;
   if (scope !== undefined && scope !== "group" && scope !== "chat") {
     throw new Error(`${label}.scope：必须是 "group" | "chat"`);
   }
-  const sessions = obj["sessions"];
-  const authors = obj["authors"];
-  const mention = obj["mention"];
-  if (mention !== undefined && typeof mention !== "boolean") {
-    throw new Error(`${label}.mention：必须是布尔`);
-  }
   return {
     ...(scope !== undefined ? { scope } : {}),
-    ...(sessions !== undefined
-      ? { sessions: idArrayOf(sessions, `${label}.sessions`) }
+    ...(raw.sessions !== undefined
+      ? { sessions: idArrayOf(raw.sessions, `${label}.sessions`) }
       : {}),
-    ...(authors !== undefined
-      ? { authors: idArrayOf(authors, `${label}.authors`) }
+    ...(raw.authors !== undefined
+      ? { authors: idArrayOf(raw.authors, `${label}.authors`) }
       : {}),
-    ...(mention !== undefined ? { mention } : {}),
+    ...(raw.mention !== undefined ? { mention: raw.mention } : {}),
   };
 }
 
-/** 请求体校验：缺省 {} = all + hold 30s；非法即抛错（路由转 400） */
-export function validateWaitBody(raw: unknown): WaitBody {
-  const body =
-    raw === undefined || raw === null ? {} : assertObject(raw, "请求体");
-  const unknown = Object.keys(body).filter((k) => k !== "filter" && k !== "hold");
-  if (unknown.length > 0) {
-    throw new Error(`请求体：未知字段 ${unknown.join("/")}（可用 filter/hold）`);
-  }
+/** 请求体语义校验：缺省 = all + hold 30s；非法即抛错（路由转 400） */
+export function validateWaitBody(raw: WaitBodyWire): WaitBody {
   let filter: WaitFilter[];
-  const rawFilter = body["filter"];
+  const rawFilter = raw.filter;
   if (rawFilter === undefined) {
     filter = [{}]; // all
   } else if (Array.isArray(rawFilter)) {
@@ -149,14 +144,9 @@ export function validateWaitBody(raw: unknown): WaitBody {
     filter = [validateFilterTerm(rawFilter, "请求体.filter")];
   }
   let hold = HOLD_DEFAULT_S;
-  const rawHold = body["hold"];
+  const rawHold = raw.hold;
   if (rawHold !== undefined) {
-    if (
-      typeof rawHold !== "number" ||
-      !Number.isInteger(rawHold) ||
-      rawHold < 1 ||
-      rawHold > HOLD_MAX_S
-    ) {
+    if (rawHold < 1 || rawHold > HOLD_MAX_S) {
       throw new Error(
         `请求体.hold：整数秒 1-${HOLD_MAX_S}（缺省 ${HOLD_DEFAULT_S}）`,
       );
@@ -164,6 +154,15 @@ export function validateWaitBody(raw: unknown): WaitBody {
     hold = rawHold;
   }
   return { filter, hold };
+}
+
+/** 路由/测试入口：形状 + 语义一次到位（失败消息可操作，经 formatZodIssues） */
+export function parseWaitBody(raw: WaitBodyWire): WaitBody {
+  const gate = WaitBodyWireSchema.safeParse(raw ?? {});
+  if (!gate.success) {
+    throw new Error(formatZodIssues(gate.error, "请求体"));
+  }
+  return validateWaitBody(gate.data);
 }
 
 // ---------------------------------------------------------------------------

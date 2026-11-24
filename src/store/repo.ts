@@ -13,22 +13,21 @@ import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
 import { z } from "zod";
 import {
-  formatZodIssues,
+  parseJsonWith,
   QuoteSchema,
   type NormalizedAttachment,
   type NormalizedMessage,
   type MsgScope,
 } from "@qsense/connector-sdk";
 import type { Logger } from "../utils/logger";
-import { jsonParseOf } from "../utils/json";
 import type { TtsConfig } from "../tts";
 import type { DB } from "./db";
 
 // B⁺ T6：better-sqlite3 v13 内建双泛型 prepare<Params, Result>——行类型进语句，
-// 读取端零盲转型。Stmt=位置参数（R=行类型），NamedStmt=命名参数对象绑定（P 与
-// SQL @占位一一对应，better-sqlite3 对缺失键抛错、多余键忽略）。
-type Stmt<P extends unknown[] = [], R = unknown> = Database.Statement<P, R>;
-type NamedStmt<P, R = unknown> = Database.Statement<[P], R>;
+// 读取端零盲转型。位置参数用字面量元组（Database.Statement<[...], R>），命名参数
+// 用对象接口包一层元组（Database.Statement<[XxxParams], R>；P 与 SQL @占位一一对应，
+// better-sqlite3 对缺失键抛错、多余键忽略）。不设本地别名——约束留在库类型里，
+// 本文件零 unknown/any 字样。
 
 /** messages 行写入参数（命名绑定） */
 interface InsertMsgParams {
@@ -208,54 +207,75 @@ export class Repo {
   private readonly log: Logger;
 
   // —— 热路径 stmt（构造器缓存；泛型第二参=行类型，读取端零盲转型） ——
-  private readonly insertMsgStmt: NamedStmt<InsertMsgParams>;
-  private readonly insertRecordStmt: NamedStmt<InsertRecordParams>;
-  private readonly upsertUserStmt: NamedStmt<UpsertUserParams>;
-  private readonly userNameStmt: Stmt<[string, string], { name: string | null }>;
-  private readonly afterStmt: Stmt<[string, string, string, number, number], MsgRow>;
-  private readonly byMsgIdStmt: Stmt<[string, string, string, string], MsgRow>;
-  private readonly latestStmt: Stmt<[string, string, string, number], MsgRow>;
-  private readonly beforeTsStmt: Stmt<
+  private readonly insertMsgStmt: Database.Statement<[InsertMsgParams]>;
+  private readonly insertRecordStmt: Database.Statement<[InsertRecordParams]>;
+  private readonly upsertUserStmt: Database.Statement<[UpsertUserParams]>;
+  private readonly userNameStmt: Database.Statement<
+    [string, string],
+    { name: string | null }
+  >;
+  private readonly afterStmt: Database.Statement<
+    [string, string, string, number, number],
+    MsgRow
+  >;
+  private readonly byMsgIdStmt: Database.Statement<
+    [string, string, string, string],
+    MsgRow
+  >;
+  private readonly latestStmt: Database.Statement<
+    [string, string, string, number],
+    MsgRow
+  >;
+  private readonly beforeTsStmt: Database.Statement<
     [string, string, string, number, number, number, number],
     MsgRow
   >;
-  private afterTsStmt: Stmt<
+  private afterTsStmt: Database.Statement<
     [string, string, string, number, number, number, number],
     MsgRow
   >;
-  private pageBeforeStmt: Stmt<
+  private pageBeforeStmt: Database.Statement<
     [string, string, string, number | null, number, number],
     MsgRow
   >;
-  private readonly ftsStmt: Stmt<[string, string, string, string, number], MsgRow>;
-  private readonly unreadStmt: Stmt<
+  private readonly ftsStmt: Database.Statement<
+    [string, string, string, string, number],
+    MsgRow
+  >;
+  private readonly unreadStmt: Database.Statement<
     [number, string, string, string],
     { unread: number; last_ts: number | null }
   >;
-  private readonly listChatsStmt: Stmt<
+  private readonly listChatsStmt: Database.Statement<
     [string],
     { user_openid: string; last_ts: number | null }
   >;
-  private readonly msgIdxStmt: Stmt<
+  private readonly msgIdxStmt: Database.Statement<
     [string, string, string, string],
     { author_openid: string | null; msg_id: string; author_name: string | null }
   >;
-  private readonly quoteUpdateStmt: Stmt<[string, number]>;
-  private readonly recordsStmt: Stmt<[string, string, string, string], RecordRow>;
-  private readonly detectGroupMsgStmt: Stmt<[string, string]>;
-  private readonly detectChatMsgStmt: Stmt<[string, string]>;
-  private readonly detectGroupRegStmt: Stmt<[string, string]>;
+  private readonly quoteUpdateStmt: Database.Statement<[string, number]>;
+  private readonly recordsStmt: Database.Statement<
+    [string, string, string, string],
+    RecordRow
+  >;
+  private readonly detectGroupMsgStmt: Database.Statement<[string, string]>;
+  private readonly detectChatMsgStmt: Database.Statement<[string, string]>;
+  private readonly detectGroupRegStmt: Database.Statement<[string, string]>;
   /** P3：会话注册表（sessions 表）——kind 裁决权威源 + ingest 登写 */
-  private readonly sessionKindStmt: Stmt<[string, string], { kind: string }>;
-  private readonly upsertSessionStmt: NamedStmt<UpsertSessionParams>;
-  private readonly upsertGroupStmt: NamedStmt<GroupWriteParams>;
-  private readonly ensureGroupStmt: NamedStmt<GroupWriteParams>;
-  private readonly setGroupSwitchStmt: NamedStmt<GroupWriteParams>;
-  private readonly deleteGroupStmt: Stmt<[string, string]>;
-  private readonly upsertMemberStmt: NamedStmt<UpsertMemberParams>;
-  private readonly kvGetStmt: Stmt<[string], { v: string }>;
-  private readonly kvSetStmt: Stmt<[string, string]>;
-  private readonly insertSendStmt: Stmt<
+  private readonly sessionKindStmt: Database.Statement<
+    [string, string],
+    { kind: string }
+  >;
+  private readonly upsertSessionStmt: Database.Statement<[UpsertSessionParams]>;
+  private readonly upsertGroupStmt: Database.Statement<[GroupWriteParams]>;
+  private readonly ensureGroupStmt: Database.Statement<[GroupWriteParams]>;
+  private readonly setGroupSwitchStmt: Database.Statement<[GroupWriteParams]>;
+  private readonly deleteGroupStmt: Database.Statement<[string, string]>;
+  private readonly upsertMemberStmt: Database.Statement<[UpsertMemberParams]>;
+  private readonly kvGetStmt: Database.Statement<[string], { v: string }>;
+  private readonly kvSetStmt: Database.Statement<[string, string]>;
+  private readonly insertSendStmt: Database.Statement<
     [
       string,
       string,
@@ -267,10 +287,10 @@ export class Repo {
       number,
     ]
   >;
-  private readonly updateSendStmt: Stmt<
+  private readonly updateSendStmt: Database.Statement<
     [string, string | null, number | null, number]
   >;
-  private readonly incrQuotaStmt: Stmt<[string, string, string]>;
+  private readonly incrQuotaStmt: Database.Statement<[string, string, string]>;
 
   constructor(
     private readonly db: DB,
@@ -595,14 +615,14 @@ export class Repo {
    */
   quoteOf(row: MsgRow): QuoteMsgData | null {
     if (row.quote_json === null) return null;
-    const q = QuoteSchema.safeParse(jsonParseOf(row.quote_json));
-    if (!q.success) {
+    const q = parseJsonWith(QuoteSchema, row.quote_json);
+    if (q === null) {
       this.log.warn(
-        `quote_json 坏档按缺失处理（rid=${row.rid}）：${formatZodIssues(q.error, "quote_json")}`,
+        `quote_json 坏档按缺失处理（rid=${row.rid}）：JSON 解析或形状校验失败`,
       );
       return null;
     }
-    const body = q.data;
+    const body = q;
     if (body === null) return null;
     let { authorOpenid, authorName, msgId } = body;
     if (body.msgIdx !== undefined && (authorOpenid ?? null) === null) {
@@ -730,8 +750,8 @@ export class Repo {
   getTtsConfig(): TtsConfig | null {
     const row = this.kvGetStmt.get(TTS_CONFIG_KEY);
     if (row === undefined) return null;
-    const r = TtsConfigSchema.safeParse(jsonParseOf(row.v));
-    return r.success ? r.data : null;
+    const r = parseJsonWith(TtsConfigSchema, row.v);
+    return r;
   }
 
   setTtsConfig(cfg: TtsConfig): void {
@@ -1311,8 +1331,8 @@ export class Repo {
   getSendEnable(): boolean {
     const row = this.kvGetStmt.get(SETTINGS_KEY);
     if (row === undefined) return false;
-    const r = RuntimeSettingsSchema.safeParse(jsonParseOf(row.v));
-    return r.success && r.data.sendEnable === true;
+    const r = parseJsonWith(RuntimeSettingsSchema, row.v);
+    return r?.sendEnable === true;
   }
 
   setSendEnable(v: boolean): void {

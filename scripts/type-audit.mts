@@ -1,13 +1,16 @@
 // 类型审计（B⁺ T0 验收工具，2026-11-24）：统计全项目 any / unknown / `as X`
-// 盲断言的分布，与合法边界白名单 diff，输出增量报告。
+// 盲断言的分布，输出增量报告。
 //
 // 用法：npx tsx scripts/type-audit.mts [--json]
 //   默认输出人类可读报告；--json 输出机器可读汇总（供基线归档/后续对比）。
 //   退出码恒 0（本脚本是度量工具，不拦截构建；拦截在 tsc 与测试）。
 //
-// 白名单口径（todo.md「现状盘点」固化）：`raw` / `payload` / `ark` 的
-// `: unknown` 标注、`[key: string]: unknown` 透传键、JsonSchema 递归面。
-// 这些是刻意的「平台原始载荷不透明边界」，其余 unknown 一律类型化或 schema 化。
+// unknown 口径（2026-11-24 用户定案，取代早先的白名单方案）：**零容忍**。
+// 违禁项 = 源码出现 unknown / JsonValue / Record<string, unknown> / Record<string, any>
+// 等「无结构万能类型」——消除 unknown 必须按实际读取的字段定义具体 interface/联合类型，
+// 网络入口一律 zod 解析成具体类型（失败抛错/返回 null 由上层 catch）；
+// 平台原始载荷类型隔离在各插件 *.types.ts，禁止向 core 泄漏。
+// 引号内的 "unknown" 字面量（如网关状态值）与整行注释中的提及不算标注。
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -34,31 +37,43 @@ interface KindStat {
   hits: Hit[];
 }
 
-/** 三类计数：any（目标恒 0）、unknown（白名单外清零）、as 盲断言（白名单外清零） */
-function classifyLine(line: string): { any: boolean; unknown: boolean; asAssert: boolean } {
-  const code = stripTrailingComment(line);
+/** 四类计数：any / unknown / 万能字典（JsonValue·Record<string,unknown|any>）目标恒 0；as 盲断言白名单外清零 */
+function classifyLine(line: string): {
+  any: boolean;
+  unknown: boolean;
+  megaDict: boolean;
+  asAssert: boolean;
+} {
+  const code = stripComment(line);
   return {
     any: /\b(?:as any|:\s*any\b|<any[,>\s]|any\[\])/.test(code),
-    unknown: /\bunknown\b/.test(code),
+    // 引号内的 "unknown"（如网关状态字面量）不是类型标注
+    unknown: /\bunknown\b/.test(code.replace(/(['"])unknown\1/g, "")),
+    megaDict:
+      /\bJsonValue\b/.test(code) ||
+      /Record<\s*string\s*,\s*(?:unknown|any|never)\s*>/.test(code) ||
+      /\[\s*key:\s*string\s*\]\??\s*:\s*(?:unknown|any)\b/.test(code),
     asAssert: /\bas\s+(?:const\b)/.test(code)
       ? false
       : /\bas\s+(?:[A-Z]\w*|string|number|boolean|bigint|symbol|object|null|undefined)\b/.test(code),
   };
 }
 
-/** 剥掉行尾 // 注释（不处理块注释与字符串内 //——审计宁可保守多报，不做语法级解析） */
-function stripTrailingComment(line: string): string {
+/**
+ * 剥注释：行尾 // 与整行注释（//、/*、* 开头——JSDoc 描述性提及不算代码标注；
+ * 审计对字符串内 // 仍保守多报，不做语法级解析）。
+ */
+function stripComment(line: string): string {
+  const trimmed = line.trim();
+  if (
+    trimmed.startsWith("//") ||
+    trimmed.startsWith("/*") ||
+    trimmed.startsWith("*")
+  ) {
+    return "";
+  }
   const idx = line.indexOf("//");
   return idx >= 0 ? line.slice(0, idx) : line;
-}
-
-/** unknown 合法边界白名单：命中任一即不计入「白名单外」 */
-function whitelistedUnknown(code: string): boolean {
-  return (
-    /\b(?:raw|payload|ark)\??\s*:\s*unknown\b/.test(code) ||
-    /\[\s*key:\s*string\s*\]\??\s*:\s*unknown\b/.test(code) ||
-    /\bJsonSchema\b|jsonSchema/.test(code)
-  );
 }
 
 function walk(dir: string): string[] {
@@ -86,7 +101,7 @@ function main(): void {
 
   const anyStat: KindStat = { name: "any", total: 0, hits: [] };
   const unknownRaw: KindStat = { name: "unknown", total: 0, hits: [] };
-  const unknownOff: KindStat = { name: "unknown-off", total: 0, hits: [] };
+  const megaDict: KindStat = { name: "mega-dict", total: 0, hits: [] };
   const asStat: KindStat = { name: "as-assert", total: 0, hits: [] };
 
   for (const file of files) {
@@ -101,10 +116,11 @@ function main(): void {
       }
       if (cls.unknown) {
         unknownRaw.total++;
-        if (!whitelistedUnknown(stripTrailingComment(lines[i]))) {
-          unknownOff.total++;
-          unknownOff.hits.push(hit);
-        }
+        unknownRaw.hits.push(hit);
+      }
+      if (cls.megaDict) {
+        megaDict.total++;
+        megaDict.hits.push(hit);
       }
       if (cls.asAssert) {
         asStat.total++;
@@ -126,7 +142,7 @@ function main(): void {
           files: files.length,
           any: anyStat.total,
           unknownTotal: unknownRaw.total,
-          unknownOffWhitelist: unknownOff.total,
+          megaDict: megaDict.total,
           asAssert: asStat.total,
         },
         null,
@@ -139,13 +155,13 @@ function main(): void {
   console.log("== QSense 类型审计 ==");
   console.log(`扫描文件：${files.length}`);
   console.log(`any：${anyStat.total}（目标恒 0）`);
-  console.log(
-    `unknown：${unknownRaw.total} 总（白名单外 ${unknownOff.total}——目标 0）`,
-  );
+  console.log(`unknown：${unknownRaw.total}（零容忍——必须按实际读取字段定义具体 interface）`);
+  console.log(`万能字典：${megaDict.total}（JsonValue/Record<string,unknown|any> 违禁，目标 0）`);
   console.log(`as 盲断言：${asStat.total}（目标 0，白名单见 todo.md）`);
   for (const [label, stat] of [
     ["any", anyStat],
-    ["白名单外 unknown", unknownOff],
+    ["unknown", unknownRaw],
+    ["万能字典", megaDict],
     ["as 盲断言", asStat],
   ] as const) {
     if (stat.total === 0) continue;

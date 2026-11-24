@@ -2,6 +2,7 @@
 export * from "./types";
 export * from "./message";
 export * from "./net";
+export * from "./json";
 export * from "./semver";
 export { GateError, validateCredentialSchema, validateJsonSchema, validateLoginFlow, validatePlugin, validatePluginTool, validateWebuiRoutes } from "./gates";
 export type { ToolRoute } from "./router";

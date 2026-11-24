@@ -155,8 +155,8 @@ export class AssetStore {
     botId: string,
     assetId: string,
     agentToken: string | null,
-    expRaw: unknown,
-    sigRaw: unknown,
+    expRaw: string | undefined,
+    sigRaw: string | undefined,
   ): number | null {
     if (!/^[0-9a-f]{32}$/.test(assetId)) return 404;
     const exp = typeof expRaw === "string" ? Number(expRaw) : NaN;

@@ -513,7 +513,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const out = (await route.handler(webuiReq())) as {
             task_id?: string;
           };
-          uiLog.info("qr bind task created", { taskId: out.task_id });
+          uiLog.info("qr bind task created", { taskId: out.task_id ?? "" });
           reply.send(out);
         } catch (e) {
           const m = mapError(uiLog, e);

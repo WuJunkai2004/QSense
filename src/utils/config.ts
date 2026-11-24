@@ -14,7 +14,7 @@ import type { Level, LogFormat } from "./logger";
 import { levelFromRaw } from "./logger";
 import { t } from "../i18n";
 import { connectorDeclsOf, type ConnectorDecl } from "../connectors/decl";
-import { parse } from "smol-toml";
+import { parse, type TomlTable } from "smol-toml";
 
 export type AuthLevel = "certified" | "uncertified";
 
@@ -43,16 +43,8 @@ const TOP_KEYS = new Set([
   "connectors",
 ]);
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
 /** 字符串字段：trim 后返回；缺省/空串回落 fallback；类型不对即拒（toml 强类型） */
-function strOf(
-  doc: Record<string, unknown>,
-  key: string,
-  fallback: string,
-): string {
+function strOf(doc: TomlTable, key: string, fallback: string): string {
   const raw = doc[key];
   if (raw === undefined) return fallback;
   if (typeof raw !== "string") {
@@ -63,11 +55,7 @@ function strOf(
 }
 
 /** 布尔字段：只接受真布尔（toml 的 1/0/"true" 都拒绝——显式优于隐式转换） */
-function boolOf(
-  doc: Record<string, unknown>,
-  key: string,
-  fallback: boolean,
-): boolean {
+function boolOf(doc: TomlTable, key: string, fallback: boolean): boolean {
   const raw = doc[key];
   if (raw === undefined) return fallback;
   if (typeof raw !== "boolean") {
@@ -76,7 +64,7 @@ function boolOf(
   return raw;
 }
 
-function portOf(doc: Record<string, unknown>): number {
+function portOf(doc: TomlTable): number {
   const raw = doc["port"];
   if (raw === undefined) return 8787;
   if (typeof raw !== "number" || !Number.isInteger(raw)) {
@@ -88,7 +76,7 @@ function portOf(doc: Record<string, unknown>): number {
   return raw;
 }
 
-function logFormatOf(doc: Record<string, unknown>): LogFormat {
+function logFormatOf(doc: TomlTable): LogFormat {
   const raw = doc["log_format"];
   if (raw === undefined) return "pretty";
   if (typeof raw !== "string") {
@@ -101,7 +89,7 @@ function logFormatOf(doc: Record<string, unknown>): LogFormat {
   throw new Error(t("cfg_bad_log_format", { value: raw }));
 }
 
-function logLevelOf(doc: Record<string, unknown>): Level {
+function logLevelOf(doc: TomlTable): Level {
   const raw = doc["log_level"];
   if (typeof raw !== "string") {
     return "info"; // 宽松回落 info（打日志的事，不值得拒启）
@@ -109,18 +97,16 @@ function logLevelOf(doc: Record<string, unknown>): Level {
   return levelFromRaw(raw);
 }
 
-/** config.toml 源文 → Config；语法/类型错误抛可操作中文错误（经 i18n） */
+/** config.toml 源文 → Config；语法/类型错误抛可操作中文错误（经 i18n）。
+ *  B⁺ T6：doc 类型 = smol-toml 自带的 TomlTable（TOML 强类型，零 unknown）。 */
 export function configFromToml(source: string): Config {
-  let doc: unknown;
+  let doc: TomlTable;
   try {
     doc = parse(source);
   } catch (e) {
     throw new Error(
       `config.toml 解析失败：${e instanceof Error ? e.message : String(e)}`,
     );
-  }
-  if (!isPlainObject(doc)) {
-    throw new Error("config.toml：顶层必须是 TOML 表。");
   }
   // 未知顶层键拒绝（typo 拦截：data-dir ≠ data_dir 这类静默失效最危险）
   for (const key of Object.keys(doc)) {
@@ -150,8 +136,7 @@ export function loadConfig(path = "config.toml"): Config {
   try {
     source = readFileSync(path, "utf8");
   } catch (e) {
-    const code = (e as { code?: unknown }).code;
-    if (code === "ENOENT") {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
       throw new Error(t("cfg_file_missing", { path }));
     }
     throw new Error(

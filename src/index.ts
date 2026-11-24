@@ -141,7 +141,7 @@ async function main(): Promise<void> {
       log.info("gateway status", {
         botId: s.botId,
         state: s.state,
-        detail: s.detail,
+        detail: s.detail ?? null,
       });
     },
   });

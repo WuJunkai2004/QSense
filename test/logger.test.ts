@@ -1,30 +1,24 @@
-// M0 验收：结构化日志——级别过滤 + 敏感字段兜底剥离（含嵌套）。
+// M0 验收：结构化日志——级别过滤 + 敏感字段兜底剥离。
+// B⁺ T6：fields 值域 = 平面基元联合（调用侧全量调查实证），redact 顶层整键替换。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createLogger, levelFromRaw, redact } from "../src/utils/logger";
 
-test("redact：敏感键替换为 [REDACTED]，含嵌套对象与数组", () => {
+test("redact：敏感键整键替换为 [REDACTED]（平面字段值域）", () => {
   const out = redact({
     msg_id: "m1",
     content: "你好",
     raw: "整键即敏感，直接替换",
-    extra: { nested: { token: "abc", keep: 1 } },
-    list: [{ secret: "x" }, { fine: "y" }],
-  }) as Record<string, unknown>;
+    token: "abc",
+    keep: 1,
+  });
 
   assert.equal(out.content, "[REDACTED]");
   assert.equal(out.raw, "[REDACTED]");
+  assert.equal(out.token, "[REDACTED]");
   assert.equal(out.msg_id, "m1");
-  const nested = (out.extra as { nested: { token: string; keep: number } })
-    .nested;
-  assert.equal(nested.token, "[REDACTED]");
-  assert.equal(nested.keep, 1);
-  assert.equal(
-    (out.list as Array<{ secret?: string; fine?: string }>)[0].secret,
-    "[REDACTED]",
-  );
-  assert.equal((out.list as Array<{ fine?: string }>)[1].fine, "y");
+  assert.equal(out.keep, 1);
 });
 
 test("pretty（缺省）：loguru 风格行、级别过滤、敏感字段剥离", () => {
