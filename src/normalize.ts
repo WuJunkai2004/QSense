@@ -17,14 +17,12 @@ import type {
   NormalizedMention,
   RawEnvelope,
 } from "@qsense/connector-sdk";
-import { ArkCardSchema } from "@qsense/connector-sdk";
 import type { QqAttachment, QqAuthor, QqMention } from "./wire";
 import { QQ_EL_FORWARD } from "./wire";
 import {
   QqEnvelopeSchema,
-  QqGroupEventDataSchema,
   QqMessageEventDataSchema,
-  QqUserDataSchema,
+  type QqEventData,
   type QqMessageEventData,
 } from "./wire";
 import {
@@ -35,11 +33,11 @@ import {
 } from "./expand";
 
 /** QQ 官方事件信封（{type, data}）；core ingest 的 QQ 分支唯一输入形状。
- * data 是平台原始载荷边界（wire schema 在 normalizeQqMessage 内解析）。 */
+ * data 是信封公共定位面（QqEventData；完整消息体由 normalizeQqMessage 二次解析）。 */
 export interface QqEvent {
   botId: string;
   type: string;
-  data: unknown;
+  data: QqEventData;
 }
 
 /** 解析 RFC3339 官方 timestamp → 毫秒；失败/缺失返回 null */
@@ -117,13 +115,10 @@ function authorField(author: QqAuthor | undefined, keys: readonly AuthorTextFiel
   return "";
 }
 
-/** ARK 卡片提取（ark / ark_data 字段名都试）：ArkCard 契约形状校验
- * （SDK ArkCardSchema，真机采样锚定）；不合形状 = 无卡片（可观测降级） */
+/** ARK 卡片提取（ark / ark_data 字段名都试）：wire 层已按 ArkCard 契约校验
+ * （畸形 .catch(undefined) 可观测降级），此处只做双名取值 */
 function extractArk(r: QqMessageEventData): ArkCard | undefined {
-  const v = r.ark_data ?? r.ark;
-  if (v === null || typeof v !== "object" || Array.isArray(v)) return undefined;
-  const parsed = ArkCardSchema.safeParse(v);
-  return parsed.success ? parsed.data : undefined;
+  return r.ark_data ?? r.ark;
 }
 
 /** 消息类事件 → NormalizedMessage（元素树分解为语义件）；非消息事件/形状不符返回 null */
@@ -235,16 +230,14 @@ export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
   };
 }
 
-/** 效应事件的宽松定位：群标识（缺字段/类型不符 → ""） */
-function groupOpenidOf(data: unknown): string {
-  const r = QqGroupEventDataSchema.safeParse(data);
-  return r.success ? (r.data.group_openid ?? "") : "";
+/** 效应事件的宽松定位：群标识（缺字段 → ""） */
+function groupOpenidOf(data: QqEventData): string {
+  return data.group_openid ?? "";
 }
 
 /** 效应事件的宽松定位：用户标识 */
-function userOpenidOf(data: unknown): string {
-  const r = QqUserDataSchema.safeParse(data);
-  return r.success ? (r.data.user_openid ?? "") : "";
+function userOpenidOf(data: QqEventData): string {
+  return data.user_openid ?? "";
 }
 
 /**
@@ -257,13 +250,14 @@ function userOpenidOf(data: unknown): string {
  * - C2C_MSG_RECEIVE/REJECT → 单聊 opt-in/out；MESSAGE_AUDIT_PASS/REJECT → 审核回执
  * 其余事件（MESSAGE_AUDIT / INTERACTION 等）无落地语义 → null。
  */
-export function normalizeQqEnvelope(
+export function normalizeQqEnvelope<P extends RawEnvelope>(
   botId: string,
-  payload: RawEnvelope,
+  payload: P,
 ): NormalizedInbound | null {
   const env = QqEnvelopeSchema.safeParse(payload);
   if (!env.success) return null;
-  const { type, data } = env.data;
+  const type = env.data.type;
+  const data = env.data.data ?? {};
   if (type === "") return null;
   const event: QqEvent = { botId, type, data };
 

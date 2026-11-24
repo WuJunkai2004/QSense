@@ -89,16 +89,16 @@ const lang: "zh" | "en" = /^zh/i.test(
   ? "zh"
   : "en";
 
-function interpolate(
-  template: string,
-  params?: Record<string, unknown>,
-): string {
+/** 模板插值参数值域（String() 化消费；值具体，非万能字典） */
+export type QqTextParams = Record<string, string | number>;
+
+function interpolate(template: string, params?: QqTextParams): string {
   return template.replace(/\{(\w+)\}/g, (whole, key: string) => {
     const v = params?.[key];
     return v === undefined ? whole : String(v);
   });
 }
 
-export function tt(key: QqTextKey, params?: Record<string, unknown>): string {
+export function tt(key: QqTextKey, params?: QqTextParams): string {
   return interpolate(lang === "zh" ? zh[key] : en[key], params);
 }

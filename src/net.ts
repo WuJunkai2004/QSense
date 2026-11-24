@@ -36,7 +36,7 @@ export interface QQSendApi {
     scope: "group" | "c2c",
     targetId: string,
     creds: { appId: string; clientSecret: string },
-    body: Record<string, unknown>,
+    body: QqSendBody,
   ): Promise<{ id: string }>;
   recallMessage(
     scope: "group" | "c2c",
@@ -60,9 +60,9 @@ export function scopeToApi(scope: string): "group" | "c2c" {
 }
 
 /** 引用块（quote=true 时客户端展示引用样式；送达优先于样式） */
-function messageReferenceOf(quoteMsgId: string | undefined):
-  | Record<string, unknown>
-  | undefined {
+function messageReferenceOf(
+  quoteMsgId: string | undefined,
+): MessageRefWire | undefined {
   return quoteMsgId === undefined
     ? undefined
     : {
@@ -71,10 +71,36 @@ function messageReferenceOf(quoteMsgId: string | undefined):
       };
 }
 
+/**
+ * 官方发送消息体线格式（真机验证规格，勿改）：msg_type 判别联合——
+ * 0=文本(content) / 2=Markdown(markdown.content，无顶层 content) / 7=富媒体
+ * (media.file_info)。被动消息附 msg_id+msg_seq（core 幂等账本保证存在）；
+ * 引用块 message_reference 两种通道均受理。
+ */
+export interface MessageRefWire {
+  message_id: string;
+  ignore_get_message_error: true;
+}
+
+interface SendBodyBase {
+  msg_id?: string;
+  msg_seq?: number;
+  message_reference?: MessageRefWire;
+}
+
+export type QqSendBody =
+  | (SendBodyBase & {
+      msg_type: 7;
+      content: string;
+      media: { file_info: string };
+    })
+  | (SendBodyBase & { msg_type: 2; markdown: { content: string } })
+  | (SendBodyBase & { msg_type: 0; content: string });
+
 /** 被动回复线格式（msg_type 7/2/0；msg_id+msg_seq 由 core 幂等账本保证存在） */
-export function buildReplyBody(wire: ReplyWire): Record<string, unknown> {
+export function buildReplyBody(wire: ReplyWire): QqSendBody {
   const ref = messageReferenceOf(wire.quoteMsgId);
-  const base: Record<string, unknown> = {
+  const base: SendBodyBase = {
     ...(wire.msgId !== undefined ? { msg_id: wire.msgId } : {}),
     ...(wire.msgSeq !== undefined ? { msg_seq: wire.msgSeq } : {}),
     ...(ref !== undefined ? { message_reference: ref } : {}),
@@ -82,29 +108,31 @@ export function buildReplyBody(wire: ReplyWire): Record<string, unknown> {
   if (wire.media !== undefined) {
     // 富媒体（2026-10-27 真机验证：msg_type=7 可走被动窗口，可带引用块）
     return {
+      ...base,
       msg_type: 7,
       content: wire.content,
       media: { file_info: wire.media.handle },
-      ...base,
     };
   }
   if (wire.markdown === true) {
-    return { msg_type: 2, markdown: { content: wire.content }, ...base };
+    return {
+      ...base,
+      msg_type: 2,
+      markdown: { content: wire.content },
+    };
   }
-  return { msg_type: 0, content: wire.content, ...base };
+  return { ...base, msg_type: 0, content: wire.content };
 }
 
 /** 主动消息线格式（无 msg_id/msg_seq；msg_type 7/2/0；引用块照常受理） */
-export function buildProactiveBody(
-  wire: ProactiveWire,
-): Record<string, unknown> {
+export function buildProactiveBody(wire: ProactiveWire): QqSendBody {
   const ref = messageReferenceOf(wire.quoteMsgId);
   if (wire.media !== undefined) {
     return {
-      ...(ref !== undefined ? { message_reference: ref } : {}),
       msg_type: 7,
       media: { file_info: wire.media.handle },
       content: wire.content,
+      ...(ref !== undefined ? { message_reference: ref } : {}),
     };
   }
   if (wire.markdown === true) {
@@ -166,7 +194,8 @@ export function buildSdkSendApi(
   const mediaApi = new MediaApi(client, deps.tokenManager);
   return {
     sendRaw: (scope, targetId, creds, body) =>
-      messageApi.sendRaw(scope, targetId, creds, body),
+      // 浅拷贝出对象字面量（隐式索引签名）——官方 SDK sendRaw 形参是 Record 线格式
+      messageApi.sendRaw(scope, targetId, creds, { ...body }),
     recallMessage: (scope, targetId, messageId, creds) =>
       messageApi.recallMessage(scope, targetId, messageId, creds),
     uploadMedia: (scope, targetId, creds, src, mediaType) =>

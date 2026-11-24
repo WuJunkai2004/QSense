@@ -14,7 +14,7 @@ import type {
   NormalizedQuote,
   NormalizedRecord,
 } from "@qsense/connector-sdk";
-import type { QqAttachment, QqElement, QqAuthor } from "./wire";
+import type { QqElement, QqAuthor } from "./wire";
 import {
   QQ_EL_ARK,
   QQ_EL_FORWARD,
@@ -25,7 +25,7 @@ import {
 } from "./wire";
 
 /** content_type → 归一 kind；语音可由 wav 转写地址/ASR 文本旁证；未知兜底 file */
-function kindOf(att: QqAttachment): AttachmentKind {
+function kindOf(att: MediaFieldsLike): AttachmentKind {
   const ct = att.content_type ?? "";
   if (ct === "voice" || ct.startsWith("voice/")) return "voice";
   if (att.voice_wav_url !== undefined || att.asr_refer_text !== undefined) {
@@ -36,8 +36,21 @@ function kindOf(att: QqAttachment): AttachmentKind {
   return "file";
 }
 
+/** 媒体字段面（QqAttachment 与 QqElement 的公共子形状：元素自身即媒体时直传元素） */
+interface MediaFieldsLike {
+  url?: string;
+  filename?: string;
+  width?: number;
+  height?: number;
+  size?: number;
+  duration?: number;
+  content_type?: string;
+  voice_wav_url?: string;
+  asr_refer_text?: string;
+}
+
 /** 官方 attachments 单项 / 元素自身媒体的解析；无 url 视为非媒体返回 null */
-export function parseAttachmentLike(x: QqAttachment): NormalizedAttachment | null {
+export function parseAttachmentLike(x: MediaFieldsLike): NormalizedAttachment | null {
   if (x.url === undefined || x.url === "") return null;
   const att: NormalizedAttachment = {
     kind: "file",

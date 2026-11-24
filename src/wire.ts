@@ -12,6 +12,7 @@
 //   词表 0/3/101/102/103 判别联合 + 未知值宽容（兜底「有文本抽文本」）
 
 import { z } from "zod";
+import { ArkCardSchema } from "@qsense/connector-sdk";
 
 /** 容错字段：声明即消费面；类型不符 → 视同缺失（旧 typeof 防御的 schema 化等价物） */
 const S = z.string().optional().catch(undefined);
@@ -125,7 +126,6 @@ export interface QqElement {
   elements?: QqElement[];
   messages?: QqElement[];
   paragraphs?: QqElement[];
-  [key: string]: unknown;
 }
 
 export const QqElementSchema: z.ZodType<QqElement> = z.lazy(() =>
@@ -193,20 +193,25 @@ export const QqMessageEventDataSchema = z.looseObject({
     .looseObject({ ext: z.array(S).optional().catch(undefined) })
     .optional()
     .catch(undefined),
-  /** ARK 卡片原始对象（字段名双写都试；合法不透明边界，契约 ark?: unknown） */
-  ark: z.unknown().optional(),
-  ark_data: z.unknown().optional(),
+  /** ARK 卡片原始对象（字段名双写都试；ArkCard 契约形状，畸形按缺失——可观测降级） */
+  ark: ArkCardSchema.optional().catch(undefined),
+  ark_data: ArkCardSchema.optional().catch(undefined),
 });
 export type QqMessageEventData = z.infer<typeof QqMessageEventDataSchema>;
 
-/** 事件信封（core ingest 的 QQ 分支唯一输入形状：{platform, type, data}） */
+/** 事件体公共定位面（信封 data 的声明消费面）：消息/效应事件共用的定位键。
+ * S 容错——字段类型不符视同缺失（等价旧 safeParse 失败 → "" 的语义）。 */
+export const QqEventDataSchema = z.looseObject({
+  id: S,
+  group_openid: S,
+  user_openid: S,
+});
+export type QqEventData = z.infer<typeof QqEventDataSchema>;
+
+/** 事件信封（core ingest 的 QQ 分支唯一输入形状：{platform, type, data}）。
+ * data 的声明消费面 = 公共定位字段（效应事件直读）；消息类事件体由
+ * QqMessageEventDataSchema 二次解析（looseObject 保真，键不丢）。 */
 export const QqEnvelopeSchema = z.looseObject({
   type: z.string(),
-  data: z.unknown().optional(),
+  data: QqEventDataSchema.optional().catch(undefined),
 });
-
-/** 效应事件的宽松定位（群侧）：官方事件体字段未完全核实，容错提取 */
-export const QqGroupEventDataSchema = z.looseObject({ group_openid: S });
-
-/** 效应事件的宽松定位（单聊侧） */
-export const QqUserDataSchema = z.looseObject({ user_openid: S });
