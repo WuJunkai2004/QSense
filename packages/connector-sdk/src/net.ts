@@ -171,7 +171,8 @@ export interface HttpResponse {
 export interface HttpRequestInit {
   method?: string;
   headers?: Record<string, string>;
-  body?: string | Uint8Array;
+  /** 请求体：JSON 文本 / 原始字节 / multipart FormData（标准 Web 机械，非平台语义） */
+  body?: string | Uint8Array | FormData;
   /** 覆盖 client 缺省超时 */
   timeoutMs?: number;
   /** 覆盖外部中止信号 */
@@ -425,7 +426,8 @@ export interface LongPollSpec<C> {
   /** 逐条摄取（内部调 host.ingest；抛错=批失败，游标不推进——至少一次） */
   onItem(item: unknown): Promise<void> | void;  /** 平台 fatal 判定（tg 401/409；wx -14/401/403）——命中则驱动上抛，调用方决定停/重启 */
   isFatal(e: unknown): boolean;
-  /** 状态迁移上报（平台映射 host.reportStatus） */
+  /** 状态迁移上报（平台映射 host.reportStatus）：ready=首批成功；
+   * degraded=拉取/摄取失败退避中（驱动逐次上报）或 fatal 上抛前 */
   onState?(s: LongPollState): void;
   policy?: LongPollPolicy;
 }
@@ -481,12 +483,14 @@ export async function longPoll<C>(
         throw e;
       }
       failures++;
+      // 失败即降级（退避重试中）——平台把 degraded 映射到 host.reportStatus
+      // disconnected（tg/wx 现行逐次上报语义，驱动统一承担）
+      spec.onState?.("degraded");
       // wx 语义（连败 ≥ 阈值且带旧游标 → 游标可能已失效）：清游标重拉；
       // 至少一次语义由 core 按 msg_id 去重兜底。清游标分支同样退避（防忙转）
       if (spec.resetCursor !== undefined && failures >= maxFailures) {
         await spec.resetCursor();
         cursor = await spec.loadCursor();
-        spec.onState?.("degraded");
       }
       await sleep(
         Math.min(retryMs * Math.pow(backoffMs, failures - 1), maxDelayMs),

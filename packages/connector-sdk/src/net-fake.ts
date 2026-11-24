@@ -31,7 +31,7 @@ export interface FakeRequestLog {
   url: string;
   method: string;
   headers: Record<string, string>;
-  body?: string | Uint8Array;
+  body?: string | Uint8Array | FormData;
   /** fake 时钟（请求发生时刻） */
   at: number;
 }
