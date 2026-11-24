@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConnectorRegistry } from "@qsense/connector-sdk";
+import { ConnectorRegistry, FakeNetKit } from "@qsense/connector-sdk";
 import { createQqConnector } from "@qsense/connector-qq";
 import {
   ConnectorRuntime,
@@ -83,12 +83,15 @@ async function setup(
   const captured: Array<{ messages: NormalizedMessage[]; effects: unknown[] }> = [];
   const statuses: GatewayStatus[] = [];
   let clearCount = 0;
+  // /gateway 控制请求脚本化（原 getGatewayUrl 测试缝的形态收口）：网关地址指向本地 mock
+  const kit = new FakeNetKit();
+  kit.on("https://api.bot.qq.com/gateway", () => ({ body: { url: gw.url } }));
   const plugins = new ConnectorRegistry();
   plugins.register(
     createQqConnector({
       log: createLogger("error"),
+      net: kit,
       overrides: {
-        getGatewayUrl: async () => gw.url,
         getAccessToken: async () => "test-access-token",
         clearTokenCache: () => {
           clearCount += 1;
@@ -305,12 +308,14 @@ test("M1-7 进程重启（新连接实例 + 同一 kv）→ 直接 RESUME 恢复
 
     // 模拟重启：同一 mock（持有 sess-1）+ 同一 kv，新运行时实例
     const statuses2: GatewayStatus[] = [];
+    const kit2 = new FakeNetKit();
+    kit2.on("https://api.bot.qq.com/gateway", () => ({ body: { url: ctx.gw.url } }));
     const plugins2 = new ConnectorRegistry();
     plugins2.register(
       createQqConnector({
         log,
+        net: kit2,
         overrides: {
-          getGatewayUrl: async () => ctx.gw.url,
           getAccessToken: async () => "test-access-token",
           reconnect: { delays: [50], maxAttempts: 100 },
         },

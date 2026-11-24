@@ -1,6 +1,6 @@
 // 扫码绑定（q.qq.com lite）验收：
-// - 单元：AES-256-GCM 解密往返 / 密文篡改与格式错误 / create-poll 状态映射（假 fetch）
-// - 集成（假上游 HTTP 端点）：create → poll(pending) → 模拟扫码确认 → poll(created
+// - 单元：AES-256-GCM 解密往返 / 密文篡改与格式错误 / create-poll 状态映射（FakeNetKit）
+// - 集成（FakeNetKit 假上游）：create → poll(pending) → 模拟扫码确认 → poll(created
 //   联动既有注册管线：官方两级凭据校验 + 落库 + supervisor 拉起 + agent_token 一次性返回)
 //   → 任务即焚（再 poll 同一 task_id = expired）→ 未知 task_id = expired → bot 重复扫码 400
 
@@ -10,6 +10,7 @@ import { createCipheriv, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FakeNetKit, type HttpClient } from "@qsense/connector-sdk";
 import { BotRegistry } from "../src/bots";
 import { createLogger } from "../src/utils/logger";
 import {
@@ -17,7 +18,6 @@ import {
   createQrBindTask,
   decryptBindSecret,
   pollQrBind,
-  type QrBindDeps,
 } from "@qsense/connector-qq";
 import { buildServer } from "../src/server/http";
 import { openDatabase, runMigrations } from "../src/store/db";
@@ -27,25 +27,18 @@ import { makeFakeRuntime } from "./helpers/qq-runtime";
 
 const TOKEN = "qr-test-admin-token-0123456789abcdef";
 
-function fakeFetch(
-  handler: (path: string, body: Record<string, unknown>) => unknown,
-): typeof fetch & { calls: Array<{ path: string; body: unknown }> } {
-  const calls: Array<{ path: string; body: unknown }> = [];
-  const impl = async (_url: unknown, init?: RequestInit): Promise<Response> => {
-    const url = String(_url);
-    const path = url.slice(url.indexOf("/", 8));
+/** 假 lite 上游（FakeNetKit）：按路径分派，记录请求体 */
+function liteKit(
+  handler: (path: string, body: Record<string, unknown> | undefined) => unknown,
+): { http: HttpClient; kit: FakeNetKit } {
+  const kit = new FakeNetKit();
+  kit.on("https://q.qq.com/", (req) => {
+    const path = new URL(req.url).pathname;
     const body =
-      typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-    calls.push({ path, body });
-    const payload = handler(path, body as Record<string, unknown>);
-    return new Response(JSON.stringify(payload), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  };
-  return Object.assign(impl, { calls }) as typeof fetch & {
-    calls: Array<{ path: string; body: unknown }>;
-  };
+      typeof req.body === "string" ? JSON.parse(req.body) : undefined;
+    return { body: handler(path, body) };
+  });
+  return { http: kit.http(), kit };
 }
 
 /** 用 bindKey 加密 AppSecret（模拟官方 bot_encrypt_secret：nonce12‖ct‖tag16 的 base64） */
@@ -73,13 +66,15 @@ test("qrbind 单元：解密往返、篡改拒绝、格式错误", () => {
   assert.throws(() => decryptBindSecret(enc.slice(0, 8), bindKey), QrBindError);
 });
 
-test("qrbind 单元：create/poll 状态映射（假 fetch，bind_key 上交且不出模块）", async () => {
+test("qrbind 单元：create/poll 状态映射（FakeNetKit，bind_key 上交且不出模块）", async () => {
   // 有状态假上游：create 记 key；poll 按 status 给形状
   let storedKey = "";
   let upstreamStatus = 1;
-  const fetchImpl = fakeFetch((path, body) => {
+  let sentKeys: Array<Record<string, unknown> | undefined> = [];
+  const f = liteKit((path, body) => {
+    sentKeys.push(body);
     if (path === "/lite/create_bind_task") {
-      storedKey = String(body.key);
+      storedKey = String(body!.key);
       return {
         retcode: 0,
         msg: "success",
@@ -87,7 +82,7 @@ test("qrbind 单元：create/poll 状态映射（假 fetch，bind_key 上交且�
       };
     }
     if (path === "/lite/poll_bind_result") {
-      assert.equal(body.task_id, "TID-1");
+      assert.equal(body!.task_id, "TID-1");
       return {
         retcode: 0,
         data: {
@@ -101,24 +96,23 @@ test("qrbind 单元：create/poll 状态映射（假 fetch，bind_key 上交且�
     }
     return { retcode: 404 };
   });
-  const deps: QrBindDeps = { fetchImpl, host: "mock.invalid" };
 
-  const task = await createQrBindTask(deps);
+  const task = await createQrBindTask(f.http);
   assert.equal(task.taskId, "TID-1");
   assert.equal(
     task.connectUrl,
-    "https://mock.invalid/qqbot/openclaw/connect.html?task_id=TID-1&_wv=2",
+    "https://q.qq.com/qqbot/openclaw/connect.html?task_id=TID-1&_wv=2",
   );
   // create 时上交 32 字节 base64 密钥
-  const sent = fetchImpl.calls[0].body as { key: string };
+  const sent = sentKeys[0] as { key: string };
   assert.equal(Buffer.from(sent.key, "base64").length, 32);
   assert.equal(sent.key, task.bindKey);
 
-  assert.deepEqual(await pollQrBind(task, deps), { status: "pending" });
+  assert.deepEqual(await pollQrBind(task, f.http), { status: "pending" });
   upstreamStatus = 3;
-  assert.deepEqual(await pollQrBind(task, deps), { status: "expired" });
+  assert.deepEqual(await pollQrBind(task, f.http), { status: "expired" });
   upstreamStatus = 2;
-  const done = await pollQrBind(task, deps);
+  const done = await pollQrBind(task, f.http);
   assert.equal(done.status, "completed");
   if (done.status === "completed") {
     assert.equal(done.appid, "20001");
@@ -126,11 +120,8 @@ test("qrbind 单元：create/poll 状态映射（假 fetch，bind_key 上交且�
     assert.equal(done.userOpenid, "U_SCANNER");
   }
   // 上游 retcode!=0 → QrBindError（提示可手动添加）
-  const failing = fakeFetch(() => ({ retcode: 11297, msg: "频繁" }));
-  await assert.rejects(
-    createQrBindTask({ fetchImpl: failing, host: "mock.invalid" }),
-    /retcode=11297/,
-  );
+  const failing = liteKit(() => ({ retcode: 11297, msg: "频繁" }));
+  await assert.rejects(createQrBindTask(failing.http), /retcode=11297/);
 });
 
 // —— 集成：/ui/api/qr-bind/* 全流程（假上游 + 真注册管线） ——
@@ -169,9 +160,9 @@ async function setupQrServer(seedAppid?: string): Promise<QrFixture> {
   // 有状态假上游：create 存 key；扫码置位后 poll 给 completed（真加密）
   const upstream = { key: "", scanned: false };
   let taskIdN = 0;
-  const fetchImpl = fakeFetch((path, body) => {
+  const lite = liteKit((path, body) => {
     if (path === "/lite/create_bind_task") {
-      upstream.key = String(body.key);
+      upstream.key = String(body!.key);
       upstream.scanned = false;
       taskIdN += 1;
       return { retcode: 0, data: { task_id: `T-${taskIdN}` } };
@@ -199,7 +190,7 @@ async function setupQrServer(seedAppid?: string): Promise<QrFixture> {
     db,
     repo,
     registry,
-    qrBind: { fetchImpl, host: "mock.invalid" },
+    net: lite.kit,
     onAdd: (appid) => added.push(appid),
   });
 
@@ -408,12 +399,9 @@ test("qrbind 集成：上游不可达 → 502 且提示可手动添加", async (
       db,
       repo,
       registry,
-      qrBind: {
-        fetchImpl: (async () => {
-          throw new Error("ECONNREFUSED");
-        }) as unknown as typeof fetch,
-        host: "mock.invalid",
-      },
+      net: liteKit(() => {
+        throw new Error("ECONNREFUSED");
+      }).kit,
     });
     const app = buildServer({
       log: createLogger("error"),

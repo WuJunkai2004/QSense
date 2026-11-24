@@ -4,11 +4,11 @@
 import {
   ConnectorRegistry,
   type BotConfigSnapshot,
+  type NetKit,
 } from "@qsense/connector-sdk";
 import {
   createQqConnector,
   type QqConnectorPlugin,
-  type QrBindDeps,
 } from "@qsense/connector-qq";
 import type { BotRegistry } from "../../src/bots";
 import type {
@@ -25,8 +25,8 @@ export interface FakeRuntimeOpts {
   repo: Repo;
   registry: BotRegistry;
   log?: Logger;
-  /** 扫码上游注入（假 fetch/host）；缺省=插件直连 q.qq.com（测试应显式注入） */
-  qrBind?: QrBindDeps;
+  /** 控制面 NetKit（扫码 lite 接口等；缺省=插件直连 q.qq.com，测试应显式注入） */
+  net?: NetKit;
   onAdd?: (appid: string) => void;
   onRemove?: (appid: string) => void;
 }
@@ -44,7 +44,10 @@ export interface FakeRuntime {
 export function makeFakeRuntime(opts: FakeRuntimeOpts): FakeRuntime {
   const log = opts.log ?? createLogger("error");
   const plugins = new ConnectorRegistry();
-  const plugin = createQqConnector({ log, qrBind: opts.qrBind });
+  const plugin = createQqConnector({
+    log,
+    ...(opts.net !== undefined ? { net: opts.net } : {}),
+  });
   plugins.register(plugin);
   const added: string[] = [];
   const removed: string[] = [];
