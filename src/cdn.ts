@@ -134,7 +134,7 @@ async function postCdn(
   ciphertext: Buffer,
   http: HttpClient,
 ): Promise<string> {
-  let lastError: unknown;
+  let lastError: Error | null = null;
   for (let attempt = 1; attempt <= UPLOAD_MAX_RETRIES; attempt += 1) {
     try {
       const res: HttpResponse = await http.request(url, {
@@ -160,7 +160,7 @@ async function postCdn(
       if (e instanceof WeixinCdnClientError) {
         throw new Error(tt("wx_cdn_upload_failed", { reason: e.message }));
       }
-      lastError = e;
+      lastError = e instanceof Error ? e : new Error(String(e));
     }
   }
   throw new Error(

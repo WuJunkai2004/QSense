@@ -55,8 +55,8 @@ export interface EnrichDeps {
   /** 缺省 DEFAULT_MAX_INLINE_IMAGE_BYTES */
   maxBytes?: number;
   timeoutMs?: number;
-  /** 取图失败回调（不挡消息摄取；由调用侧记日志） */
-  onError?: (e: unknown) => void;
+  /** 取图失败回调（不挡消息摄取；由调用侧记日志）。catch 点 instanceof 窄化后传入 */
+  onError?: (e: Error) => void;
 }
 
 /** 下载 + 解密 + 尺寸闸门 → data:URL；任何失败返回 undefined */
@@ -78,7 +78,7 @@ async function inlineImage(
     const mime = sniffImageMime(buf) ?? "image/jpeg";
     return `data:${mime};base64,${buf.toString("base64")}`;
   } catch (e) {
-    deps.onError?.(e);
+    deps.onError?.(e instanceof Error ? e : new Error(String(e)));
     return undefined;
   }
 }

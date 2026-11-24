@@ -63,7 +63,7 @@ const UploadedPlanSchema = z.object({
 export function decodeHandle(handle: string): UploadedPlan {
   try {
     if (!handle.startsWith(HANDLE_PREFIX)) throw new Error("bad prefix");
-    const raw: unknown = JSON.parse(
+    const raw = JSON.parse(
       Buffer.from(handle.slice(HANDLE_PREFIX.length), "base64url").toString("utf-8"),
     );
     const parsed = UploadedPlanSchema.safeParse(raw);

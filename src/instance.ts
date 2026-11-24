@@ -108,7 +108,7 @@ const DEFAULT_POLL_POLICY: LongPollPolicy = {
   maxFailures: 2,
 };
 
-function reasonOf(e: unknown): string {
+function reasonOf(e: Error): string {
   return e instanceof Error ? e.message : String(e);
 }
 
@@ -138,7 +138,7 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
     try {
       await host.state.set(STATE_CTX, JSON.stringify(Object.fromEntries(ctxTokens)));
     } catch (e) {
-      log.warn("context token persist failed", { reason: reasonOf(e) });
+      log.warn("context token persist failed", { reason: reasonOf(e instanceof Error ? e : new Error(String(e))) });
     }
   }
 
@@ -176,7 +176,7 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
     try {
       await host.state.set(STATE_QUOTES, JSON.stringify({ q: [...quotes] }));
     } catch (e) {
-      log.warn("quote cache persist failed", { reason: reasonOf(e) });
+      log.warn("quote cache persist failed", { reason: reasonOf(e instanceof Error ? e : new Error(String(e))) });
     }
   }
 
@@ -215,11 +215,11 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
         http: kit.http({ timeoutMs: 15_000 }),
         cdnBaseUrl: ILINK_CDN_BASE_URL,
         maxBytes: DEFAULT_MAX_INLINE_IMAGE_BYTES,
-        onError: (e) => log.warn("image enrich failed", { reason: reasonOf(e) }),
+        onError: (e) => log.warn("image enrich failed", { reason: reasonOf(e instanceof Error ? e : new Error(String(e))) }),
       });
     } catch (e) {
       // 富化失败不挡消息摄取：parser 落空 url，get_media 给可操作错误
-      log.warn("image enrich failed", { reason: reasonOf(e) });
+      log.warn("image enrich failed", { reason: reasonOf(e instanceof Error ? e : new Error(String(e))) });
     }
     if (Object.keys(blobs).length > 0) payload.mediaBlobs = blobs;
 
@@ -243,7 +243,7 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
       await api.notifyStart({ signal });
     } catch (e) {
       if (signal.aborted) return;
-      log.warn("notifystart failed (ignored)", { reason: reasonOf(e) });
+      log.warn("notifystart failed (ignored)", { reason: reasonOf(e instanceof Error ? e : new Error(String(e))) });
     }
     log.info(resumed ? "resuming from persisted cursor" : "starting fresh", {
       cursorBytes: (savedBuf ?? "").length,
@@ -388,7 +388,7 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
         return;
       }
       // 理论不可达（isFatal 只放行上述两档）；保守按 fatal 上报
-      host.reportStatus({ state: "fatal", detail: reasonOf(e) });
+      host.reportStatus({ state: "fatal", detail: reasonOf(e instanceof Error ? e : new Error(String(e))) });
     } finally {
       // 在线状态对账（独立超时，不随已中止的轮询 signal）
       try {
@@ -421,7 +421,7 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
   }
 
   /** 错误翻译：平台错误 → 可操作文案；包内已可操作的文案原样透出 */
-  function describeError(e: unknown): string {
+  function describeError(e: Error): string {
     if (e instanceof WeixinError) return e.message;
     if (e instanceof WeixinApiError) {
       if (e.kind === "biz" && e.code === STALE_TOKEN_ERRCODE) {
@@ -433,7 +433,7 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
       if (e.kind === "network") return tt("wx_unreachable", { reason: e.message });
       return tt("wx_send_failed", { reason: e.message });
     }
-    return reasonOf(e);
+    return reasonOf(e instanceof Error ? e : new Error(String(e)));
   }
 
   async function sendWire(wire: ProactiveWire): Promise<{ providerMsgId: string }> {
@@ -481,7 +481,7 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
     try {
       return await kit.materialize(src);
     } catch (e) {
-      throw new WeixinError(tt("wx_media_source_failed", { reason: reasonOf(e) }));
+      throw new WeixinError(tt("wx_media_source_failed", { reason: reasonOf(e instanceof Error ? e : new Error(String(e))) }));
     }
   }
 
@@ -515,14 +515,14 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
       try {
         return await sendWire(wire);
       } catch (e) {
-        throw new Error(describeError(e));
+        throw new Error(describeError(e instanceof Error ? e : new Error(String(e))));
       }
     },
     async uploadMedia(wire) {
       try {
         return { handle: await upload(wire) };
       } catch (e) {
-        throw new Error(describeError(e));
+        throw new Error(describeError(e instanceof Error ? e : new Error(String(e))));
       }
     },
     // caps.recall=false：core 不要求该原语，但基座工具面恒含 recall——调用时给可操作错误
