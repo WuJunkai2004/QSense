@@ -16,6 +16,7 @@
 // - raw 里的 context_token 是出站回带凭据 → 入库前打码（已单独持久化在 StatePort，
 //   不随消息行扩散到 WebUI 详情/导出面）
 
+import { z } from "zod";
 import type {
   NormalizedAttachment,
   NormalizedInbound,
@@ -26,6 +27,7 @@ import { mediaLabelOf, resolvePartialQuote } from "./quote";
 import {
   MessageItemType,
   MessageType,
+  WeixinMessageSchema,
   type MessageItem,
   type WeixinMessage,
 } from "./types";
@@ -40,25 +42,24 @@ export interface WeixinInboundPayload {
   quoteText?: string;
 }
 
+/** 信封 wire schema（B⁺ T5）：plugin.normalize 头部 safeParse 入口——形状违规
+ * = 可观测丢弃 + warn（路由已保证 platform 匹配，schema 失败即载荷损坏） */
+export const WeixinInboundPayloadSchema = z.looseObject({
+  platform: z.literal("weixin"),
+  message: WeixinMessageSchema,
+  mediaBlobs: z.record(z.string(), z.string()).optional(),
+  quoteText: z.string().optional(),
+});
+
 const REDACTED = "<redacted>";
 
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+/** id 字段取值：trim（uint64 无损解析后恒字符串；空串=缺失） */
+export function idOf(v: string | undefined): string {
+  return v?.trim() ?? "";
 }
 
-/** id 字段取值：字符串原样（trim），数字（未经无损解析的载荷）转字符串 */
-export function idOf(v: unknown): string {
-  if (typeof v === "string") return v.trim();
-  if (typeof v === "number" && Number.isFinite(v)) return String(v);
-  return "";
-}
-
-function textOf(v: unknown): string {
-  return typeof v === "string" ? v : "";
-}
-
-function num(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+function textOf(v: string | undefined): string {
+  return v ?? "";
 }
 
 /** 消息 id（无损）：message_id → 首个 item 的 msg_id → client_id；皆无为空串 */
@@ -88,8 +89,8 @@ export function quoteRefIdOf(m: WeixinMessage): string | undefined {
  */
 export function isSupportedInbound(m: WeixinMessage): boolean {
   if (m.message_type === MessageType.BOT) return false;
-  if (textOf(m.group_id).trim() !== "") return false;
-  if ((num(m.delete_time_ms) ?? 0) > 0) return false;
+  if ((m.group_id ?? "").trim() !== "") return false;
+  if ((m.delete_time_ms ?? 0) > 0) return false;
   if (idOf(m.from_user_id) === "") return false;
   return weixinMsgIdOf(m) !== "";
 }
@@ -147,14 +148,14 @@ function attachmentOf(
       return {
         kind: "image",
         url,
-        ...(num(img.mid_size) !== undefined ? { size: img.mid_size } : {}),
+        ...(img.mid_size !== undefined ? { size: img.mid_size } : {}),
         content_type: mimeOfDataUrl(url) ?? "image/jpeg",
       };
     }
     case MessageItemType.VOICE: {
       const v = item.voice_item;
       if (v === undefined) return null;
-      const playtime = num(v.playtime);
+      const playtime = v.playtime;
       const asr = textOf(v.text).trim();
       return {
         kind: "voice",
@@ -183,12 +184,12 @@ function attachmentOf(
     case MessageItemType.VIDEO: {
       const v = item.video_item;
       if (v === undefined) return null;
-      const tw = num(v.thumb_width);
-      const th = num(v.thumb_height);
+      const tw = v.thumb_width;
+      const th = v.thumb_height;
       return {
         kind: "video",
         url: "",
-        ...(num(v.video_size) !== undefined ? { size: v.video_size } : {}),
+        ...(v.video_size !== undefined ? { size: v.video_size } : {}),
         ...(tw !== undefined && th !== undefined ? { width: tw, height: th } : {}),
         content_type: "video/mp4",
       };
@@ -265,30 +266,21 @@ function parseQuote(
   return quote;
 }
 
-/** 信封形状校验：必须是带 platform="weixin" + message 对象的普通对象 */
-export function isWeixinPayload(payload: unknown): payload is WeixinInboundPayload {
-  return (
-    isRecord(payload) &&
-    payload["platform"] === "weixin" &&
-    isRecord(payload["message"])
-  );
-}
-
 /**
  * WeixinMessage → NormalizedMessage。非消费面（机器人回声/群消息/已删除/无法定位）返回 null
- * （容错丢弃，与 QQ / Telegram parser 同纪律）。
+ * （容错丢弃，与 QQ / Telegram parser 同纪律）。载荷形状由 plugin.normalize 头部的
+ * WeixinInboundPayloadSchema 保证（B⁺ T5）。
  */
 export function normalizeWeixinMessage(
   botId: string,
-  payload: unknown,
+  payload: WeixinInboundPayload,
 ): NormalizedMessage | null {
-  if (!isWeixinPayload(payload)) return null;
   const msg = payload.message;
   if (!isSupportedInbound(msg)) return null;
   const msgId = weixinMsgIdOf(msg);
 
   const blobs = payload.mediaBlobs ?? {};
-  const items = Array.isArray(msg.item_list) ? msg.item_list : [];
+  const items = msg.item_list ?? [];
   const scopeId = idOf(msg.from_user_id);
 
   // —— 附件与占位（媒体占位符前置，正文随后——与 QQ「约定媒体前置」一致） ——
@@ -323,7 +315,7 @@ export function normalizeWeixinMessage(
     return null; // 空消息（如仅工具调用进度 item）：不入库
   }
 
-  const rawTs = num(msg.create_time_ms) ?? 0;
+  const rawTs = msg.create_time_ms ?? 0;
   const ts = rawTs > 0 ? (rawTs < 1e11 ? rawTs * 1000 : rawTs) : null;
 
   return {
@@ -355,7 +347,7 @@ export function normalizeWeixinMessage(
  */
 export function normalizeWeixinInbound(
   botId: string,
-  payload: unknown,
+  payload: WeixinInboundPayload,
 ): NormalizedInbound | null {
   const m = normalizeWeixinMessage(botId, payload);
   if (m === null) return null;

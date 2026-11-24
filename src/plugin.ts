@@ -18,11 +18,11 @@ import type {
   NormalizedInbound,
   PluginContext,
 } from "@qsense/connector-sdk";
-import { createNetKit, type NetKit } from "@qsense/connector-sdk";
+import { createNetKit, formatZodIssues, type NetKit } from "@qsense/connector-sdk";
 import { WeixinApiError, createWeixinApi } from "./api";
 import { WeixinError } from "./errors";
 import { createWeixinInstance } from "./instance";
-import { normalizeWeixinInbound } from "./parser";
+import { WeixinInboundPayloadSchema, normalizeWeixinInbound } from "./parser";
 import {
   createQrLoginManager,
   safeBaseUrl,
@@ -102,9 +102,19 @@ export function createWeixinConnector(
       quota: false,
       proactiveOptIn: false, // iLink：无 opt 事件概念，能对话即能发
     },
-    // 契约 v2：解读权在本插件——core ingest 表驱动按 payload.platform="weixin" 路由到此
-    normalize: (botId, payload): NormalizedInbound | null =>
-      normalizeWeixinInbound(botId, payload),
+    // 契约 v2：解读权在本插件——core ingest 表驱动按 payload.platform="weixin" 路由到此。
+    // B⁺ T5：信封过 wire schema（safeParse）——形状违规 = 可观测丢弃 + warn
+    //（路由已保证 platform 匹配本插件，schema 失败即本平台载荷损坏，不容错放行）。
+    normalize: (botId, payload): NormalizedInbound | null => {
+      const p = WeixinInboundPayloadSchema.safeParse(payload);
+      if (!p.success) {
+        log.warn(
+          `[${botId}] weixin 载荷形状违规，丢弃：${formatZodIssues(p.error, "payload")}`,
+        );
+        return null;
+      }
+      return normalizeWeixinInbound(botId, p.data);
+    },
     credentialSchema: {
       type: "object",
       required: ["appid", "token"],
