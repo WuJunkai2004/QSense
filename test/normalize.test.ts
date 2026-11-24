@@ -180,7 +180,7 @@ test("M2-2 迁移 v8：业务表齐全（合一消息/users/records），FTS 挂
       attachments: [],
       records: [],
       quote: null,
-      raw: {},
+      rawJson: "{}",
     });
     const hits = db
       .prepare(

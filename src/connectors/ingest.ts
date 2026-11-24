@@ -14,6 +14,8 @@ import {
   UnifiedMessageSchema,
   type InboundEffect,
   type NormalizedMessage,
+  type RawEnvelope,
+  type RawInbound,
 } from "@qsense/connector-sdk";
 import { t } from "../i18n";
 import type { Logger } from "../utils/logger";
@@ -32,10 +34,11 @@ export interface IngestDeps {
   }) => void;
 }
 
-/** 信封 platform 键（= plugin.id）；缺失/非字符串 = 未知信封 */
-function platformKeyOf(payload: unknown): string | null {
+/** 信封 platform 键（= plugin.id）；缺失/空串/非对象信封 = 未知信封（运行时防线：
+ * 动态边界产物可能越出 RawInbound 标注，如 null 信封——可观测丢弃而非抛错） */
+function platformKeyOf(payload: RawEnvelope): string | null {
   if (payload === null || typeof payload !== "object") return null;
-  const p = (payload as Record<string, unknown>)["platform"];
+  const p = payload.platform;
   return typeof p === "string" && p !== "" ? p : null;
 }
 
@@ -64,15 +67,15 @@ function applyEffect(repo: Repo, botId: string, fx: InboundEffect): void {
 }
 
 /**
- * ingest 管线工厂：返回 (e: RawInbound) => void 形状的宿主 ingest 实现。
- * 每条消息路径绝不抛错由调用方兜底（与旧 onEvent 纪律一致）。
- * 消息级去重键平台中立：(botId, scope, scopeId, msgId)——即 saveMessage 的幂等主键；
- * Telegram 无事件级去重键（update_id 至少一次），同键重投在此挡下。
+ * ingest 管线工厂：返回宿主 ingest 实现（泛型直通——插件/测试的完整信封字面量
+ * 不触发多余属性检查，core 视角只见 RawEnvelope.platform）。每条消息路径绝不抛错
+ * 由调用方兜底（与旧 onEvent 纪律一致）。消息级去重键平台中立：
+ * (botId, scope, scopeId, msgId)——即 saveMessage 的幂等主键；Telegram 无事件级
+ * 去重键（update_id 至少一次），同键重投在此挡下。
  */
-export function createIngestPipeline(deps: IngestDeps): (raw: {
-  botId: string;
-  payload: unknown;
-}) => void {
+export function createIngestPipeline(deps: IngestDeps): <P extends RawEnvelope>(
+  raw: RawInbound<P>,
+) => void {
   const dedup = new BoundedDedup(4096);
   return (raw) => {
     const platform = platformKeyOf(raw.payload);

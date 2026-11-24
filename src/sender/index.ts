@@ -366,9 +366,10 @@ export class Sender {
           provider_msg_id: receipt.providerMsgId,
         };
       } catch (e) {
-        const biz = extractBizCode(e);
+        const err = e instanceof Error ? e : new Error(String(e));
+        const biz = extractBizCode(err);
         const sem = this.deps.sendErrorFor?.(botId);
-        if (sem?.isAuditPending?.(e) === true) {
+        if (sem?.isAuditPending?.(err) === true) {
           this.deps.repo.updateSendStatus(
             reservation,
             "pending_audit",
@@ -379,7 +380,7 @@ export class Sender {
             status: "pending_audit",
             channel: "passive",
             msg_seq: seq,
-            detail: sem.describe?.(e) ?? t("send_audit_pending", { code: biz ?? 0 }),
+            detail: sem.describe?.(err) ?? t("send_audit_pending", { code: biz ?? 0 }),
           };
         }
         this.deps.repo.updateSendStatus(
@@ -388,7 +389,7 @@ export class Sender {
           undefined,
           biz ?? undefined,
         );
-        throw e;
+        throw err;
       }
     };
 
@@ -396,9 +397,10 @@ export class Sender {
       try {
         return await send(true, this.deps.repo.nextMsgSeq(botId, replyMsgId));
       } catch (e) {
+        const err = e instanceof Error ? e : new Error(String(e));
         const sem = this.deps.sendErrorFor?.(botId);
-        if (sem?.isMarkdownDowngrade?.(e) !== true) {
-          throw new Error(describeSendError(e, sem));
+        if (sem?.isMarkdownDowngrade?.(err) !== true) {
+          throw new Error(describeSendError(err, sem));
         }
         // 平台判定 Markdown 无权限 → 自动降级纯文本（新账本行，失败行不计窗口次数）
         const result = await send(
@@ -408,16 +410,17 @@ export class Sender {
         return {
           ...result,
           status: "downgraded",
-          detail: sem.describe?.(e) ?? t("send_markdown_downgraded"),
+          detail: sem.describe?.(err) ?? t("send_markdown_downgraded"),
         };
       }
     }
     try {
       return await send(false, this.deps.repo.nextMsgSeq(botId, replyMsgId));
     } catch (e) {
-      if (extractBizCode(e) !== null)
-        throw new Error(describeSendError(e, this.deps.sendErrorFor?.(botId)));
-      throw e;
+      const err = e instanceof Error ? e : new Error(String(e));
+      if (extractBizCode(err) !== null)
+        throw new Error(describeSendError(err, this.deps.sendErrorFor?.(botId)));
+      throw err;
     }
   }
 
@@ -500,9 +503,10 @@ export class Sender {
         provider_msg_id: receipt.providerMsgId,
       };
     } catch (e) {
-      const biz = extractBizCode(e);
+      const err = e instanceof Error ? e : new Error(String(e));
+      const biz = extractBizCode(err);
       const sem = this.deps.sendErrorFor?.(botId);
-      if (sem?.isAuditPending?.(e) === true) {
+      if (sem?.isAuditPending?.(err) === true) {
         // 审核受理同样占用官方当日额度，记账保守 +1
         repo.updateSendStatus(
           reservation,
@@ -514,11 +518,11 @@ export class Sender {
         return {
           status: "pending_audit",
           channel: "proactive",
-          detail: sem.describe?.(e) ?? t("send_audit_pending", { code: biz ?? 0 }),
+          detail: sem.describe?.(err) ?? t("send_audit_pending", { code: biz ?? 0 }),
         };
       }
       repo.updateSendStatus(reservation, "failed", undefined, biz ?? undefined);
-      throw new Error(describeSendError(e, sem));
+      throw new Error(describeSendError(err, sem));
     }
   }
 
@@ -689,9 +693,10 @@ export class Sender {
       });
       handle = up.handle;
     } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
       throw new Error(
         t("media_upload_failed", {
-          reason: describeSendError(e, this.deps.sendErrorFor?.(botId)),
+          reason: describeSendError(err, this.deps.sendErrorFor?.(botId)),
         }),
       );
     }
@@ -851,13 +856,14 @@ export class Sender {
       });
       return { recalled: messageId };
     } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
       this.deps.repo.updateSendStatus(
         reservation,
         "failed",
         undefined,
-        extractBizCode(e) ?? undefined,
+        extractBizCode(err) ?? undefined,
       );
-      throw new Error(describeSendError(e, this.deps.sendErrorFor?.(botId)));
+      throw new Error(describeSendError(err, this.deps.sendErrorFor?.(botId)));
     }
   }
 }

@@ -157,7 +157,7 @@ test("M4-17 资产闭环：签票→PUT 落盘→send_media asset: 引用（file
       quote: null,
       records: [],
       attachments: [],
-      raw: {},
+      rawJson: "{}",
     });
     const sender = makeSender(fx, { fileInfo: "FILEINFO_ASSET" });
     const r = await sender.sendMediaAuto(
@@ -330,7 +330,7 @@ test("M10 语音资产闭环：PUT 落盘 audio/mpeg → send_media asset: 引�
       quote: null,
       records: [],
       attachments: [],
-      raw: {},
+      rawJson: "{}",
     });
     const sender = makeSender(fx, { fileInfo: "FILEINFO_VOICE" }, "voice");
     const r = await sender.sendMediaAuto(

@@ -86,7 +86,7 @@ function errPayload(text: string): ToolPayload {
 export async function callPluginTool(
   plugin: ConnectorPlugin,
   name: string,
-  args: Record<string, unknown>,
+  rawArgs: string | undefined,
   ctx: PluginToolCtx,
 ): Promise<ToolPayload> {
   const tool = (plugin.tools ?? []).find((t) => t.name === name);
@@ -94,7 +94,7 @@ export async function callPluginTool(
     return errPayload(`工具 ${name} 不属于平台 ${plugin.id} 的声明扩展。`);
   }
   try {
-    return await tool.handler(args, ctx);
+    return await tool.call(rawArgs, ctx);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     ctx.host.log.warn("plugin tool failed", {

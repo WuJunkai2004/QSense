@@ -114,7 +114,7 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
       records: [],
       mentions: [],
       attachments: [],
-      raw: { id: s.msgId },
+      rawJson: JSON.stringify({ id: s.msgId }),
     });
   }
   repo.setGroupSwitch("10001", GROUP, true);
@@ -643,7 +643,7 @@ test("M3-5 引用结构化（quote_json 直读）+ 信封统一：quote_msg 呈�
       mentions: [],
       attachments: [],
       records: [],
-      raw: {},
+      rawJson: "{}",
     };
     repo.saveMessage({
       ...base,
@@ -803,7 +803,7 @@ test("M3-5b get_records：聊天记录拍平展开（users 昵称/嵌套 depth/�
       scopeId: GROUP,
       mentions: [],
       attachments: [],
-      raw: {},
+      rawJson: "{}",
     };
     // 身份锚：USER_B 在 users 表（子行作者名以此为准）
     repo.saveMessage({
@@ -922,7 +922,7 @@ test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消�
           content_type: "file",
         },
       ],
-      raw: {},
+      rawJson: "{}",
     });
     // 拦截网络（测试零真实网络依赖）：仅劫持假 CDN 域名，其余（MCP 传输自身）走真实 fetch
     type FetchInput = Parameters<typeof realFetch>[0];
@@ -1022,7 +1022,7 @@ test("M3-6b 内联 data:URL 附件：工具输出不回显 base64 载荷（带�
         { kind: "image", url: dataUrl, content_type: "image/png" },
         { kind: "image", url: "https://cdn.example/b.png", content_type: "image/png" },
       ],
-      raw: {},
+      rawJson: "{}",
     });
     client = await connectClient(fx.baseUrl, fx.agentToken);
     const res = payloadOf(
@@ -1100,7 +1100,7 @@ test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防�
       records: [],
       mentions: [],
       attachments: [],
-      raw: {},
+      rawJson: "{}",
     });
     client = await connectClient(fx.baseUrl, fx.agentToken);
     const res = payloadOf(
@@ -1139,7 +1139,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
       scopeId: USER,
       mentions: [],
       attachments: [],
-      raw: {},
+      rawJson: "{}",
     };
     // 被引消息 + 引用消息（引用回溯走合一 messages 表，scope=chat 与群侧隔离）
     repo.saveMessage({

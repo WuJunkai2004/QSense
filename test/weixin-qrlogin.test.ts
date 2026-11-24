@@ -9,10 +9,15 @@ import assert from "node:assert/strict";
 import type {
   ConnectorLogger,
   PluginContext,
-  PluginWebuiRequest,
   StatePort,
+  WebuiRouteOut,
 } from "@qsense/connector-sdk";
-import { FakeNetKit, NetError, createNetKit } from "@qsense/connector-sdk";
+import {
+  FakeNetKit,
+  NetError,
+  createNetKit,
+  jsonResponse,
+} from "@qsense/connector-sdk";
 import {
   WeixinError,
   createWeixinConnector,
@@ -70,12 +75,18 @@ function deferred(): Deferred {
 
 type Step = Record<string, unknown> | Error | Deferred;
 
+/** create 应答 wire 形状（iLink get_bot_qrcode 实际消费字段） */
+interface QrCreateResp {
+  qrcode: string;
+  qrcode_img_content: string;
+}
+
 interface QrFake {
   kit: FakeNetKit;
   /** 状态查询脚本（按调用序出队；耗尽后永久挂起——不占事件循环句柄） */
   steps: Step[];
   createStatus: number;
-  createBody: unknown;
+  createBody: QrCreateResp;
   createError: Error | null;
 }
 
@@ -94,14 +105,18 @@ function qrFake(): QrFake {
       const path = new URL(req.url).pathname;
       if (path.endsWith("/get_bot_qrcode")) {
         if (fx.createError !== null) throw fx.createError;
-        return { status: fx.createStatus, body: fx.createBody };
+        return jsonResponse(fx.createBody, { status: fx.createStatus });
       }
       // get_qrcode_status：脚本出队；耗尽后挂起（模拟服务端长轮询，无句柄不阻塞退出）
       const next = fx.steps.shift();
       if (next instanceof Error) throw next;
       if (next === undefined) return new Promise<never>(() => undefined);
-      if (next.kind === "deferred") return { body: await next.promise };
-      return { body: next };
+      if ("promise" in next) {
+        // Deferred.promise 声明即 Record 形状（测试自产自销，断言收口一次）
+        const payload: Record<string, unknown> = (await next.promise) as Record<string, unknown>;
+        return jsonResponse(payload);
+      }
+      return jsonResponse(next);
     },
   );
   return fx;
@@ -124,29 +139,40 @@ function makePlugin(fx: QrFake, qr: Partial<QrOpts> = {}): QrTestPlugin {
   });
   const route = (path: string) =>
     plugin.webui!.find((r) => r.method === "POST" && r.path === path)!;
-  const req = (path: string, body?: unknown): PluginWebuiRequest => ({
-    method: "POST",
-    path,
-    params: {},
-    query: {},
-    body,
-    configOf: () => ({}),
-    stateOf: () => ({
-      async get<T = unknown>() {
-        return null as T;
-      },
-      async set() {},
-      async delete() {},
-    }),
-  });
+  // 控制反转：webui 路由经 handle 输入调用（body = JSON 文本跨界）
+  const call = async (
+    path: string,
+    body?: { task_id?: string },
+  ): Promise<WebuiRouteOut> =>
+    route(path).handle({
+      path,
+      params: {},
+      query: {},
+      rawBody: body === undefined ? undefined : JSON.stringify(body),
+      configOf: () => ({}),
+      stateOf: () => fakeStatePort(),
+    });
   return Object.assign(plugin, {
     createQr: async () =>
-      (await route("/login/qr/create").handler(req("/login/qr/create", {}))) as never,
+      (await call("/login/qr/create")) as {
+        task_id: string;
+        connect_url: string;
+        interval_s: number;
+      },
     pollQr: async (taskId: string) =>
-      (await route("/login/qr/poll").handler(
-        req("/login/qr/poll", { task_id: taskId }),
-      )) as Record<string, unknown>,
+      (await call("/login/qr/poll", { task_id: taskId })) as Record<string, unknown>,
   });
+}
+
+/** 测试假 StatePort（值 = JSON 文本，与 StatePort B⁺ T6 契约一致） */
+function fakeStatePort(): StatePort {
+  return {
+    async get() {
+      return null;
+    },
+    async set() {},
+    async delete() {},
+  };
 }
 
 const CONFIRMED = {
@@ -381,7 +407,7 @@ test("create 上游失败：HTTP 5xx / 缺字段 / 网络异常 → 502 可操�
       fx.createStatus = 500;
     },
     (fx) => {
-      fx.createBody = { qrcode: "only-token" };
+      fx.createBody = { qrcode: "only-token", qrcode_img_content: "" };
     },
     (fx) => {
       fx.createError = new NetError("network", "fetch failed");

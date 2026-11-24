@@ -12,6 +12,7 @@
 // 路由，对平台零硬编码（第三方插件零 core 改动进场）。破坏性升级：SDK_VERSION
 // bump 2.0.0，sdkRange 三方锁版承担。
 
+import { z } from "zod";
 import type { NormalizedInbound } from "./message";
 import type { NetKit } from "./net";
 
@@ -51,30 +52,41 @@ export const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(BASE_TOOL_NAMES)
 // 日志（与 core Logger 结构对齐：五级 + child；core 实例可直接传入）
 // ---------------------------------------------------------------------------
 
+/** 结构化字段值域：平面键值（与 core utils/logger.LogFields 同形——结构类型互通） */
+export type LogFields = Record<string, string | number | boolean | null>;
+
 export interface ConnectorLogger {
-  debug(msg: string, fields?: Record<string, unknown>): void;
-  info(msg: string, fields?: Record<string, unknown>): void;
-  warn(msg: string, fields?: Record<string, unknown>): void;
-  error(msg: string, fields?: Record<string, unknown>): void;
-  fatal(msg: string, fields?: Record<string, unknown>): void;
+  debug(msg: string, fields?: LogFields): void;
+  info(msg: string, fields?: LogFields): void;
+  warn(msg: string, fields?: LogFields): void;
+  error(msg: string, fields?: LogFields): void;
+  fatal(msg: string, fields?: LogFields): void;
   /** 子日志器：模块前缀，级别继承 */
   child(scope: string): ConnectorLogger;
 }
 
 // ---------------------------------------------------------------------------
-// JSON Schema（最小结构类型：够 credentialSchema / inputSchema 声明与闸门校验，
-// 不引入 ajv 类依赖；透传未知键）
+// JSON Schema（最小具体子集，B⁺ T6 按实际读取字段裁剪）：够 credentialSchema /
+// inputSchema 声明与闸门校验；递归结构（properties/items 同形）。不引入 ajv。
 // ---------------------------------------------------------------------------
 
+export type JsonSchemaType =
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "array"
+  | "object"
+  | "null";
+
 export interface JsonSchema {
-  type?: string;
-  properties?: Record<string, unknown>;
-  required?: string[];
-  items?: unknown;
-  enum?: unknown[];
+  type?: JsonSchemaType;
   description?: string;
-  default?: unknown;
-  [key: string]: unknown;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  enum?: Array<string | number | boolean | null>;
+  default?: string | number | boolean | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,15 +139,24 @@ export interface PlatformCaps {
 // ---------------------------------------------------------------------------
 
 /**
+ * 上行信封最小契约：core 只读 `platform` 键（= plugin.id，表驱动路由依据）；
+ * 完整载荷结构归各插件 *.types.ts（插件信封接口 = 本契约的结构超集）。
+ */
+export interface RawEnvelope {
+  platform: string;
+}
+
+/**
  * 原始入站载荷信封：经 HostApi.ingest 上行，core ingest 表驱动按
  * `payload.platform`（= plugin.id）路由到对应插件的 normalize 解读。
  * connector 负责给信封盖 platform 章（如 Telegram {platform:"telegram", update,…}）；
- * 解读权在插件（契约 v2），原始结构对 core 不透明。
+ * 解读权在插件（契约 v2），原始结构对 core 不透明。P 泛型 = 插件自有信封类型
+ * （须携带 platform 键）——调用点字面量不丢字段，core 视角只见 RawEnvelope。
  */
-export interface RawInbound {
+export interface RawInbound<P extends RawEnvelope = RawEnvelope> {
   botId: string;
-  /** 协议原生结构（JSON 对象 / 信封）；须携带 platform 键供表驱动路由 */
-  payload: unknown;
+  /** 协议原生信封（须携带 platform 键供表驱动路由） */
+  payload: P;
   /** connector 收到时刻（epoch ms）；缺省由 core ingest 时刻兜底 */
   receivedAt?: number;
 }
@@ -215,11 +236,16 @@ export interface SendReceipt {
 //  没有 repo——想绕过管线在类型上就不可表达。）
 // ---------------------------------------------------------------------------
 
-/** 跨重启状态：不透明 blob 存取（会话/lastSeq/令牌缓存/插件私有状态→宿主落 SQLite kv） */
+/**
+ * 跨重启状态（B⁺ T6 字符串化）：值 = JSON 文本（消费方 parseJsonWith + 具体
+ * schema 解析——存取两侧都见具体类型，序列化纪律在调用侧显式）。
+ * 宿主实现落 SQLite kv；缺失返回 null，坏数据由消费方 schema 解析失败兜底。
+ */
 export interface StatePort {
-  /** 缺失返回 null；值必须 JSON 可序列化 */
-  get<T = unknown>(key: string): Promise<T | null>;
-  set(key: string, value: unknown): Promise<void>;
+  /** 缺失返回 null；值为 JSON 文本 */
+  get(key: string): Promise<string | null>;
+  /** 写入 JSON 文本（调用侧 JSON.stringify） */
+  set(key: string, value: string): Promise<void>;
   delete(key: string): Promise<void>;
 }
 
@@ -228,8 +254,9 @@ export interface HostApi {
   log: ConnectorLogger;
   /** bot 作用域 StatePort（宿主实现负责命名空间隔离与持久化） */
   state: StatePort;
-  /** 后端唯一上行出口：规范化/去重/入库全在 core 侧发生 */
-  ingest(e: RawInbound): void;
+  /** 后端唯一上行出口：规范化/去重/入库全在 core 侧发生。
+   * 泛型 P = 插件自有信封类型（须携带 platform 键）——结构化上行不丢字段。 */
+  ingest<P extends RawEnvelope>(e: RawInbound<P>): void;
   /** 连接生命周期状态上报（宿主聚合展示：/healthz、WebUI bootstrap、设置页） */
   reportStatus(s: ConnectorStatus): void;
 }
@@ -255,14 +282,13 @@ export interface BotCreds {
 
 /**
  * 每 bot 平台配置快照（宿主提供）：P1/P2 = bots 表列投影（authLevel/allowGroups/
- * sendEnabled/name）；P3 起 = bots.config_json。插件不得假设其中键的存在性。
+ * sendEnabled/name）；P3 起 = bots.config_json 投影。插件不得假设可选键的存在性。
  */
 export interface BotConfigSnapshot {
   authLevel?: string;
   allowGroups?: string[];
   sendEnabled?: boolean;
   name?: string;
-  [key: string]: unknown;
 }
 
 /** 登录流声明：WebUI 按此渲染（表单 / 扫码轮询） */
@@ -274,30 +300,119 @@ export type LoginFlowDecl =
 
 export type WebuiMethod = "GET" | "POST" | "PUT" | "DELETE";
 
-/** 插件 WebUI 路由收到的请求（已脱敏：无原始 header、无 fastify reply） */
-export interface PluginWebuiRequest {
-  method: WebuiMethod;
-  /** 插件前缀后的相对路径（已解码） */
+/**
+ * 插件 webui 路由返回值的最小契约：core 只读 `task_id` 记日志（扫码任务关联），
+ * 其余字段原样 JSON 序列化给前端。插件路由用自有返回接口 extends 本契约
+ * （结构类型：子集可赋值，字面量不触发多余属性检查）。
+ */
+export interface WebuiRouteOut {
+  /** 扫码配对任务 id（create 路由返回；core 日志用） */
+  task_id?: string;
+}
+
+/**
+ * qr-pair 登录协议的路由返回契约（login.kind="qr-pair" 是 SDK 契约——
+ * core 注册中介依赖 poll 产物形状，故形状在本层定义，平台插件复用）。
+ * completed 分支的 credential 只交回宿主（core 拦截 → verifyCredential → 注册），
+ * 绝不下发浏览器。
+ */
+export interface QrPairCreateOut extends WebuiRouteOut {
+  task_id: string;
+  /** 浏览器侧连接端点（SSE/轮询地址，前端展示二维码用） */
+  connect_url: string;
+  /** 建议轮询间隔秒 */
+  interval_s: number;
+}
+
+export type QrPairPollOut = WebuiRouteOut &
+  (
+    | { status: "pending" }
+    | { status: "expired" }
+    | {
+        status: "completed";
+        /** 平台凭据键值对（credentialSchema 形状；core 拦截，不下发浏览器） */
+        credential: Record<string, string>;
+        /** 扫码确认人平台侧 openid（留档展示；可省） */
+        user_openid?: string;
+      }
+  );
+
+/** QrPairPollOut 的 wire schema：core 注册中介对插件 poll 产物做形状校验
+ * （防御连接器实现 bug——违反协议 → 可操作错误而非静默坏数据） */
+export const QrPairPollOutSchema = z.union([
+  z.object({ status: z.literal("pending") }),
+  z.object({ status: z.literal("expired") }),
+  z.object({
+    status: z.literal("completed"),
+    credential: z.record(z.string(), z.string()),
+    user_openid: z.string().optional(),
+  }),
+]);
+
+/**
+ * core 代理点喂给 webui 路由的原始输入（控制反转）：body 只以 JSON 文本跨界
+ * （序列化点显式在 core 侧 JSON.stringify），schema 解析在 webuiRoute 工厂
+ * 闭包内完成——具体 body 类型从不越过本输入接口。
+ */
+export interface PluginWebuiInput {
+  /** 插件前缀剥离后的实际路径（已解码） */
   path: string;
   /** 路径参数（":name" 段） */
   params: Record<string, string>;
   query: Record<string, string>;
-  /** JSON body；无 body / 非 JSON 时 undefined */
-  body: unknown;
+  /** 原始请求体 JSON 文本；无 body 时 undefined */
+  rawBody: string | undefined;
   /** 按 bot 解析平台配置快照（bot 选择由路由自决，如 ?bot= 约定键） */
   configOf(botId: string): BotConfigSnapshot;
   /** 按 bot 解析 StatePort（插件计数器/私有状态读写） */
   stateOf(botId: string): StatePort;
 }
 
+/** 插件 WebUI 路由 handler 视角的请求（body = 该路由 bodySchema 的解析产物） */
+export interface PluginWebuiRequest<B = undefined> {
+  method: WebuiMethod;
+  path: string;
+  params: Record<string, string>;
+  query: Record<string, string>;
+  /** 该路由 bodySchema 的解析产物（schema 即类型；未声明 schema 的路由恒 undefined） */
+  body: B;
+  configOf(botId: string): BotConfigSnapshot;
+  stateOf(botId: string): StatePort;
+}
+
+/**
+ * 插件 WebUI 路由（统一接口，非泛型）：异构路由的 body 类型 B 经 webuiRoute
+ * 工厂绑定在 handle 闭包内——core 代理点只喂 PluginWebuiInput（JSON 文本），
+ * 不经手任何具体 body 类型。
+ */
 export interface PluginWebuiRoute {
   method: WebuiMethod;
   /** 相对路径，以 / 开头；":name" 段为路径参数 */
   path: string;
   /** WebUI 展示用摘要 */
   summary?: string;
-  /** 返回值 JSON 序列化给前端；抛 ConnectorError → 规范化错误响应 */
-  handler(req: PluginWebuiRequest): Promise<unknown>;
+  /**
+   * 控制反转入口：core 代理点以原始输入调用；形状违规抛 ConnectorError(400)，
+   * 产物经 PluginWebuiRequest<B>.body 交给 handler（均在工厂闭包内完成）。
+   */
+  handle(input: PluginWebuiInput): Promise<WebuiRouteOut>;
+}
+
+/**
+ * 插件工具声明（统一接口，非泛型）：异构工具的 args 类型 A 经 pluginTool
+ * 工厂绑定在 call 闭包内——core 分发点只喂 MCP arguments 的 JSON 文本，
+ * 不经手任何具体 args 类型。
+ */
+export interface PluginToolDecl {
+  /** MCP 工具名；不得与基座保留名冲突、不得跨插件重复 */
+  name: string;
+  description: string;
+  inputSchema: JsonSchema;
+  /**
+   * 控制反转入口：rawArgs = MCP arguments 的 JSON 文本（无参调用 undefined）；
+   * argsSchema 解析（失败 → isError 可操作文案）与 run 调用在工厂闭包内完成。
+   */
+  call(rawArgs: string | undefined, ctx: PluginToolCtx): Promise<ToolPayload>;
 }
 
 export interface ProactiveVerdict {
@@ -336,12 +451,20 @@ export interface PluginToolCtx {
   config: BotConfigSnapshot;
 }
 
+/**
+ * 平台扩展工具入参（控制反转）：A 由 pluginTool 工厂的 argsSchema 绑定，
+ * call 闭包内流转——core 分发点只见 JSON 文本。
+ */
 export interface PluginToolDecl {
   /** MCP 工具名；不得与基座保留名冲突、不得跨插件重复 */
   name: string;
   description: string;
   inputSchema: JsonSchema;
-  handler(args: Record<string, unknown>, ctx: PluginToolCtx): Promise<ToolPayload>;
+  /**
+   * 控制反转入口：rawArgs = MCP arguments 的 JSON 文本（无参调用 undefined）；
+   * argsSchema 解析（失败 → isError 可操作文案）与 run 调用在工厂闭包内完成。
+   */
+  call(rawArgs: string | undefined, ctx: PluginToolCtx): Promise<ToolPayload>;
 }
 
 // ---------------------------------------------------------------------------
@@ -377,11 +500,11 @@ export interface ConnectorInstance {
  */
 export interface SendErrorSemantics {
   /** 平台判定：受理进入人工审核（core 置 pending_audit 等平台事件回填，勿重发） */
-  isAuditPending?(e: unknown): boolean;
+  isAuditPending?(e: Error): boolean;
   /** 平台判定：markdown 无权限（core 自动降级纯文本重试一次） */
-  isMarkdownDowngrade?(e: unknown): boolean;
+  isMarkdownDowngrade?(e: Error): boolean;
   /** 平台文案：可操作错误解释（含官方码语义）；未登记码返回 undefined → core 通用兜底 */
-  describe?(e: unknown): string | undefined;
+  describe?(e: Error): string | undefined;
 }
 
 export interface ConnectorPlugin {
@@ -408,12 +531,13 @@ export interface ConnectorPlugin {
   webui?: PluginWebuiRoute[];
   hooks?: ConnectorHooks;
   /**
-   * 上行解读（契约 v2 必备）：原始载荷 → 成品消息 + 会话效应。
-   * core ingest 按 payload.platform 表驱动路由到此；形状契约由 conformance
-   * harness 的 normalize-shape 检查守（assertNormalizedInbound）。返回 null =
-   * 载荷无法解读/无需落地（容错丢弃）；parser 内部不得抛错逃逸由 core 兜底 warn。
+   * 上行解读（契约 v2 必备）：原始载荷信封 → 成品消息 + 会话效应。
+   * core ingest 按 payload.platform 表驱动路由到此（路由已保证 platform 匹配本
+   * 插件）；载荷完整形状由插件侧 wire schema safeParse 把关（RawEnvelope 只是
+   * 最小信封契约）。返回 null = 载荷无法解读/无需落地（容错丢弃）；parser 内部
+   * 不得抛错逃逸由 core 兜底 warn。
    */
-  normalize(botId: string, payload: unknown): NormalizedInbound | null;
+  normalize(botId: string, payload: RawEnvelope): NormalizedInbound | null;
   /**
    * 实例工厂（T3 起 ctx: PluginContext = HostApi + net）。结构类型向后兼容：
    * 声明 (host: HostApi) => … 的旧插件照常接收并忽略 net（双轨期渐进迁移）。

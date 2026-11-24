@@ -24,6 +24,7 @@ import {
   type PluginContext,
   type StatePort,
 } from "@qsense/connector-sdk";
+import { jsonResponse } from "@qsense/connector-sdk";
 import {
   MessageItemType,
   MessageType,
@@ -56,19 +57,20 @@ function fakeHost(): {
   host: PluginContext;
   ingested: Array<{ botId: string; payload: unknown }>;
   statuses: ConnectorStatus[];
-  state: Map<string, unknown>;
+  state: Map<string, string>;
 } {
-  const state = new Map<string, unknown>();
+  // StatePort B⁺ T6 字符串化：值 = JSON 文本（实例侧 stringify/parseJsonWith 直通）
+  const state = new Map<string, string>();
   const ingested: Array<{ botId: string; payload: unknown }> = [];
   const statuses: ConnectorStatus[] = [];
   const host: PluginContext = {
     log: noopLog(),
     state: {
-      async get<T = unknown>(key: string) {
-        return (state.get(key) as T) ?? null;
+      async get(key: string) {
+        return state.get(key) ?? null;
       },
-      async set(key: string, value: unknown) {
-        state.set(key, JSON.parse(JSON.stringify(value)));
+      async set(key: string, value: string) {
+        state.set(key, value);
       },
       async delete(key: string) {
         state.delete(key);
@@ -206,9 +208,7 @@ test("轮询：notifystart → 批次摄取（context_token/引用线索/图片�
   const fake = fakeApi();
   // 入站图片解密富化走真链路：CDN 密文（AES-128-ECB）经 FakeNetKit 二进制应答
   const kit = new FakeNetKit();
-  kit.on(`${CDN_BASE}/download`, () => ({
-    body: new Uint8Array(encryptAesEcb(PNG, AES_KEY)),
-  }));
+  kit.on(`${CDN_BASE}/download`, () => new Response(new Uint8Array(encryptAesEcb(PNG, AES_KEY))));
   const inst = createWeixinInstance({
     ctx: { ...fx.host, net: kit },
     botId: BOT,
@@ -230,7 +230,7 @@ test("轮询：notifystart → 批次摄取（context_token/引用线索/图片�
 
   assert.equal(fake.calls[0]!.method, "notifyStart");
   // 摄取完成时游标已推进（批次全摄取后才推进：至少一次语义）
-  assert.equal(fx.state.get("poll:buf"), "BUF1");
+  assert.equal(fx.state.get("poll:buf"), JSON.stringify("BUF1")); // JSON 文本值域
   // 前两次轮询：空游标 → 回带新游标（其后脚本耗尽、循环挂起等待停服）
   assert.deepEqual(pollsOf(fake).slice(0, 2), ["", "BUF1"]);
   // 入站载荷：platform 章 + 原始消息；第二条带引用线索与解密图（键 = item 下标）
@@ -245,9 +245,9 @@ test("轮询：notifystart → 批次摄取（context_token/引用线索/图片�
     "1": `data:image/png;base64,${PNG.toString("base64")}`,
   });
   // context_token 按对端缓存并持久化（最新者胜）
-  assert.deepEqual(fx.state.get("ctx-tokens"), { [USER]: "CTX-B" });
+  assert.deepEqual(JSON.parse(fx.state.get("ctx-tokens") ?? "null"), { [USER]: "CTX-B" });
   // 引用缓存：两条消息摘要入库（供后续 ID-only 引用解析）
-  const quotes = fx.state.get("quote-cache") as { q: Array<[string, string]> };
+  const quotes = JSON.parse(fx.state.get("quote-cache") ?? "null") as { q: Array<[string, string]> };
   assert.deepEqual(quotes.q, [["1", "第一条"], ["2", "第二条 | [图片]"]]);
   // 状态：首轮成功 ready
   assert.equal(fx.statuses.some((s) => s.state === "ready"), true);
@@ -257,8 +257,8 @@ test("轮询：notifystart → 批次摄取（context_token/引用线索/图片�
 
 test("续拉：持久化游标与 context_token 存活 → 首轮带游标，状态 resumed", async () => {
   const fx = fakeHost();
-  fx.state.set("poll:buf", "OLD-CURSOR");
-  fx.state.set("ctx-tokens", { [USER]: "CTX-SAVED" });
+  fx.state.set("poll:buf", JSON.stringify("OLD-CURSOR"));
+  fx.state.set("ctx-tokens", JSON.stringify({ [USER]: "CTX-SAVED" }));
   const fake = fakeApi();
   const inst = createWeixinInstance({
     ctx: fx.host,
@@ -308,8 +308,8 @@ test("token 失效（errcode -14）→ fatal 退出不重试；HTTP 401 同样 f
   const kit = new FakeNetKit();
   kit.onMatch((u) => u.includes("/ilink/bot/"), (req) => {
     const path = new URL(req.url).pathname;
-    if (path.endsWith("/getupdates")) return { status: 401, body: "no" };
-    return { body: { ret: 0 } }; // notifystart / notifystop
+    if (path.endsWith("/getupdates")) return new Response("no", { status: 401 });
+    return jsonResponse({ ret: 0 }); // notifystart / notifystop
   });
   const plugin = createWeixinConnector({ net: kit });
   const inst = plugin.create({ ...fx.host, net: kit }, {
@@ -344,7 +344,7 @@ test("网络失败 → disconnected → 退避后恢复 ready；旧游标持续�
   }
   {
     const fx = fakeHost();
-    fx.state.set("poll:buf", "OLD");
+    fx.state.set("poll:buf", JSON.stringify("OLD"));
     const fake = fakeApi();
     fake.queue([{ ret: 1 }, { ret: 1 }, {}]);
     const inst = createWeixinInstance({
@@ -395,7 +395,7 @@ test("net.proactive 文本：sendmessage 线格式（BOT/FINISH/单 item/context
   assert.match(sent.run_id!, /^[0-9a-f-]{36}$/);
   assert.equal("message_id" in sent, false);
   // 自发消息进引用缓存（供用户引用 bot 消息时解析正文）
-  const quotes = fx.state.get("quote-cache") as { q: Array<[string, string]> };
+  const quotes = JSON.parse(fx.state.get("quote-cache") ?? "null") as { q: Array<[string, string]> };
   assert.ok(quotes.q.some(([id, t]) => id === "9001" && t === "收到"));
 });
 
@@ -407,7 +407,7 @@ test("net 媒体：uploadMedia 加密直传 → 无状态句柄 → 配文与图
   const bodies: Uint8Array[] = [];
   kit.on("https://cdn.example/up", (req) => {
     bodies.push(req.body as Uint8Array);
-    return { headers: { "x-encrypted-param": "DL-PARAM" } };
+    return new Response(undefined, { headers: { "x-encrypted-param": "DL-PARAM" } });
   });
   const inst = createWeixinInstance({
     ctx: { ...fx.host, net: kit },
@@ -611,7 +611,7 @@ test("无 context_token 的对端：照发不带 context_token 键", async () =>
 
 test("verifyCredential：缺凭据 / appid 形制 / 不可达 / 401 / -14 / 通过（FakeNetKit 假端点）", async () => {
   const seen: Array<{ url: string; auth: string | undefined; type: string | undefined }> = [];
-  const respond = (status: number, body: unknown) => {
+  const respond = (status: number, body: string) => {
     const kit = new FakeNetKit();
     kit.onMatch(() => true, (req) => {
       seen.push({
@@ -619,11 +619,11 @@ test("verifyCredential：缺凭据 / appid 形制 / 不可达 / 401 / -14 / 通�
         auth: req.headers["authorization"],
         type: req.headers["authorizationtype"],
       });
-      return { status, body };
+      return new Response(body, { status });
     });
     return createWeixinConnector({ net: kit }).hooks!.verifyCredential!;
   };
-  const verify = respond(200, { ret: 0 });
+  const verify = respond(200, JSON.stringify({ ret: 0 }));
   await assert.rejects(() => verify({ appid: BOT, token: "" }), /凭据缺失/);
   await assert.rejects(() => verify({ appid: "abc@im.bot", token: "tok" }), /形制/);
   // 不可达（网络档）：假端点抛 NetError network
@@ -639,7 +639,11 @@ test("verifyCredential：缺凭据 / appid 形制 / 不可达 / 401 / -14 / 通�
   );
   await assert.rejects(() => respond(401, "no")({ appid: BOT, token: "tok" }), /token 无效/);
   await assert.rejects(
-    () => respond(200, { errcode: -14, errmsg: "stale" })({ appid: BOT, token: "tok" }),
+    () =>
+      respond(200, JSON.stringify({ errcode: -14, errmsg: "stale" }))({
+        appid: BOT,
+        token: "tok",
+      }),
     /token 无效/,
   );
   await verify({ appid: BOT, token: "tok" });
@@ -654,7 +658,7 @@ test("verifyCredential：凭据 base_url 校验（仅 https；非法回退缺省
   const kit = new FakeNetKit();
   kit.onMatch(() => true, (req) => {
     seen.push(req.url);
-    return { body: { ret: 0 } };
+    return jsonResponse({ ret: 0 });
   });
   const verify = createWeixinConnector({ net: kit }).hooks!.verifyCredential!;
   await verify({ appid: BOT, token: "tok", base_url: "http://evil.example" });
@@ -729,7 +733,7 @@ test("Sender caps 路由：passiveWindow=false 恒主动通道（新鲜入站消
       records: [],
       mentions: [],
       attachments: [],
-      raw: {},
+      rawJson: "{}",
     });
     const fxh = fakeHost();
     const fake = fakeApi();
@@ -779,12 +783,12 @@ test("conformance harness：声明闸门 / 生命周期 / 原语齐备 / normali
     if (path.endsWith("/getupdates")) {
       // 每次长轮询 20ms 后回空批次（真定时器：既模拟服务端挂起，又让出事件循环）
       await new Promise((r) => setTimeout(r, 20));
-      return { body: { ret: 0, msgs: [] } };
+      return jsonResponse({ ret: 0, msgs: [] });
     }
     if (path.endsWith("/sendmessage")) {
-      return { body: { ret: 0, message_id: 777 } };
+      return jsonResponse({ ret: 0, message_id: 777 });
     }
-    return { body: { ret: 0 } }; // notifystart / notifystop
+    return jsonResponse({ ret: 0 }); // notifystart / notifystop
   });
   const plugin = createWeixinConnector({ net: kit, qr: { pollTimeoutMs: 40 } });
   // 生命周期适配：实例 start() 按宿主纪律阻塞到停服，而 harness 的 `await start()`

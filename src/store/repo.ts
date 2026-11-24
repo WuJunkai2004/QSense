@@ -524,7 +524,7 @@ export class Repo {
         attachments_json:
           m.attachments.length > 0 ? JSON.stringify(m.attachments) : null,
         ark_json: m.ark !== undefined ? JSON.stringify(m.ark) : null,
-        raw_json: JSON.stringify(m.raw),
+        raw_json: m.rawJson,
         direction: m.direction ?? 0,
         msg_idx: m.msgIdx ?? null,
       });

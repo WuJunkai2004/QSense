@@ -33,9 +33,8 @@ export class NetError extends Error {
 }
 
 /** 鸭子判定（跨打包副本 instanceof 不成立——SDK 会被打包多份） */
-export function isNetError(e: unknown): e is NetError {
-  if (!(e instanceof Error)) return false;
-  const k = (e as { kind?: unknown }).kind;
+export function isNetError(e: Error): e is NetError {
+  const k = (e as Partial<NetError>).kind;
   return k === "timeout" || k === "aborted" || k === "network" || k === "http";
 }
 
@@ -75,8 +74,8 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 /** abort 的拒绝原因：外部 reason 若已是 NetError 原样透传，否则归 aborted 档 */
 function abortReason(signal: AbortSignal): NetError {
-  const reason = (signal as { reason?: unknown }).reason;
-  if (isNetError(reason)) return reason;
+  const reason = signal.reason;
+  if (reason instanceof Error && isNetError(reason)) return reason;
   return new NetError("aborted", "aborted");
 }
 
@@ -162,8 +161,12 @@ export interface HttpResponse {
   header(name: string): string | undefined;
   /** 响应体文本 */
   text(): Promise<string>;
-  /** 响应体 JSON（未经 schema——建议用 json() 带 schema 的版本） */
-  json(): Promise<unknown>;
+  /**
+   * 响应体 JSON（schema 参数化——泛型直通：调用点推断具体类型 T；形状违规
+   * 抛 NetError http 档，message 含字段路径、不含数据值）。裸 json 已废除：
+   * 「未经校验的响应体」不允许以弱类型流动。
+   */
+  json<T>(schema: ZodType<T>): Promise<T>;
   /** 原始 Response（multipart / CDN 流式等逃生门） */
   readonly raw: Response;
 }
@@ -202,7 +205,7 @@ export function httpClient(defaults: HttpClientDefaults = {}): HttpClient {
         try {
           return await requestOnce(url, init, baseTimeout, init.signal ?? defaults.signal);
         } catch (e) {
-          const err = toNetError(e);
+          const err = toNetError(e instanceof Error ? e : new Error(String(e)));
           // 仅机械档重试（timeout/network）；aborted 是外部意图、http 是服务端应答
           if (err.kind !== "timeout" && err.kind !== "network") throw err;
           lastErr = err;
@@ -217,9 +220,31 @@ export function httpClient(defaults: HttpClientDefaults = {}): HttpClient {
 }
 
 /**
- * schema 参数化 JSON 请求的公共实现（真 client 与 FakeNetKit 共用）：
- * 非 2xx → NetError http 档；非 JSON → http 档；schema 违规 → http 档 + 字段路径。
+ * 应答体 schema 解析公共实现（requestOnce、jsonVia 与 FakeNetKit 共用）：
+ * 全局 Response.json() 的库返回类型承担「未经校验的原始值」——立即 safeParse
+ * 收口（零字面弱类型；解析产物 = schema 声明的具体类型）。坏 JSON（SyntaxError）
+ * 归 null → schema 拒 → http 档（与形状违规同路：响应内容不可信）。
  */
+export async function parseJsonBody<T>(
+  res: Response,
+  schema: ZodType<T>,
+  status: number,
+): Promise<T> {
+  const parsed = schema.safeParse(await res.json().catch(() => null));
+  if (!parsed.success) {
+    const paths = parsed.error.issues
+      .slice(0, 5)
+      .map((iss) => `${iss.path.join(".") || "(root)"}: ${iss.message}`)
+      .join("; ");
+    throw new NetError(
+      "http",
+      `响应体非 JSON 或不符合 wire schema：${paths}`,
+      status,
+    );
+  }
+  return parsed.data;
+}
+
 export async function jsonVia<T>(
   requester: (url: string, init?: HttpRequestInit) => Promise<HttpResponse>,
   url: string,
@@ -230,21 +255,7 @@ export async function jsonVia<T>(
   if (res.status < 200 || res.status >= 300) {
     throw new NetError("http", `HTTP ${res.status} from ${url}`, res.status);
   }
-  let body: unknown;
-  try {
-    body = await res.json();
-  } catch {
-    throw new NetError("http", `响应体非 JSON（HTTP ${res.status}）`, res.status);
-  }
-  const parsed = schema.safeParse(body);
-  if (!parsed.success) {
-    const paths = parsed.error.issues
-      .slice(0, 5)
-      .map((iss) => `${iss.path.join(".") || "(root)"}: ${iss.message}`)
-      .join("; ");
-    throw new NetError("http", `响应不符合 wire schema：${paths}`, res.status);
-  }
-  return parsed.data;
+  return parseJsonBody(res.raw, schema, res.status);
 }
 
 async function requestOnce(
@@ -274,7 +285,7 @@ async function requestOnce(
       signal: merged.signal,
     });
   } catch (e) {
-    throw toNetError(e);
+    throw toNetError(e instanceof Error ? e : new Error(String(e)));
   } finally {
     clearTimeout(timer);
     external?.removeEventListener("abort", onExternal);
@@ -285,23 +296,20 @@ async function requestOnce(
     status: res.status,
     header: (name) => headers.get(name.toLowerCase()),
     text: () => res.text(),
-    json: () => res.json(),
+    json: <T>(schema: ZodType<T>) => parseJsonBody(res, schema, res.status),
     raw: res,
   };
 }
 
 /** fetch 层错误 → NetError 分档（abort reason 透传：超时挂 timeout 档 NetError） */
-function toNetError(e: unknown): NetError {
+function toNetError(e: Error): NetError {
   if (isNetError(e)) return e;
-  if (e instanceof Error && e.name === "AbortError") {
-    const reason = (e as { cause?: unknown }).cause;
-    if (isNetError(reason)) return reason;
+  if (e.name === "AbortError") {
+    const reason = (e as { cause?: Error }).cause;
+    if (reason instanceof Error && isNetError(reason)) return reason;
     return new NetError("aborted", "aborted");
   }
-  return new NetError(
-    "network",
-    `network error: ${e instanceof Error ? e.message : String(e)}`,
-  );
+  return new NetError("network", `network error: ${e.message}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -408,24 +416,26 @@ export interface LongPollPolicy {
   maxPollMs?: number;
 }
 
-export interface LongPollBatch<C> {
-  items: unknown[];
+export interface LongPollBatch<C, I> {
+  /** 本批条目（平台 wire 类型；I 由 spec.fetch 的返回推断） */
+  items: I[];
   /** 下一游标；undefined=游标不变。驱动在批次全部摄取完成后才持久化（至少一次） */
   next?: C;
   /** 服务端建议挂起时长 ms（如 wx longpolling_timeout_ms）——驱动据此校准空转等待 */
   timeoutHintMs?: number;
 }
 
-export interface LongPollSpec<C> {
+export interface LongPollSpec<C, I> {
   /** 游标生命周期（深度 hook）：读/存/清（清=wx 连败语义，tg 不实现） */
   loadCursor(): Promise<C | null>;
   saveCursor(c: C): Promise<void>;
   resetCursor?(): Promise<void>;
   /** 批次获取：平台协议差异全部收在这一个函数（含挂起时长、在带业务码判定）；null=无游标首拉 */
-  fetch(cursor: C | null, signal: AbortSignal): Promise<LongPollBatch<C>>;
+  fetch(cursor: C | null, signal: AbortSignal): Promise<LongPollBatch<C, I>>;
   /** 逐条摄取（内部调 host.ingest；抛错=批失败，游标不推进——至少一次） */
-  onItem(item: unknown): Promise<void> | void;  /** 平台 fatal 判定（tg 401/409；wx -14/401/403）——命中则驱动上抛，调用方决定停/重启 */
-  isFatal(e: unknown): boolean;
+  onItem(item: I): Promise<void> | void;
+  /** 平台 fatal 判定（tg 401/409；wx -14/401/403）——命中则驱动上抛，调用方决定停/重启 */
+  isFatal(e: Error): boolean;
   /** 状态迁移上报（平台映射 host.reportStatus）：ready=首批成功；
    * degraded=拉取/摄取失败退避中（驱动逐次上报）或 fatal 上抛前 */
   onState?(s: LongPollState): void;
@@ -436,8 +446,8 @@ export interface LongPollSpec<C> {
  * 长轮询驱动。正常路径永不返回（直到 abort）；fatal 时原样上抛。
  * 驱动自有不变量：批全摄完才存游标 / 失败指数退避 / 定时器 unref / abort 即时生效。
  */
-export async function longPoll<C>(
-  spec: LongPollSpec<C>,
+export async function longPoll<C, I>(
+  spec: LongPollSpec<C, I>,
   signal: AbortSignal,
 ): Promise<void> {
   const policy = spec.policy ?? {};
@@ -478,7 +488,8 @@ export async function longPoll<C>(
       }
     } catch (e) {
       if (signal.aborted) return; // abort 即时生效，不算错误
-      if (spec.isFatal(e)) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      if (spec.isFatal(err)) {
         spec.onState?.("degraded");
         throw e;
       }
@@ -522,8 +533,8 @@ export interface NetKit {
   sleep(ms: number, signal?: AbortSignal): Promise<void>;
   /** 统一时钟（测试注入点） */
   now(): number;
-  /** 长轮询驱动（驱动族首成员） */
-  longPoll<C>(spec: LongPollSpec<C>, signal: AbortSignal): Promise<void>;
+  /** 长轮询驱动（驱动族首成员；I = 平台 wire 条目类型，由 spec.fetch 推断） */
+  longPoll<C, I>(spec: LongPollSpec<C, I>, signal: AbortSignal): Promise<void>;
 }
 
 /** 宿主真实 NetKit（生产注入）；测试用 FakeNetKit（net-fake.ts） */

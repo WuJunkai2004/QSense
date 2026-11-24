@@ -15,7 +15,7 @@ import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
 import { makeFakeRuntime } from "./helpers/qq-runtime";
-import { ConnectorRegistry, FakeNetKit } from "@qsense/connector-sdk";
+import { ConnectorRegistry, FakeNetKit, jsonResponse } from "@qsense/connector-sdk";
 import type { ConnectorNet, ProactiveWire, ReplyWire } from "@qsense/connector-sdk";
 import type { ConnectorRuntime } from "../src/connectors/runtime";
 import { createWeixinConnector } from "@qsense/connector-weixin";
@@ -86,7 +86,7 @@ async function setupServer(seedMessages = true): Promise<Fixture> {
         quote: null,
         records: [],
         attachments: [],
-        raw: { id: `M${i}`, echoes: true },
+        rawJson: JSON.stringify({ id: `M${i}`, echoes: true }),
       });
     }
     repo.setGroupSwitch(BOT, GROUP, true);
@@ -759,7 +759,7 @@ test("M10 UI 单聊：type=all 合并会话（名字=users 权威）+ type=chat 
       quote: null,
       records: [],
       attachments: [],
-      raw: {},
+      rawJson: "{}",
     });
     fx.repo.saveMessage({
       botId: BOT,
@@ -774,7 +774,7 @@ test("M10 UI 单聊：type=all 合并会话（名字=users 权威）+ type=chat 
       quote: null,
       records: [],
       attachments: [],
-      raw: {},
+      rawJson: "{}",
     });
 
     // ① 会话列表（type=all 缺省）：单聊条目合并，最后消息作者=users 最新昵称
@@ -889,7 +889,7 @@ async function setupWeixinServer(
     async (req) => {
       const path = new URL(req.url).pathname;
       if (path.endsWith("/get_bot_qrcode")) {
-        return { body: { qrcode: "QR-SECRET-TOKEN", qrcode_img_content: WX_QR_URL } };
+        return jsonResponse({ qrcode: "QR-SECRET-TOKEN", qrcode_img_content: WX_QR_URL });
       }
       if (path.endsWith("/get_qrcode_status")) {
         const next = steps.shift();
@@ -897,9 +897,9 @@ async function setupWeixinServer(
           // 脚本耗尽：永久挂起（模拟服务端长轮询挂起；不占事件循环句柄，不空转）
           return new Promise<never>(() => undefined);
         }
-        return { body: next };
+        return jsonResponse(next);
       }
-      return { body: { ret: 0 } }; // notifystart / notifystop 探活
+      return jsonResponse({ ret: 0 }); // notifystart / notifystop 探活
     },
   );
   plugins.register(createWeixinConnector({ net: wxKit }));

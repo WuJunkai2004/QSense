@@ -106,8 +106,9 @@ test("parser：文本消息 → NormalizedMessage 形状（chat/会话 id/锚/�
   assert.deepEqual(m.attachments, []);
   // 被引锚 = 自己的消息 id：他人引用本条时 core 懒补作者
   assert.equal(m.msgIdx, "7656119901234567890");
-  // context_token 是出站回带凭据：入库前打码
-  assert.equal((m.raw as { context_token: string }).context_token, "<redacted>");
+  // context_token 是出站回带凭据：入库前打码（rawJson 文本读回校验）
+  const rawParsed: { context_token: string } = JSON.parse(m.rawJson);
+  assert.equal(rawParsed.context_token, "<redacted>");
   assert.equal(m.atMe, undefined); // 单聊不标 atMe
   // normalize 产物过契约形状断言
   const inbound = normalizeWeixinInbound(BOT, payloadOf(textMsg()));
@@ -373,11 +374,18 @@ test("parser：非消费面 → null（机器人回声/群消息/已删除/无�
     normalizeWeixinMessage(BOT, payloadOf(textMsg({ message_id: undefined, client_id: undefined }))),
     null,
   );
-  // B⁺ T5：信封形状归声明面 schema 把关（safeParse 失败 = 可观测丢弃 + warn）
+  // B⁺ T5：信封形状归声明面 schema 把关（safeParse 失败 = 可观测丢弃 + warn）。
+  // 非 object / 错平台信封经 JSON.parse 边界进入（模拟动态形状）。
   const plugin = createWeixinConnector();
-  assert.equal(plugin.normalize(BOT, { platform: "qq", data: {} }), null);
-  assert.equal(plugin.normalize(BOT, null), null);
-  assert.equal(plugin.normalize(BOT, { platform: "weixin", message: "x" }), null);
+  assert.equal(
+    plugin.normalize(BOT, JSON.parse('{"platform":"qq","data":{}}')),
+    null,
+  );
+  assert.equal(plugin.normalize(BOT, JSON.parse("null")), null);
+  assert.equal(
+    plugin.normalize(BOT, JSON.parse('{"platform":"weixin","message":"x"}')),
+    null,
+  );
   // 数字 id（未经无损解析的载荷）：schema 违规，边界拒绝（传输层 parseWeixinJson 保证线上恒字符串）
   assert.equal(
     plugin.normalize(

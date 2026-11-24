@@ -52,6 +52,23 @@ export const MentionSchema = z.looseObject({
 });
 export type NormalizedMention = z.infer<typeof MentionSchema>;
 
+/**
+ * 平台结构化卡片（ark）契约（QQ 真机采样锚定，2026-11-24；其他平台可省此字段）。
+ * core 只存储（ark_json 列）与回显，永不解读字段语义；ark_type 词表随平台/版本
+ * 扩充（现观测 miniapp 小程序卡片）。
+ */
+export const ArkCardSchema = z.looseObject({
+  /** 卡片展示名（如 "小程序"） */
+  ark_name: z.string(),
+  /** 卡片类型词（如 "miniapp"） */
+  ark_type: z.string(),
+  /** 卡片字段键值（preview/source/source_logo/title 等；值域文本） */
+  fields: z.record(z.string(), z.string()),
+  /** 渲染提示文本（如 "[QQ小程序]标题"） */
+  prompt: z.string(),
+});
+export type ArkCard = z.infer<typeof ArkCardSchema>;
+
 /** 引用对象（quote 本体）：落库为 quote_json，读取端零解析零比对 */
 const QuoteBodySchema = z.looseObject({
   /** 平台引用锚点（如 QQ msg_idx 令牌 / Telegram 被引 message_id 字符串） */
@@ -120,8 +137,11 @@ export const UnifiedMessageSchema = z.looseObject({
   records: z.array(RecordSchema).default([]),
   mentions: z.array(MentionSchema).default([]),
   attachments: z.array(AttachmentSchema).default([]),
-  /** ark 结构化卡片原始对象（QQ 语义；其他平台可省）——合法不透明边界 */
-  ark: z.unknown().optional(),
+  /**
+   * 平台结构化卡片（ark，QQ 语义；其他平台可省）——形状契约见 ArkCardSchema
+   * （真机采样锚定）。core 只存储/回显不解读字段语义。
+   */
+  ark: ArkCardSchema.optional(),
   /** 平台引用令牌（他人引用本消息时的锚；缺失时 undefined） */
   msgIdx: z.string().optional(),
   /**
@@ -131,11 +151,13 @@ export const UnifiedMessageSchema = z.looseObject({
    * 「true 或 未知且含任意 @」从宽兜底——不漏叫醒优先。三态神圣不可 default。
    */
   atMe: z.boolean().optional(),
-  /** 平台事件原始载荷（受 LOG_CONTENT 约束，仅入库不进日志）——必须是对象（合法不透明边界） */
-  raw: z.custom<unknown>(
-    (v) => v !== null && typeof v === "object" && !Array.isArray(v),
-    "raw：必须是平台原始载荷对象",
-  ),
+  /**
+   * 平台事件原始载荷（受 LOG_CONTENT 约束，仅入库不进日志）——JSON 文本
+   * （B⁺ T6 字符串化：序列化点显式在插件侧 JSON.stringify，与 StatePort 同哲学）。
+   * core 只存 raw_json 列与迁移重演，需要读回时 parseJsonWith+平台 wire schema
+   * 解析（形状归插件 *.types.ts）。
+   */
+  rawJson: z.string().min(2),
   /** 本机外发标记：1=发送成功后本地补记（省略=网关接收） */
   direction: z.union([z.literal(0), z.literal(1)]).optional(),
 });
@@ -185,20 +207,20 @@ export function formatZodIssues(error: z.ZodError, label = "message"): string {
   return `${label}：${parts.join("; ")}${more}`;
 }
 
-/** 单条消息形状断言（NormalizedMessage 契约） */
-export function assertNormalizedMessage(m: unknown, label = "message"): void {
+/** 单条消息形状断言（NormalizedMessage 契约；违契即抛） */
+export function assertNormalizedMessage(m: NormalizedMessage, label = "message"): void {
   const r = UnifiedMessageSchema.safeParse(m);
   if (!r.success) throw new Error(formatZodIssues(r.error, label));
 }
 
-/** 单条效应形状断言（InboundEffect 契约） */
-export function assertInboundEffect(fx: unknown, label = "effect"): void {
+/** 单条效应形状断言（InboundEffect 契约；违契即抛） */
+export function assertInboundEffect(fx: InboundEffect, label = "effect"): void {
   const r = InboundEffectSchema.safeParse(fx);
   if (!r.success) throw new Error(formatZodIssues(r.error, label));
 }
 
 /** normalize 产物形状断言（NormalizedInbound 契约） */
-export function assertNormalizedInbound(inbound: unknown): void {
+export function assertNormalizedInbound(inbound: NormalizedInbound): void {
   const r = UnifiedInboundSchema.safeParse(inbound);
   if (!r.success) throw new Error(formatZodIssues(r.error, "normalize 产物"));
 }

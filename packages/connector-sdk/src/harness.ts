@@ -13,6 +13,7 @@ import type {
   ConnectorLogger,
   ConnectorPlugin,
   PluginContext,
+  RawEnvelope,
 } from "./types";
 
 export interface ConformanceCheck {
@@ -27,7 +28,7 @@ export interface ConformanceReport {
   checks: ConformanceCheck[];
 }
 
-export interface HarnessOptions {
+export interface HarnessOptions<S extends RawEnvelope = RawEnvelope> {
   /** 缺省合成 { botId: "bot-conformance", platform: plugin.id, credential: {} } */
   creds?: BotCreds;
   log?: ConnectorLogger;
@@ -43,24 +44,25 @@ export interface HarnessOptions {
    */
   net?: NetKit;
   /**
-   * normalize 形状探针样本（契约 v2）：一份有代表性的真实载荷（如群文本消息）。
-   * 提供后 harness 跑 normalize-shape 检查——normalize 产物过 assertNormalizedInbound
-   * 形状断言（消息必填字段/词表/结构列形状）。connector 仓 CI 必须提供样本。
+   * normalize 形状探针样本（契约 v2）：一份有代表性的真实载荷信封。泛型 S =
+   * 连接器自有信封类型（须携带 platform 键——RawEnvelope 契约）；提供后 harness
+   * 跑 normalize-shape 检查——normalize 产物过 assertNormalizedInbound 形状断言。
+   * connector 仓 CI 必须提供样本。
    */
-  normalizeSample?: unknown;
+  normalizeSample?: S;
 }
 
-function fail(checks: ConformanceCheck[], name: string, e: unknown): void {
+function fail(checks: ConformanceCheck[], name: string, e: Error): void {
   checks.push({
     name,
     ok: false,
-    detail: e instanceof Error ? e.message : String(e),
+    detail: e.message,
   });
 }
 
-export async function runConformance(
+export async function runConformance<S extends RawEnvelope>(
   plugin: ConnectorPlugin,
-  opts: HarnessOptions = {},
+  opts: HarnessOptions<S> = {},
 ): Promise<ConformanceReport> {
   const checks: ConformanceCheck[] = [];
   const creds: BotCreds =
@@ -75,7 +77,7 @@ export async function runConformance(
     validatePlugin(plugin);
     checks.push({ name: "declaration-gates", ok: true });
   } catch (e) {
-    fail(checks, "declaration-gates", e);
+    fail(checks, "declaration-gates", e instanceof Error ? e : new Error(String(e)));
   }
 
   // 2. 生命周期：create → start → stop → 重建实例再走一遍（宿主重启语义）
@@ -89,20 +91,23 @@ export async function runConformance(
     i2.stop();
     checks.push({ name: "lifecycle", ok: true });
   } catch (e) {
-    fail(checks, "lifecycle", e);
+    fail(checks, "lifecycle", e instanceof Error ? e : new Error(String(e)));
   }
 
-  // 3. 宿主环境自证：StatePort roundtrip（验证 harness 提供的 host 实现正确）
+  // 3. 宿主环境自证：StatePort roundtrip（JSON 文本值域；验证 harness 提供的 host 实现正确）
   try {
     const h = createMemoryHost();
-    await h.state.set("k", { v: 1 });
-    const got = await h.state.get<{ v: number }>("k");
-    if (got === null || got.v !== 1) throw new Error("state roundtrip 值不符");
+    await h.state.set("k", JSON.stringify({ v: 1 }));
+    const raw = await h.state.get("k");
+    const got = raw === null ? null : JSON.parse(raw);
+    if (got === null || (got as { v?: number }).v !== 1) {
+      throw new Error("state roundtrip 值不符");
+    }
     await h.state.delete("k");
     if ((await h.state.get("k")) !== null) throw new Error("state delete 未生效");
     checks.push({ name: "host-state-roundtrip", ok: true });
   } catch (e) {
-    fail(checks, "host-state-roundtrip", e);
+    fail(checks, "host-state-roundtrip", e instanceof Error ? e : new Error(String(e)));
   }
 
   // 4. 网络原语与 caps 声明一致：
@@ -130,7 +135,7 @@ export async function runConformance(
     }
     checks.push({ name: "net-primitives", ok: true });
   } catch (e) {
-    fail(checks, "net-primitives", e);
+    fail(checks, "net-primitives", e instanceof Error ? e : new Error(String(e)));
   }
 
   // 5. normalize 形状探针（契约 v2；样本由 connector 仓 CI 提供）
@@ -146,7 +151,7 @@ export async function runConformance(
         ...(inbound === null ? { detail: "样本未产出消息（null）" } : {}),
       });
     } catch (e) {
-      fail(checks, "normalize-shape", e);
+      fail(checks, "normalize-shape", e instanceof Error ? e : new Error(String(e)));
     }
   }
 
@@ -163,7 +168,7 @@ export async function runConformance(
       }
       checks.push({ name: "probe", ok: true });
     } catch (e) {
-      fail(checks, "probe", e);
+      fail(checks, "probe", e instanceof Error ? e : new Error(String(e)));
     }
   }
 

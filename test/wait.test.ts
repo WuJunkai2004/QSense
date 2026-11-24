@@ -58,7 +58,7 @@ function publishOf(hub: WaitHub, repo: Repo) {
       })),
       ...(opts.atMe !== undefined ? { atMe: opts.atMe } : {}),
       attachments: [],
-      raw: {},
+      rawJson: "{}",
     });
     hub.publish({
       botId: APPID,

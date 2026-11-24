@@ -8,7 +8,6 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   FakeNetKit,
-  type FakeReply,
   type HttpClient,
 } from "@qsense/connector-sdk";
 import {
@@ -57,7 +56,7 @@ function jpegBytes(): Buffer {
   return Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(40, 7)]);
 }
 
-type FetchHandler = (url: string, req: { method: string; headers: Record<string, string>; body?: string | Uint8Array | FormData }) => FakeReply | Error;
+type FetchHandler = (url: string, req: { method: string; headers: Record<string, string>; body?: string | Uint8Array | FormData }) => Response | Error;
 
 /** 假 CDN 传输（FakeNetKit 全路由捕获）：记录调用，按处理器应答 */
 function fakeHttp(handler: FetchHandler): { http: HttpClient; kit: FakeNetKit } {
@@ -159,7 +158,7 @@ test("CDN 上传：getuploadurl 入参 → 密文直传 full_url → 回执下�
     // 密文用 getuploadurl 上送的那把随机 key 可解回明文
     const aesKey = Buffer.from(String(api.uploadReqs[0]!.aeskey), "hex");
     assert.deepEqual(decryptAesEcb(body, aesKey), plain);
-    return { headers: { "x-encrypted-param": "DL-PARAM" } };
+    return new Response(undefined, { headers: { "x-encrypted-param": "DL-PARAM" } });
   });
   const r = await uploadMediaToCdn({
     api,
@@ -199,7 +198,7 @@ test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错�
       true,
     );
     assert.equal(req.method, "POST");
-    return { headers: { "x-encrypted-param": "DL" } };
+    return new Response(undefined, { headers: { "x-encrypted-param": "DL" } });
   });
   const fallback = await uploadMediaToCdn({
     api: fakeApi(async () => ({ upload_param: "UP PARAM" })),
@@ -219,15 +218,12 @@ test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错�
         toUserId: "u",
         mediaType: UploadMediaType.FILE,
         cdnBaseUrl: CDN,
-        http: fakeHttp(() => ({ status: 200 })).http,
+        http: fakeHttp(() => new Response(undefined, { status: 200 })).http,
       }),
     /上传地址/,
   );
   // 4xx：立即失败，仅 1 次请求
-  const f4 = fakeHttp(() => ({
-    status: 400,
-    headers: { "x-error-message": "bad key" },
-  }));
+  const f4 = fakeHttp(() => new Response(undefined, { status: 400, headers: { "x-error-message": "bad key" } }));
   await assert.rejects(
     () =>
       uploadMediaToCdn({
@@ -246,8 +242,8 @@ test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错�
   const f5 = fakeHttp(() => {
     n += 1;
     return n < 3
-      ? { status: 502 }
-      : { status: 200, headers: { "x-encrypted-param": "OK" } };
+      ? new Response(undefined, { status: 502 })
+      : new Response(undefined, { status: 200, headers: { "x-encrypted-param": "OK" } });
   });
   const ok = await uploadMediaToCdn({
     api: fakeApi(),
@@ -261,9 +257,9 @@ test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错�
   assert.equal(f5.kit.requests.length, 3);
   // 恒 5xx / 网络异常 / 缺回执头：3 次后失败
   for (const handler of [
-    () => ({ status: 500 }),
+    () => new Response(undefined, { status: 500 }),
     () => new Error("network down"),
-    () => ({ status: 200 }),
+    () => new Response(undefined, { status: 200 }),
   ] as FetchHandler[]) {
     const fx = fakeHttp(handler);
     await assert.rejects(() =>
@@ -287,9 +283,9 @@ test("CDN 下载：full_url 优先 / 回退拼接 / 解密 / 错钥与 HTTP 错�
   const enc = encryptAesEcb(plain, KEY);
   const keyB64 = KEY.toString("base64");
   const f = fakeHttp((url) => {
-    if (url === "https://cdn.example/full?x=1") return { body: enc };
-    if (url === cdnDownloadUrl("P 1", CDN)) return { body: enc };
-    return { status: 500 };
+    if (url === "https://cdn.example/full?x=1") return new Response(enc);
+    if (url === cdnDownloadUrl("P 1", CDN)) return new Response(enc);
+    return new Response(undefined, { status: 500 });
   });
   const full = await downloadAndDecrypt({
     media: { full_url: "https://cdn.example/full?x=1", encrypt_query_param: "P 1" },
@@ -481,8 +477,8 @@ function cdnKit(plainOf: (param: string) => Buffer | null): { http: HttpClient; 
   return fakeHttp((url) => {
     const param = new URL(url).searchParams.get("encrypted_query_param") ?? "";
     const plain = plainOf(param);
-    if (plain === null) return { status: 500 };
-    return { body: new Uint8Array(encryptAesEcb(plain, KEY)) };
+    if (plain === null) return new Response(undefined, { status: 500 });
+    return new Response(new Uint8Array(encryptAesEcb(plain, KEY)));
   });
 }
 

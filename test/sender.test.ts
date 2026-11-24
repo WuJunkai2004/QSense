@@ -215,7 +215,7 @@ function seedInbound(repo: Repo, msgId: string, ageMs = 0): void {
     quote: null,
     records: [],
     attachments: [],
-    raw: {},
+    rawJson: "{}",
   });
 }
 
@@ -541,12 +541,18 @@ test("M4-9 304023 → pending_audit；MESSAGE_AUDIT_PASS 事件回填 audit_pass
       .prepare("SELECT status FROM sends WHERE kind='proactive'")
       .get() as { status: string };
     assert.equal(row.status, "pending_audit");
-    // 审核通过事件（契约 v2：信封 → 插件 normalize 效应 → repo 回填）
-    const inbound = normalizeQqEnvelope(BOT, {
-      platform: "qq",
-      type: "MESSAGE_AUDIT_PASS",
-      data: { group_openid: GROUP },
-    });
+    // 审核通过事件（契约 v2：信封 → 插件 normalize 效应 → repo 回填；
+    // 完整信封形状经 JSON.parse 边界进入——normalize 内 wire schema 把关）
+    const inbound = normalizeQqEnvelope(
+      BOT,
+      JSON.parse(
+        JSON.stringify({
+          platform: "qq",
+          type: "MESSAGE_AUDIT_PASS",
+          data: { group_openid: GROUP },
+        }),
+      ),
+    );
     assert.ok(inbound !== null);
     fx.repo.applyAuditResult(
       BOT,
@@ -726,7 +732,7 @@ test("M4-12 经 runTool/插件路由：额度耗尽报配额不足、快照进 q
     const payload: ToolPayload = await callPluginTool(
       route!.plugin!,
       "quota",
-      {},
+      undefined,
       {
         host: qq.host,
         botId: BOT,
@@ -1039,7 +1045,7 @@ function seedC2cInbound(repo: Repo, msgId: string, ageMs = 0): void {
     quote: null,
     records: [],
     attachments: [],
-    raw: {},
+    rawJson: "{}",
   });
 }
 

@@ -204,7 +204,9 @@ export function createMcpHandler(
             const payload = await callPluginTool(
               route.plugin,
               name,
-              args,
+              // MCP arguments（JSON 对象）→ JSON 文本跨界：argsSchema 解析在
+              // pluginTool 工厂闭包内完成（core 不经手具体 args 类型）
+              JSON.stringify(args ?? {}),
               { host: pctx.host, botId: session.botId, config: pctx.config },
             );
             result = {

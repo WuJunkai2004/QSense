@@ -172,7 +172,7 @@ export class MockGateway {
     }
   }
 
-  private send(ws: WebSocket, payload: object): void {
+  private send(ws: WebSocket, payload: Payload): void {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
   }
 }

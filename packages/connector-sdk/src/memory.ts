@@ -7,22 +7,23 @@ import type {
   ConnectorLogger,
   ConnectorStatus,
   PluginContext,
+  RawEnvelope,
   RawInbound,
   StatePort,
 } from "./types";
 
 export class MemoryStatePort implements StatePort {
-  private readonly map = new Map<string, unknown>();
+  /** 值 = JSON 文本（StatePort B⁺ T6 字符串化契约） */
+  private readonly map = new Map<string, string>();
 
-  async get<T = unknown>(key: string): Promise<T | null> {
+  async get(key: string): Promise<string | null> {
     const v = this.map.get(key);
-    return v === undefined ? null : (v as T);
+    return v === undefined ? null : v;
   }
 
-  async set(key: string, value: unknown): Promise<void> {
-    // 模拟宿主持久化纪律：只收 JSON 可序列化值
-    const safe = value === undefined ? null : value;
-    this.map.set(key, JSON.parse(JSON.stringify(safe)) as unknown);
+  async set(key: string, value: string): Promise<void> {
+    // 模拟宿主持持久化纪律：只收 JSON 文本（坏文本在消费方 schema 解析时暴露）
+    this.map.set(key, value);
   }
 
   async delete(key: string): Promise<void> {
@@ -71,7 +72,7 @@ export function createMemoryHost(opts?: {
   const host: PluginContext = {
     log,
     state,
-    ingest(e: RawInbound): void {
+    ingest<P extends RawEnvelope>(e: RawInbound<P>): void {
       ingested.push({
         ...e,
         botId: e.botId ?? opts?.botId ?? "bot-memory",

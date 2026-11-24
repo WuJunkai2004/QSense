@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConnectorRegistry, FakeNetKit } from "@qsense/connector-sdk";
+import { ConnectorRegistry, FakeNetKit, jsonResponse } from "@qsense/connector-sdk";
 import { createQqConnector } from "@qsense/connector-qq";
 import {
   ConnectorRuntime,
@@ -85,7 +85,7 @@ async function setup(
   let clearCount = 0;
   // /gateway 控制请求脚本化（原 getGatewayUrl 测试缝的形态收口）：网关地址指向本地 mock
   const kit = new FakeNetKit();
-  kit.on("https://api.bot.qq.com/gateway", () => ({ body: { url: gw.url } }));
+  kit.on("https://api.bot.qq.com/gateway", () => jsonResponse({ url: gw.url }));
   const plugins = new ConnectorRegistry();
   plugins.register(
     createQqConnector({
@@ -206,7 +206,10 @@ test("M1-3 dispatch 事件上行 + 同 id 重复事件去重", async () => {
     );
     assert.equal(flatMsgs(ctx.captured).length, 1);
     assert.equal(flatMsgs(ctx.captured)[0]!.botId, "10001");
-    assert.deepEqual(flatMsgs(ctx.captured)[0]!.raw, msg);
+    // rawJson 是平台事件体的 JSON 文本（键序不敏感，语义比较）
+    const rawOfM1: { id: string; content: string; group_openid: string; author: { member_openid: string } } =
+      JSON.parse(flatMsgs(ctx.captured)[0]!.rawJson);
+    assert.deepEqual(rawOfM1, msg);
 
     // 官方重复推送同一消息 id → 去重器丢弃
     ctx.gw.sendDispatch("GROUP_MESSAGE_CREATE", { ...msg });
@@ -254,7 +257,10 @@ test("M1-4 断线 → RESUME 按序补发遗漏事件，不丢不重；心跳续
     assert.equal(r.seq, 2, "RESUME seq 应为最后收到的 s（READY s=1 + m1 s=2）");
 
     await waitFor(() => flatMsgs(ctx.captured).length === 3, "补发到位");
-    const ids = flatMsgs(ctx.captured).map((m) => (m.raw as { id: string }).id);
+    const ids = flatMsgs(ctx.captured).map((m) => {
+      const parsed: { id: string } = JSON.parse(m.rawJson);
+      return parsed.id;
+    });
     assert.deepEqual(ids, ["m1", "m2", "m3"]);
 
     // 补发后 RESUMED s=5，心跳应携带新 s
@@ -309,7 +315,7 @@ test("M1-7 进程重启（新连接实例 + 同一 kv）→ 直接 RESUME 恢复
     // 模拟重启：同一 mock（持有 sess-1）+ 同一 kv，新运行时实例
     const statuses2: GatewayStatus[] = [];
     const kit2 = new FakeNetKit();
-    kit2.on("https://api.bot.qq.com/gateway", () => ({ body: { url: ctx.gw.url } }));
+    kit2.on("https://api.bot.qq.com/gateway", () => jsonResponse({ url: ctx.gw.url }));
     const plugins2 = new ConnectorRegistry();
     plugins2.register(
       createQqConnector({

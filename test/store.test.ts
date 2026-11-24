@@ -179,7 +179,7 @@ test("v9 游标重定基：指向已不存在 rowid 空间的旧水位收敛到�
       attachments: [],
       records: [],
       quote: null,
-      raw: {},
+      rawJson: "{}",
       ts: Date.now(),
     };
     // 造三个会话：群 A（max=101）、群 B（max=202）、单聊（max=303）
@@ -411,7 +411,7 @@ test("sessions 注册表：ingest 即登记；detectSessionKind 注册表先行�
       attachments: [],
       records: [],
       quote: null,
-      raw: {},
+      rawJson: "{}",
       ts: Date.now(),
     };
     repo.saveMessage({
@@ -460,7 +460,7 @@ test("users 身份权威：QQ 昵称 last-write-wins；群/私聊消息合一入
       attachments: [],
       records: [],
       quote: null,
-      raw: {},
+      rawJson: "{}",
       ts: Date.now(),
     };
 

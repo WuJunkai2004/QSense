@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { z } from "zod";
 import {
   BASE_TOOL_NAMES,
   ConnectorError,
@@ -54,16 +55,18 @@ function makePlugin(over: Partial<ConnectorPlugin> = {}): ConnectorPlugin {
       proactiveOptIn: true,
     },
     normalize: (botId, payload) => {
-      // 最小 normalize：识别测试信封 {kind:"msg", id, scope…} → 成品消息
-      const p = payload as { kind?: string; id?: string };
-      if (p?.kind !== "msg") return null;
+      // 最小 normalize：zod 解析测试信封 {platform, kind:"msg", id} → 成品消息
+      const p = z
+        .object({ kind: z.string().optional(), id: z.string().optional() })
+        .safeParse(payload);
+      if (!p.success || p.data.kind !== "msg") return null;
       return {
         messages: [
           {
             botId,
             scope: "group",
             scopeId: "g-1",
-            msgId: p.id ?? "m-1",
+            msgId: p.data.id ?? "m-1",
             authorOpenid: "u-1",
             ts: null,
             text: "",
@@ -72,7 +75,7 @@ function makePlugin(over: Partial<ConnectorPlugin> = {}): ConnectorPlugin {
             records: [],
             mentions: [],
             attachments: [],
-            raw: payload,
+            rawJson: JSON.stringify(payload),
           },
         ],
         effects: [{ kind: "group-seen", scopeId: "g-1" }],
@@ -85,7 +88,7 @@ function makePlugin(over: Partial<ConnectorPlugin> = {}): ConnectorPlugin {
         name: "quota",
         description: "查询主动发送额度",
         inputSchema: { type: "object", properties: {} },
-        handler: async () => ({
+        call: async () => ({
           content: [{ type: "text", text: "quota ok" }],
         }),
       },
@@ -99,10 +102,10 @@ function makePlugin(over: Partial<ConnectorPlugin> = {}): ConnectorPlugin {
     },
     create: (host, creds) => ({
       start: async () => {
-        await host.state.set("boot", { bot: creds.botId });
+        await host.state.set("boot", JSON.stringify({ bot: creds.botId }));
         host.ingest({
           botId: creds.botId,
-          payload: { kind: "hello" },
+          payload: { platform: "qq", kind: "hello" },
           receivedAt: 1,
         });
       },
@@ -174,7 +177,7 @@ describe("sdk/gates", () => {
           name: "list_all",
           description: "x",
           inputSchema: { type: "object" },
-          handler: async () => ({
+          call: async () => ({
             content: [{ type: "text", text: "" }],
           }),
         },
@@ -191,7 +194,7 @@ describe("sdk/gates", () => {
           name: "t1",
           description: "d",
           inputSchema: { type: "string" },
-          handler: async () => ({ content: [{ type: "text", text: "" }] }),
+          call: async () => ({ content: [{ type: "text", text: "" }] }),
         },
       ],
     });
@@ -203,7 +206,7 @@ describe("sdk/gates", () => {
           name: "t2",
           description: "d",
           inputSchema: { type: "object", required: ["ghost"] },
-          handler: async () => ({ content: [{ type: "text", text: "" }] }),
+          call: async () => ({ content: [{ type: "text", text: "" }] }),
         },
       ],
     });
@@ -211,7 +214,10 @@ describe("sdk/gates", () => {
   });
 
   it("credentialSchema 与 credentialSecrets 一致性", () => {
-    const schema = { type: "object", properties: { appid: { type: "string" } } };
+    const schema: JsonSchema = {
+      type: "object",
+      properties: { appid: { type: "string" } },
+    };
     assert.throws(
       () => validateCredentialSchema(schema, ["AppSecret"]),
       /AppSecret/,
@@ -223,7 +229,7 @@ describe("sdk/gates", () => {
 
   it("webui 路由：path 规范 + 插件内唯一", () => {
     const mk = (path: string) => [
-      { method: "POST" as const, path, handler: async () => ({}) },
+      { method: "POST" as const, path, handle: async () => ({}) },
     ];
     assert.throws(() => validateWebuiRoutes(mk("no-slash")), GateError);
     assert.throws(
@@ -241,8 +247,8 @@ describe("sdk/gates", () => {
     const ok = makePlugin({
       login: { kind: "qr-pair", create: "/qr/create", poll: "/qr/poll" },
       webui: [
-        { method: "POST", path: "/qr/create", handler: async () => ({}) },
-        { method: "POST", path: "/qr/poll", handler: async () => ({}) },
+        { method: "POST", path: "/qr/create", handle: async () => ({}) },
+        { method: "POST", path: "/qr/poll", handle: async () => ({}) },
       ],
     });
     assert.doesNotThrow(() => validatePlugin(ok));
@@ -300,11 +306,11 @@ describe("sdk/router", () => {
     const { host } = createMemoryHost();
     const ctx = { host, botId: "b1", config: {} };
 
-    const okp = await callPluginTool(plugin, "quota", {}, ctx);
+    const okp = await callPluginTool(plugin, "quota", undefined, ctx);
     assert.equal(okp.isError, undefined);
     assert.equal(okp.content[0]?.text, "quota ok");
 
-    const miss = await callPluginTool(plugin, "ghost", {}, ctx);
+    const miss = await callPluginTool(plugin, "ghost", undefined, ctx);
     assert.equal(miss.isError, true);
 
     const bad = makePlugin({
@@ -313,13 +319,13 @@ describe("sdk/router", () => {
           name: "boom",
           description: "d",
           inputSchema: { type: "object" },
-          handler: async () => {
+          call: async () => {
             throw new ConnectorError("上游超时", 502);
           },
         },
       ],
     });
-    const err = await callPluginTool(bad, "boom", {}, ctx);
+    const err = await callPluginTool(bad, "boom", undefined, ctx);
     assert.equal(err.isError, true);
     assert.equal(err.content[0]?.text, "上游超时");
   });
@@ -449,12 +455,15 @@ describe("sdk/registry", () => {
 describe("sdk/memory+harness", () => {
   it("memory host：ingest 顺序记录 + state roundtrip", async () => {
     const h = createMemoryHost({ botId: "b1" });
-    h.host.ingest({ botId: "b1", payload: { n: 1 } });
-    h.host.ingest({ botId: "b1", payload: { n: 2 } });
+    h.host.ingest({ botId: "b1", payload: { platform: "t", n: 1 } });
+    h.host.ingest({ botId: "b1", payload: { platform: "t", n: 2 } });
     assert.equal(h.ingested.length, 2);
-    assert.deepEqual(h.ingested[1]?.payload, { n: 2 });
-    await h.state.set("s", { a: [1, 2] });
-    assert.deepEqual(await h.state.get("s"), { a: [1, 2] });
+    assert.deepEqual(h.ingested[1]?.payload, { platform: "t", n: 2 });
+    // StatePort 值 = JSON 文本（B⁺ T6 字符串化）
+    await h.state.set("s", JSON.stringify({ a: [1, 2] }));
+    assert.deepEqual(JSON.parse((await h.state.get("s")) ?? "null"), {
+      a: [1, 2],
+    });
     await h.state.delete("s");
     assert.equal(await h.state.get("s"), null);
   });
@@ -463,7 +472,7 @@ describe("sdk/memory+harness", () => {
     const report = await runConformance(makePlugin(), {
       probe: async (host, instance) => {
         // 经实例 start 注入的 hello 载荷由 probe 里重新驱动验证上行通道：
-        host.ingest({ botId: "bot-conformance", payload: { kind: "probe" } });
+        host.ingest({ botId: "bot-conformance", payload: { platform: "qq", kind: "probe" } });
         const receipt = await instance.net.reply?.({
           botId: "bot-conformance",
           target: "g-x",
@@ -499,7 +508,7 @@ describe("sdk/memory+harness", () => {
   it("harness：normalize-shape——样本产出成品消息过形状断言；坏形状判失败", async () => {
     // 合法样本：normalize 产物符合契约 → 检查通过
     const ok = await runConformance(makePlugin(), {
-      normalizeSample: { kind: "msg", id: "m-9" },
+      normalizeSample: { platform: "qq", kind: "msg", id: "m-9" },
     });
     const okCheck = ok.checks.find((c) => c.name === "normalize-shape");
     assert.equal(okCheck?.ok, true);
@@ -513,7 +522,7 @@ describe("sdk/memory+harness", () => {
       },
     });
     const bad = await runConformance(badShape, {
-      normalizeSample: { kind: "msg", id: "m-9" },
+      normalizeSample: { platform: "qq", kind: "msg", id: "m-9" },
     });
     assert.equal(bad.passed, false);
     assert.match(
@@ -527,7 +536,7 @@ describe("sdk/memory+harness", () => {
         effects: [{ kind: "mystery", scopeId: "g" } as never],
       }),
     });
-    const bfx = await runConformance(badFx, { normalizeSample: {} });
+    const bfx = await runConformance(badFx, { normalizeSample: { platform: "qq" } });
     assert.equal(bfx.passed, false);
     assert.match(
       bfx.checks.find((c) => c.name === "normalize-shape")?.detail ?? "",
@@ -550,7 +559,7 @@ describe("sdk/memory+harness", () => {
       tools: [],
       create: (host, creds) => ({
         start: async () => {
-          await host.state.set("boot", { bot: creds.botId });
+          await host.state.set("boot", JSON.stringify({ bot: creds.botId }));
         },
         stop: () => undefined,
         net: {

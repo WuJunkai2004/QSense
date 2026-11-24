@@ -42,6 +42,7 @@ function classifyLine(line: string): {
   any: boolean;
   unknown: boolean;
   megaDict: boolean;
+  weakObject: boolean;
   asAssert: boolean;
 } {
   const code = stripComment(line);
@@ -53,6 +54,13 @@ function classifyLine(line: string): {
       /\bJsonValue\b/.test(code) ||
       /Record<\s*string\s*,\s*(?:unknown|any|never)\s*>/.test(code) ||
       /\[\s*key:\s*string\s*\]\??\s*:\s*(?:unknown|any)\b/.test(code),
+    // object 也是万能代指（2026-11-24 追加）：`: object` / `<object>` / `as object` /
+    // `object[]` / `Promise<object>` 一律违禁——具体形状用接口/联合/泛型表达
+    weakObject:
+      /:\s*object\b/.test(code) ||
+      /<object>/.test(code) ||
+      /\bas\s+object\b/.test(code) ||
+      /object\[\]/.test(code),
     asAssert: /\bas\s+(?:const\b)/.test(code)
       ? false
       : /\bas\s+(?:[A-Z]\w*|string|number|boolean|bigint|symbol|object|null|undefined)\b/.test(code),
@@ -102,6 +110,7 @@ function main(): void {
   const anyStat: KindStat = { name: "any", total: 0, hits: [] };
   const unknownRaw: KindStat = { name: "unknown", total: 0, hits: [] };
   const megaDict: KindStat = { name: "mega-dict", total: 0, hits: [] };
+  const weakObject: KindStat = { name: "weak-object", total: 0, hits: [] };
   const asStat: KindStat = { name: "as-assert", total: 0, hits: [] };
 
   for (const file of files) {
@@ -121,6 +130,10 @@ function main(): void {
       if (cls.megaDict) {
         megaDict.total++;
         megaDict.hits.push(hit);
+      }
+      if (cls.weakObject) {
+        weakObject.total++;
+        weakObject.hits.push(hit);
       }
       if (cls.asAssert) {
         asStat.total++;
@@ -143,6 +156,7 @@ function main(): void {
           any: anyStat.total,
           unknownTotal: unknownRaw.total,
           megaDict: megaDict.total,
+          weakObject: weakObject.total,
           asAssert: asStat.total,
         },
         null,
@@ -157,11 +171,13 @@ function main(): void {
   console.log(`any：${anyStat.total}（目标恒 0）`);
   console.log(`unknown：${unknownRaw.total}（零容忍——必须按实际读取字段定义具体 interface）`);
   console.log(`万能字典：${megaDict.total}（JsonValue/Record<string,unknown|any> 违禁，目标 0）`);
+  console.log(`object 弱类型：${weakObject.total}（object 万能代指违禁，目标 0）`);
   console.log(`as 盲断言：${asStat.total}（目标 0，白名单见 todo.md）`);
   for (const [label, stat] of [
     ["any", anyStat],
     ["unknown", unknownRaw],
     ["万能字典", megaDict],
+    ["object 弱类型", weakObject],
     ["as 盲断言", asStat],
   ] as const) {
     if (stat.total === 0) continue;

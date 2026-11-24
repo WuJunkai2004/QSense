@@ -3,6 +3,7 @@
 // P2：loadModule(spec) 动态 import 分仓包默认导出 → validatePlugin → register。
 
 import { validatePlugin } from "./gates";
+import { z } from "zod";
 import {
   type BotCreds,
   type ConnectorInstance,
@@ -70,32 +71,40 @@ export class ConnectorRegistry {
  * P2 分仓加载：动态 import 插件包默认导出 → （工厂则注入 init 执行）→
  * validatePlugin（含 sdkRange 校验）→ 返回声明面。
  * 加载失败 / 非法声明 / sdkRange 不兼容都以可操作错误抛出。
+ *
+ * B⁺ T6：动态 import 边界的不可信形状用 zod custom 收口（函数/对象二值判定，
+ * 深层校验仍归 validatePlugin 的运行时防线）——加载产物进入本包后即有具体类型。
  */
+const PluginDefaultSchema = z.custom<ConnectorPlugin | ConnectorPluginFactory>(
+  (v) => v !== null && (typeof v === "object" || typeof v === "function"),
+);
+
 export async function loadModule(
   spec: string,
   init?: PluginModuleInit,
 ): Promise<ConnectorPlugin> {
-  let mod: unknown;
-  try {
-    mod = await import(/* webpackIgnore: true */ spec);
-  } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
-    throw new RegistryError(
-      `connector 包加载失败：${spec}（${reason.slice(0, 200)}）。请确认包已安装且导出合法。`,
-    );
-  }
-  const rec = mod as { default?: unknown } | null;
-  const def = rec !== null && typeof rec === "object" ? rec.default : undefined;
-  if (def === undefined) {
+  // 动态 import 边界的不可信形状用 zod custom 收口（函数/对象二值判定，深层
+  // 校验仍归 validatePlugin 的运行时防线）——加载产物进入本包后即有具体类型。
+  // import 失败 / 缺默认导出 / 非（对象|工厂）默认导出均以可操作错误抛出。
+  const gate = await import(/* webpackIgnore: true */ spec)
+    .then((mod) => z.object({ default: PluginDefaultSchema }).safeParse(mod))
+    .catch((e) => {
+      const reason = e instanceof Error ? e.message : String(e);
+      throw new RegistryError(
+        `connector 包加载失败：${spec}（${reason.slice(0, 200)}）。请确认包已安装且导出合法。`,
+      );
+    });
+  if (!gate.success) {
     throw new RegistryError(
       `connector 包 ${spec} 缺少默认导出（ConnectorPlugin 声明或工厂）。`,
     );
   }
+  const def = gate.data.default;
   // 工厂形态（推荐）：宿主注入 init（log 等）；执行失败同样可操作报错
-  let candidate: unknown = def;
+  let candidate: ConnectorPlugin | ConnectorPluginFactory = def;
   if (typeof def === "function") {
     try {
-      candidate = await (def as ConnectorPluginFactory)(init);
+      candidate = await def(init);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       throw new RegistryError(

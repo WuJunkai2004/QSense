@@ -3,12 +3,16 @@
 // 本假件驱动（连接器测试「先 build 再跑」纪律不变，踩坑 23）。
 //
 // 设计口径：
-// - http：路由（URL 前缀或谓词）→ 应答（FakeReply 或 Error 直接抛）；全部请求
-//   记录进 requests 供断言（url/method/headers/body/fake 时钟）
+// - http：路由（URL 前缀或谓词）→ 应答（全局 Response，与真 fetch 返回类型统一；
+//   JSON 体由测试侧 JSON.stringify 显式序列化，Error 直接抛）；全部请求记录进
+//   requests 供断言（url/method/headers/body/fake 时钟）
 // - 时钟：手动游标（tick 推进）；sleep 立即返回并推进时钟（退避循环测试不真睡）
 // - throttle：立即通过（节流时序的验证归真 NetKit 单测，不在假件语义内）
 // - backoff / sniffMime / longPoll：真实现（纯机械或由测试供给 spec 驱动）
 // - materialize：url 源走脚本表（file()/fileError() 注册）；b64/file 源走真实现
+//
+// B⁺ T6：脚本应答不再用自定义 FakeReply 形状——直接产全局 Response（具体类型），
+// 「这是 JSON 文本」在测试侧显式（JSON.stringify），假件零自定义弱类型。
 
 import {
   type BackoffController,
@@ -22,8 +26,10 @@ import {
   backoff as realBackoff,
   jsonVia,
   longPoll as realLongPoll,
+  parseJsonBody,
   sniffMime as realSniffMime,
 } from "./net";
+import type { ZodType } from "zod";
 import type { MediaSourceWire } from "./types";
 
 /** 一次假 HTTP 请求的记录（headers 键已小写化） */
@@ -36,17 +42,23 @@ export interface FakeRequestLog {
   at: number;
 }
 
-/** 假应答：status 缺省 200；body 作 JSON 体（http.json 会过 wire schema）；
- * Uint8Array/Buffer 视为二进制直传（不经 JSON 序列化——CDN 密文等字节应答） */
-export interface FakeReply {
-  status?: number;
-  body?: unknown;
-  headers?: Record<string, string>;
+/**
+ * 测试侧 JSON 应答便捷构造：status 缺省 200；body 经 JSON.stringify 显式序列化
+ * （「这是 JSON」在调用点可见，B 由调用点的具体 wire 类型推断）；headers 透传。
+ */
+export function jsonResponse<B>(
+  body: B,
+  init?: { status?: number; headers?: Record<string, string> },
+): Response {
+  return new Response(JSON.stringify(body), {
+    status: init?.status ?? 200,
+    ...(init?.headers !== undefined ? { headers: init.headers } : {}),
+  });
 }
 
 type FakeHandler = (
   req: FakeRequestLog,
-) => FakeReply | Error | Promise<FakeReply | Error>;
+) => Response | Error | Promise<Response | Error>;
 
 interface FakeRoute {
   match: (url: string) => boolean;
@@ -70,7 +82,7 @@ export class FakeNetKit implements NetKit {
   }
 
   // —— 路由注册 ——
-  /** 按 URL 前缀注册应答（handler 可返回 FakeReply / Error / Promise） */
+  /** 按 URL 前缀注册应答（handler 可返回 Response / Error / Promise） */
   on(prefix: string, handle: FakeHandler): this {
     this.routes.push({ match: (u) => u.startsWith(prefix), handle });
     return this;
@@ -83,7 +95,7 @@ export class FakeNetKit implements NetKit {
   }
 
   /** 队列式应答：每次命中弹一项（Error 即抛），耗尽后抛 network 档错 */
-  queue(prefix: string, replies: Array<FakeReply | Error>): this {
+  queue(prefix: string, replies: Array<Response | Error>): this {
     const q = [...replies];
     this.on(prefix, () => {
       const next = q.shift();
@@ -142,24 +154,16 @@ export class FakeNetKit implements NetKit {
     if (route === undefined) {
       throw new Error(`FakeNetKit: no route for ${url}`);
     }
-    const out = await route.handle(log);
-    if (out instanceof Error) throw out;
-    const status = out.status ?? 200;
-    const payload = out.body;
-    const res =
-      payload instanceof Uint8Array
-        ? new Response(payload, { status, headers: out.headers })
-        : new Response(
-            payload === undefined ? null : JSON.stringify(payload),
-            { status, headers: out.headers },
-          );
+    const res = await route.handle(log);
+    if (res instanceof Error) throw res;
     const map = new Map<string, string>();
     res.headers.forEach((v, k) => map.set(k.toLowerCase(), v));
     return {
       status: res.status,
       header: (name) => map.get(name.toLowerCase()),
       text: () => res.text(),
-      json: () => res.json(),
+      // 与真 client 同路（net.ts parseJsonBody）：schema 解析收口
+      json: <T>(schema: ZodType<T>) => parseJsonBody(res, schema, res.status),
       raw: res,
     };
   }
@@ -204,7 +208,7 @@ export class FakeNetKit implements NetKit {
     return Promise.resolve();
   }
 
-  longPoll<C>(spec: LongPollSpec<C>, signal: AbortSignal): Promise<void> {
+  longPoll<C, I>(spec: LongPollSpec<C, I>, signal: AbortSignal): Promise<void> {
     return realLongPoll(spec, signal);
   }
 }

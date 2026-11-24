@@ -5,11 +5,18 @@
 // 2. inputSchema 合法性校验 —— validatePluginTool / validateCredentialSchema
 // 3. 管线不可绕过 —— 结构性闸门（PluginToolCtx/HostApi 类型里没有 DB/reply），
 //    无法运行时校验，靠类型契约表达；本文件注释即为规格。
+//
+// B⁺ T6（2026-11-24）：入参一律具体契约类型（ConnectorPlugin / JsonSchema / …）。
+// 加载边界（loadModule 动态 import）的不可信形状由 zod customs 在 registry.ts 收口；
+// 本文件保留的 typeof/形状检查是运行时防线（JS 插件 / 越过静态类型的动态面），
+// 文案与历史完全一致。
 
 import {
   type ConnectorPlugin,
+  type JsonSchema,
   type LoginFlowDecl,
   type PlatformCaps,
+  type PluginToolDecl,
   type PluginWebuiRoute,
   RESERVED_TOOL_NAMES,
   SDK_VERSION,
@@ -36,15 +43,17 @@ const SCHEMA_TYPES = new Set([
 ]);
 const METHODS: ReadonlySet<string> = new Set(["GET", "POST", "PUT", "DELETE"]);
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+/** 运行时防线：待验值必须是普通对象（动态边界产物不信任静态标注）。
+ * 泛型无约束参数 = 接受任何值做形状检查（调用点保留具体类型视角）。 */
+function isPlainObject<T>(v: T): boolean {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 // ---------------------------------------------------------------------------
 // JSON Schema 结构合法性（务实深度：类型/properties/required 一致性）
 // ---------------------------------------------------------------------------
 
-export function validateJsonSchema(schema: unknown, label: string): void {
+export function validateJsonSchema(schema: JsonSchema, label: string): void {
   if (!isPlainObject(schema)) {
     throw new GateError(`${label}：必须是 JSON Schema 对象。`);
   }
@@ -80,7 +89,8 @@ export function validateJsonSchema(schema: unknown, label: string): void {
     ) {
       throw new GateError(`${label}：required 必须是字符串数组。`);
     }
-    if (!isPlainObject(props)) {
+    const props = schema.properties;
+    if (props === undefined || !isPlainObject(props)) {
       throw new GateError(
         `${label}：required 必须与 properties 配套（properties 缺失）。`,
       );
@@ -101,13 +111,11 @@ export function validateJsonSchema(schema: unknown, label: string): void {
 // ---------------------------------------------------------------------------
 
 export function validateCredentialSchema(
-  schema: unknown,
+  schema: JsonSchema,
   credentialSecrets: string[],
 ): void {
   validateJsonSchema(schema, "credentialSchema");
-  const props = isPlainObject(schema)
-    ? (schema.properties as Record<string, unknown> | undefined)
-    : undefined;
+  const props = schema.properties;
   for (const secret of credentialSecrets) {
     if (typeof secret !== "string" || secret === "") {
       throw new GateError("credentialSecrets：密钥键必须是非空字符串。");
@@ -124,16 +132,11 @@ export function validateCredentialSchema(
 // 插件工具：保留名 + 命名规范 + schema 合法性
 // ---------------------------------------------------------------------------
 
-export function validatePluginTool(tool: unknown): void {
+export function validatePluginTool(tool: PluginToolDecl): void {
   if (!isPlainObject(tool)) {
     throw new GateError("插件工具声明必须是对象。");
   }
-  const { name, description, inputSchema, handler } = tool as {
-    name?: unknown;
-    description?: unknown;
-    inputSchema?: unknown;
-    handler?: unknown;
-  };
+  const { name, description, inputSchema, call } = tool;
   if (typeof name !== "string" || !TOOL_NAME_RE.test(name)) {
     throw new GateError(
       `插件工具名非法：${JSON.stringify(name)}（须匹配 ${TOOL_NAME_RE}）。`,
@@ -148,8 +151,8 @@ export function validatePluginTool(tool: unknown): void {
     throw new GateError(`插件工具 ${name}：description 必须非空。`);
   }
   validateJsonSchema(inputSchema, `工具 ${name} 的 inputSchema`);
-  if (typeof handler !== "function") {
-    throw new GateError(`插件工具 ${name}：handler 必须是函数。`);
+  if (typeof call !== "function") {
+    throw new GateError(`插件工具 ${name}：call 必须是函数。`);
   }
 }
 
@@ -162,7 +165,7 @@ function normalizeRoutePath(path: string): string {
   return `/${segs.join("/")}`;
 }
 
-function validateRoutePath(path: unknown, label: string): string {
+function validateRoutePath(path: string, label: string): string {
   if (typeof path !== "string" || !path.startsWith("/")) {
     throw new GateError(`${label}：path 必须以 / 开头。`);
   }
@@ -186,8 +189,8 @@ export function validateWebuiRoutes(routes: PluginWebuiRoute[]): void {
       throw new GateError(`webui 路由重复：${key}`);
     }
     seen.add(key);
-    if (typeof r.handler !== "function") {
-      throw new GateError(`webui 路由 ${key}：handler 必须是函数。`);
+    if (typeof r.handle !== "function") {
+      throw new GateError(`webui 路由 ${key}：handle 必须是函数。`);
     }
   }
 }
@@ -198,13 +201,12 @@ export function validateLoginFlow(
   routes: PluginWebuiRoute[],
 ): void {
   if (login === undefined) return;
+  const kind: string = login.kind; // 运行时值先取（动态边界产物可能越出词表）
   if (login.kind === "secret") return;
-  if (login.kind !== "qr-pair") {
-    throw new GateError(
-      `login.kind 非法：${JSON.stringify((login as { kind?: unknown }).kind)}。`,
-    );
+  if (kind !== "qr-pair") {
+    throw new GateError(`login.kind 非法：${JSON.stringify(kind)}。`);
   }
-  const norm = (p: unknown, label: string): string =>
+  const norm = (p: string, label: string): string =>
     validateRoutePath(p, `login.qr-pair.${label}`);
   const create = norm(login.create, "create");
   const poll = norm(login.poll, "poll");
@@ -229,30 +231,29 @@ export function validateLoginFlow(
 // caps
 // ---------------------------------------------------------------------------
 
-function validateCaps(caps: unknown): void {
+function validateCaps(caps: PlatformCaps): void {
   if (!isPlainObject(caps)) {
     throw new GateError("caps 必须是对象。");
   }
-  const c = caps as Partial<PlatformCaps>;
   if (
-    !Array.isArray(c.scopes) ||
-    c.scopes.length === 0 ||
-    c.scopes.some((s) => typeof s !== "string" || s.trim() === "")
+    !Array.isArray(caps.scopes) ||
+    caps.scopes.length === 0 ||
+    caps.scopes.some((s) => typeof s !== "string" || s.trim() === "")
   ) {
     throw new GateError(
       "caps.scopes 必须是非空字符串数组（会话形态标签，如 group/c2c/chat）。",
     );
   }
-  if (!isPlainObject(c.media)) {
+  if (!isPlainObject(caps.media)) {
     throw new GateError("caps.media 必须是对象（image/voice/video/file 四布尔）。");
   }
   for (const k of ["image", "voice", "video", "file"] as const) {
-    if (typeof (c.media as Record<string, unknown>)[k] !== "boolean") {
+    if (typeof caps.media[k] !== "boolean") {
       throw new GateError(`caps.media.${k} 必须是布尔。`);
     }
   }
   for (const k of ["recall", "passiveWindow", "quota", "proactiveOptIn"] as const) {
-    if (typeof c[k] !== "boolean") {
+    if (typeof caps[k] !== "boolean") {
       throw new GateError(`caps.${k} 必须是布尔。`);
     }
   }
@@ -262,74 +263,73 @@ function validateCaps(caps: unknown): void {
 // 全量校验：register / loadModule 前必过
 // ---------------------------------------------------------------------------
 
-export function validatePlugin(plugin: unknown): ConnectorPlugin {
+export function validatePlugin(plugin: ConnectorPlugin): ConnectorPlugin {
   if (!isPlainObject(plugin)) {
     throw new GateError("connector 插件默认导出必须是对象。");
   }
-  const p = plugin as Partial<ConnectorPlugin> & Record<string, unknown>;
 
-  if (typeof p.id !== "string" || !PLUGIN_ID_RE.test(p.id)) {
+  if (typeof plugin.id !== "string" || !PLUGIN_ID_RE.test(plugin.id)) {
     throw new GateError(
-      `插件 id 非法：${JSON.stringify(p.id)}（须匹配 ${PLUGIN_ID_RE}）。`,
+      `插件 id 非法：${JSON.stringify(plugin.id)}（须匹配 ${PLUGIN_ID_RE}）。`,
     );
   }
-  if (p.id === "core") {
+  if (plugin.id === "core") {
     throw new GateError('插件 id "core" 是宿主保留字。');
   }
-  if (typeof p.sdkRange !== "string" || p.sdkRange.trim() === "") {
-    throw new GateError(`插件 ${p.id}：sdkRange 必须非空（如 "^2.0.0"）。`);
+  if (typeof plugin.sdkRange !== "string" || plugin.sdkRange.trim() === "") {
+    throw new GateError(`插件 ${plugin.id}：sdkRange 必须非空（如 "^2.0.0"）。`);
   }
-  if (!satisfiesRange(SDK_VERSION, p.sdkRange)) {
+  if (!satisfiesRange(SDK_VERSION, plugin.sdkRange)) {
     throw new GateError(
-      `插件 ${p.id} 声明的 sdkRange "${p.sdkRange}" 与宿主契约版本 ` +
+      `插件 ${plugin.id} 声明的 sdkRange "${plugin.sdkRange}" 与宿主契约版本 ` +
         `${SDK_VERSION} 不兼容：请升级 connector-sdk 或插件本体。`,
     );
   }
-  if (typeof p.title !== "string" || p.title.trim() === "") {
-    throw new GateError(`插件 ${p.id}：title 必须非空。`);
+  if (typeof plugin.title !== "string" || plugin.title.trim() === "") {
+    throw new GateError(`插件 ${plugin.id}：title 必须非空。`);
   }
-  validateCaps(p.caps);
-  validateCredentialSchema(p.credentialSchema, p.credentialSecrets ?? []);
+  validateCaps(plugin.caps);
+  validateCredentialSchema(plugin.credentialSchema, plugin.credentialSecrets ?? []);
 
-  const secrets = p.credentialSecrets ?? [];
+  const secrets = plugin.credentialSecrets ?? [];
   if (
     !Array.isArray(secrets) ||
     secrets.some((s) => typeof s !== "string" || s === "")
   ) {
-    throw new GateError(`插件 ${p.id}：credentialSecrets 必须是非空字符串数组。`);
+    throw new GateError(`插件 ${plugin.id}：credentialSecrets 必须是非空字符串数组。`);
   }
 
-  const tools = p.tools ?? [];
+  const tools = plugin.tools ?? [];
   if (!Array.isArray(tools)) {
-    throw new GateError(`插件 ${p.id}：tools 必须是数组。`);
+    throw new GateError(`插件 ${plugin.id}：tools 必须是数组。`);
   }
   const names = new Set<string>();
   for (const tool of tools) {
     validatePluginTool(tool);
-    const name = (tool as { name: string }).name;
+    const name = tool.name;
     if (names.has(name)) {
-      throw new GateError(`插件 ${p.id}：工具名插件内重复：${name}。`);
+      throw new GateError(`插件 ${plugin.id}：工具名插件内重复：${name}。`);
     }
     names.add(name);
   }
 
-  const webui = p.webui ?? [];
+  const webui = plugin.webui ?? [];
   if (!Array.isArray(webui)) {
-    throw new GateError(`插件 ${p.id}：webui 必须是数组。`);
+    throw new GateError(`插件 ${plugin.id}：webui 必须是数组。`);
   }
-  validateWebuiRoutes(webui as PluginWebuiRoute[]);
-  validateLoginFlow(p.login, webui as PluginWebuiRoute[]);
+  validateWebuiRoutes(webui);
+  validateLoginFlow(plugin.login, webui);
 
-  if (typeof p.create !== "function") {
-    throw new GateError(`插件 ${p.id}：create(host, creds) 必须是函数。`);
+  if (typeof plugin.create !== "function") {
+    throw new GateError(`插件 ${plugin.id}：create(host, creds) 必须是函数。`);
   }
   // 契约 v2（决策 #8）：上行解读权在插件——normalize 缺位 = 该平台消息无法进
   // core 管线，加载即拒（显态失败优于运行期静默丢消息）。
-  if (typeof p.normalize !== "function") {
+  if (typeof plugin.normalize !== "function") {
     throw new GateError(
-      `插件 ${p.id}：normalize(botId, payload) 必须是函数（契约 v2：上行解读权在插件）。`,
+      `插件 ${plugin.id}：normalize(botId, payload) 必须是函数（契约 v2：上行解读权在插件）。`,
     );
   }
 
-  return plugin as unknown as ConnectorPlugin;
+  return plugin;
 }

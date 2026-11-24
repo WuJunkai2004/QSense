@@ -11,9 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   FakeNetKit,
+  jsonResponse,
   type ConnectorLogger,
   type ConnectorStatus,
-  type FakeReply,
+
   type HostApi,
   type StatePort,
 } from "@qsense/connector-sdk";
@@ -35,18 +36,19 @@ function fakeHost(): {
   host: HostApi;
   ingested: Array<{ botId: string; payload: unknown }>;
   statuses: ConnectorStatus[];
-  state: Map<string, unknown>;
+  state: Map<string, string>;
 } {
-  const state = new Map<string, unknown>();
+  // StatePort B⁺ T6 字符串化：值 = JSON 文本（实例侧 stringify/parseJsonWith 直通）
+  const state = new Map<string, string>();
   const ingested: Array<{ botId: string; payload: unknown }> = [];
   const statuses: ConnectorStatus[] = [];
   const host: HostApi = {
     log: noopLog(),
     state: {
-      async get<T = unknown>(key: string) {
-        return (state.get(key) as T) ?? null;
+      async get(key: string) {
+        return state.get(key) ?? null;
       },
-      async set(key: string, value: unknown) {
+      async set(key: string, value: string) {
         state.set(key, value);
       },
       async delete(key: string) {
@@ -80,22 +82,24 @@ function noopLog(): ConnectorLogger {
 
 interface PollScript {
   /** 预置 getUpdates 出队脚本（元素=批次 / 完整假应答 / 要抛的错误） */
-  queue(items: Array<TelegramUpdate[] | FakeReply | Error>): void;
+  queue(items: Array<TelegramUpdate[] | Response | Error>): void;
   /** 放行挂起中的 getUpdates（空批）——配合 inst.stop() 让驱动观察到 abort */
   release(): void;
 }
 
 function scriptPoll(kit: FakeNetKit): PollScript {
-  let script: Array<TelegramUpdate[] | FakeReply | Error> = [];
-  let release: ((r: FakeReply) => void) | undefined;
-  kit.on(botUrl("getUpdates"), (): FakeReply | Error | Promise<FakeReply> => {
+  let script: Array<TelegramUpdate[] | Response | Error> = [];
+  let release: ((r: Response) => void) | undefined;
+  kit.on(botUrl("getUpdates"), (): Response | Error | Promise<Response> => {
     const next = script.shift();
     if (next instanceof Error) throw next;
     if (next !== undefined) {
-      return next instanceof Array ? { body: { ok: true, result: next } } : next;
+      return next instanceof Array
+        ? jsonResponse({ ok: true, result: next })
+        : next;
     }
     // 脚本耗尽：挂起（模拟真实长轮询挂起；release() 放行空批）
-    return new Promise<FakeReply>((resolve) => {
+    return new Promise<Response>((resolve) => {
       release = resolve;
     });
   });
@@ -103,7 +107,7 @@ function scriptPoll(kit: FakeNetKit): PollScript {
     queue: (items) => {
       script = items;
     },
-    release: () => release?.({ body: { ok: true, result: [] } }),
+    release: () => release?.(jsonResponse({ ok: true, result: [] })),
   };
 }
 
@@ -151,7 +155,7 @@ test("轮询：首批摄取 + offset 持久化 + 二轮带 offset；停服即时
   const inst = makeInstance(kit, fx);
   const start = inst.start();
   await waitFor(() => fx.state.get("poll:offset") !== undefined, "offset persisted");
-  assert.equal(fx.state.get("poll:offset"), 8); // last update_id + 1
+  assert.equal(fx.state.get("poll:offset"), JSON.stringify(8)); // last update_id + 1（JSON 文本值域）
   assert.equal(fx.ingested.length, 2);
   assert.equal(
     (fx.ingested[0]!.payload as { platform: string }).platform,
@@ -174,10 +178,8 @@ test("缩略图富化：photo 消息走真链路（getFile + 文件下载）摄�
   const fx = fakeHost();
   const kit = new FakeNetKit();
   const poll = scriptPoll(kit);
-  kit.on(botUrl("getFile"), () => ({
-    body: { ok: true, result: { file_id: "thumb-fid", file_path: "photos/thumb.jpg" } },
-  }));
-  kit.on(`${BASE}/file/bot${TOKEN}/photos/thumb.jpg`, () => ({ body: "QUJD" }));
+  kit.on(botUrl("getFile"), () => jsonResponse({ ok: true, result: { file_id: "thumb-fid", file_path: "photos/thumb.jpg" } }));
+  kit.on(`${BASE}/file/bot${TOKEN}/photos/thumb.jpg`, () => new Response("QUJD"));
   const upd: TelegramUpdate = {
     update_id: 1,
     message: {
@@ -206,8 +208,8 @@ test("缩略图富化：photo 消息走真链路（getFile + 文件下载）摄�
 
 test("401 → fatal 不重试；409 → fatal；500 → 退避后成功 ready", async () => {
   for (const [reply, expectFatal] of [
-    [{ status: 401, body: { ok: false, error_code: 401, description: "Unauthorized" } }, true],
-    [{ status: 409, body: { ok: false, error_code: 409, description: "Conflict" } }, true],
+    [jsonResponse({ ok: false, error_code: 401, description: "Unauthorized" }, { status: 401 }), true],
+    [jsonResponse({ ok: false, error_code: 409, description: "Conflict" }, { status: 409 }), true],
   ] as const) {
     const fx = fakeHost();
     const kit = new FakeNetKit();
@@ -226,8 +228,8 @@ test("401 → fatal 不重试；409 → fatal；500 → 退避后成功 ready", 
   const kit = new FakeNetKit();
   const poll = scriptPoll(kit);
   poll.queue([
-    { status: 500, body: { ok: false, error_code: 500, description: "boom" } },
-    { body: { ok: true, result: [] } },
+    jsonResponse({ ok: false, error_code: 500, description: "boom" }, { status: 500 }),
+    jsonResponse({ ok: true, result: [] }),
   ]);
   const inst = makeInstance(kit, fx);
   const start = inst.start();
@@ -246,9 +248,7 @@ test("401 → fatal 不重试；409 → fatal；500 → 退避后成功 ready", 
 test("net.proactive 文本：sendMessage 形状 + 引用映射 reply_parameters", async () => {
   const fx = fakeHost();
   const kit = new FakeNetKit();
-  kit.on(botUrl("sendMessage"), () => ({
-    body: { ok: true, result: { message_id: 901 } },
-  }));
+  kit.on(botUrl("sendMessage"), () => jsonResponse({ ok: true, result: { message_id: 901 } }));
   const inst = makeInstance(kit, fx);
   const receipt = await inst.net.proactive!({
     botId: BOT,
@@ -279,12 +279,8 @@ test("net.proactive 文本：sendMessage 形状 + 引用映射 reply_parameters"
 test("net 媒体：uploadMedia 物化 → sendPhoto multipart → 句柄单次使用；voice 走 sendVoice", async () => {
   const fx = fakeHost();
   const kit = new FakeNetKit();
-  kit.on(botUrl("sendPhoto"), () => ({
-    body: { ok: true, result: { message_id: 902 } },
-  }));
-  kit.on(botUrl("sendVoice"), () => ({
-    body: { ok: true, result: { message_id: 903 } },
-  }));
+  kit.on(botUrl("sendPhoto"), () => jsonResponse({ ok: true, result: { message_id: 902 } }));
+  kit.on(botUrl("sendVoice"), () => jsonResponse({ ok: true, result: { message_id: 903 } }));
   const inst = makeInstance(kit, fx);
   const TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   const up = await inst.net.uploadMedia!({
@@ -347,9 +343,7 @@ test("net 媒体：uploadMedia 物化 → sendPhoto multipart → 句柄单次�
 test("net.recall：deleteMessage 数字 id；上限拒绝（4096 文本/1024 caption）", async () => {
   const fx = fakeHost();
   const kit = new FakeNetKit();
-  kit.on(botUrl("deleteMessage"), () => ({
-    body: { ok: true, result: true },
-  }));
+  kit.on(botUrl("deleteMessage"), () => jsonResponse({ ok: true, result: true }));
   const inst = makeInstance(kit, fx);
   await inst.net.recall!({
     botId: BOT,
@@ -401,10 +395,7 @@ test("verifyCredential：形制错/401/appid 不匹配/全对（FakeNetKit 假�
   );
   // getMe 401（真实 401 走不到——形制检查先挡；构造合法形制 + 假 401 端点）
   const kit401 = new FakeNetKit();
-  kit401.onMatch((u) => u.endsWith("/getMe"), () => ({
-    status: 401,
-    body: { ok: false, error_code: 401, description: "Unauthorized" },
-  }));
+  kit401.onMatch((u) => u.endsWith("/getMe"), () => jsonResponse({ ok: false, error_code: 401, description: "Unauthorized" }, { status: 401 }));
   const reject = createTelegramConnector({ net: kit401 });
   await assert.rejects(
     () =>
@@ -416,9 +407,7 @@ test("verifyCredential：形制错/401/appid 不匹配/全对（FakeNetKit 假�
   );
   // appid 与 getMe id 不一致
   const kitOk = new FakeNetKit();
-  kitOk.onMatch((u) => u.endsWith("/getMe"), () => ({
-    body: { ok: true, result: { id: 9167497677 } },
-  }));
+  kitOk.onMatch((u) => u.endsWith("/getMe"), () => jsonResponse({ ok: true, result: { id: 9167497677 } }));
   const mismatch = createTelegramConnector({ net: kitOk });
   await assert.rejects(
     () =>
@@ -466,9 +455,7 @@ test("Sender caps 路由：passiveWindow=false 恒主动通道（旧消息也直
 
     const fxh = fakeHost();
     const kit = new FakeNetKit();
-    kit.on(botUrl("sendMessage"), () => ({
-      body: { ok: true, result: { message_id: 901 } },
-    }));
+    kit.on(botUrl("sendMessage"), () => jsonResponse({ ok: true, result: { message_id: 901 } }));
     const inst = makeInstance(kit, fxh);
     const plugin = createTelegramConnector();
     const sender = new Sender({

@@ -39,7 +39,7 @@ function msg(over: Partial<NormalizedMessage>): NormalizedMessage {
     records: [],
     mentions: [],
     attachments: [],
-    raw: { src: "fake" },
+    rawJson: JSON.stringify({ src: "fake" }),
     direction: 0,
     ...over,
   } as NormalizedMessage;
@@ -110,9 +110,10 @@ function setup(): TestRig {
     feed: (inbound) => {
       pipeline({
         botId: "bot-t1",
+        // 坏信封（null）经 JSON.parse 边界进入——模拟动态载荷形状（可观测丢弃路径）
         payload:
           inbound === null
-            ? null
+            ? JSON.parse("null")
             : { platform: "fake", ...inbound },
       });
     },

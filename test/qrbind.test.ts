@@ -10,7 +10,7 @@ import { createCipheriv, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FakeNetKit, type HttpClient } from "@qsense/connector-sdk";
+import { FakeNetKit, jsonResponse, type HttpClient } from "@qsense/connector-sdk";
 import { BotRegistry } from "../src/bots";
 import { createLogger } from "../src/utils/logger";
 import {
@@ -27,16 +27,16 @@ import { makeFakeRuntime } from "./helpers/qq-runtime";
 
 const TOKEN = "qr-test-admin-token-0123456789abcdef";
 
-/** 假 lite 上游（FakeNetKit）：按路径分派，记录请求体 */
+/** 假 lite 上游（FakeNetKit）：按路径分派，记录请求体。应答 = JSON 文本（Response） */
 function liteKit(
-  handler: (path: string, body: Record<string, unknown> | undefined) => unknown,
+  handler: (path: string, body: Record<string, unknown> | undefined) => object,
 ): { http: HttpClient; kit: FakeNetKit } {
   const kit = new FakeNetKit();
   kit.on("https://q.qq.com/", (req) => {
     const path = new URL(req.url).pathname;
     const body =
       typeof req.body === "string" ? JSON.parse(req.body) : undefined;
-    return { body: handler(path, body) };
+    return jsonResponse(handler(path, body));
   });
   return { http: kit.http(), kit };
 }

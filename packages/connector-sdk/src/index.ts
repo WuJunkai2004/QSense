@@ -4,6 +4,7 @@ export * from "./message";
 export * from "./net";
 export * from "./json";
 export * from "./semver";
+export { webuiRoute, webuiJsonRoute, pluginTool } from "./helpers";
 export { GateError, validateCredentialSchema, validateJsonSchema, validateLoginFlow, validatePlugin, validatePluginTool, validateWebuiRoutes } from "./gates";
 export type { ToolRoute } from "./router";
 export { ToolRouter, callPluginTool } from "./router";
@@ -14,7 +15,7 @@ export {
   noopLogger,
   type MemoryHostHandle,
 } from "./memory";
-export { FakeNetKit, type FakeReply, type FakeRequestLog } from "./net-fake";
+export { FakeNetKit, jsonResponse, type FakeRequestLog } from "./net-fake";
 export {
   runConformance,
   type ConformanceCheck,

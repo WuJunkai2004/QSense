@@ -19,13 +19,14 @@ import type { Sender, SendResult } from "../sender";
 import { synthesizeSpeech } from "../tts";
 import type { MsgRow, Repo } from "../store/repo";
 import {
+  ArkCardSchema,
   AttachmentSchema,
   MentionSchema,
   QuoteSchema,
   type NormalizedAttachment,
 } from "@qsense/connector-sdk";
+import { parseJsonWith } from "@qsense/connector-sdk";
 import { z } from "zod";
-import { jsonParseOf } from "../utils/json";
 import { Buffer } from "node:buffer";
 
 /** 图像内容块（MCP content）：多模态客户端会作为真实图像喂给模型 */
@@ -199,17 +200,17 @@ function msgOut(
   if (row.records_count > 0) out.records_count = row.records_count;
   if (row.mentions_json) {
     // B⁺ T6：mentions_json 过 SDK MentionSchema（入库源即该形状）；坏档按缺失
-    const m = z.array(MentionSchema).safeParse(jsonParseOf(row.mentions_json));
-    if (m.success) {
+    const m = parseJsonWith(z.array(MentionSchema), row.mentions_json);
+    if (m !== null) {
       // mention 矫正：官方 username 是群昵称（一人多群昵称必混乱），一律以 users QQ 昵称为准
-      out.mentions = m.data.map((mm) => {
+      out.mentions = m.map((mm) => {
         const name = repo.userNameOf(botId, mm.id) ?? mm.name;
         return name !== undefined ? { id: mm.id, name } : { id: mm.id };
       });
     }
   }
   if (row.attachments_json) out.attachments = compactAttachments(row.attachments_json);
-  if (row.ark_json) out.ark = jsonParseOf(row.ark_json); // ark=平台原始卡片不透明边界
+  if (row.ark_json) out.ark = parseJsonWith(ArkCardSchema, row.ark_json) ?? undefined;
   return out;
 }
 
@@ -235,8 +236,7 @@ function compactInlineUrl(att: NormalizedAttachment): NormalizedAttachment {
 
 /** attachments_json 列解析（SDK AttachmentSchema 把关；坏档按缺失=[]） */
 function attachmentsOf(raw: string): NormalizedAttachment[] {
-  const r = z.array(AttachmentSchema).safeParse(jsonParseOf(raw));
-  return r.success ? r.data : [];
+  return parseJsonWith(z.array(AttachmentSchema), raw) ?? [];
 }
 
 /** attachments_json 列 → 工具输出形状（逐项压缩内联 data:URL） */
@@ -668,9 +668,9 @@ export const TOOLS: ToolDef[] = [
           };
           if (r.quote_json !== null) {
             // B⁺ T6：子行引用过 SDK QuoteSchema（入库源即该形状）；坏档按缺失
-            const q = QuoteSchema.safeParse(jsonParseOf(r.quote_json));
-            if (q.success && q.data !== null) {
-              const ref = ctx.repo.resolveQuoteRef(botId, kind, scopeId, q.data);
+            const q = parseJsonWith(QuoteSchema, r.quote_json);
+            if (q !== null) {
+              const ref = ctx.repo.resolveQuoteRef(botId, kind, scopeId, q);
               out.quote_msg = {
                 id: ref.id,
                 msg_id: ref.msgId,

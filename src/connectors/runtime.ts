@@ -9,6 +9,7 @@ import type {
   ConnectorRegistry,
   HostApi,
   ProactiveVerdict,
+  RawInbound,
 } from "@qsense/connector-sdk";
 import type { BotRecord, BotRegistry } from "../bots";
 import type { Logger } from "../utils/logger";
@@ -38,7 +39,7 @@ export interface ConnectorRuntimeDeps {
   bots: BotRegistry;
   plugins: ConnectorRegistry;
   /** core ingest 管线（createIngestPipeline 产物） */
-  ingest: (raw: { botId: string; payload: unknown }) => void;
+  ingest: (raw: RawInbound) => void;
   /** 状态快照外送（index.ts 聚合 / 测试捕获） */
   onStatus?: (s: GatewayStatus) => void;
 }

@@ -14,8 +14,10 @@ import { join, resolve, sep } from "node:path";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   ConnectorError,
+  formatZodIssues,
+  QrPairPollOutSchema,
   type ConnectorRegistry,
-  type PluginWebuiRequest,
+  type PluginWebuiInput,
   type PluginWebuiRoute,
   type WebuiMethod,
 } from "@qsense/connector-sdk";
@@ -344,18 +346,19 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         return null;
       };
 
-      /** 构造插件 webui 请求（宿主注入 configOf/stateOf；插件拿不到 fastify 原生对象） */
-      const webuiReq = (
-        over?: Partial<PluginWebuiRequest>,
-      ): PluginWebuiRequest => ({
-        method: "POST",
-        path: "/",
-        params: {},
-        query: {},
-        body: undefined,
+      /** 插件 webui 路由的原始输入（控制反转）：宿主注入 configOf/stateOf，
+       * body 只以 JSON 文本跨界（schema 解析在 webuiRoute 工厂闭包内完成），
+       * 插件拿不到 fastify 原生对象。 */
+      const webuiInput = (
+        req: { body?: unknown },
+        over: { path: string; params?: Record<string, string>; query?: Record<string, string> },
+      ): PluginWebuiInput => ({
+        path: over.path,
+        params: over.params ?? {},
+        query: over.query ?? {},
+        rawBody: req.body === undefined ? undefined : JSON.stringify(req.body),
         configOf: (botId) => supervisor.configOf(botId),
         stateOf: (botId) => supervisor.hostFor(botId).state,
-        ...over,
       });
 
       // 平台插件路由挂载：/ui/api/platforms/:id/*（admin 鉴权由本作用域统一覆盖）
@@ -404,9 +407,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               return;
             }
             reply.send(
-              await route.handler(
-                webuiReq({ method: "POST", path: sub, body: req.body, query }),
-              ),
+              await route.handle(webuiInput(req, { path: sub, query })),
             );
             return;
           }
@@ -424,23 +425,22 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               });
               return;
             }
-            const out = (await route.handler(
-              webuiReq({
-                method: "POST",
-                path: sub,
-                body: req.body,
-                query,
-              }),
-            )) as Record<string, unknown>;
-            const cred =
-              out.status === "completed" && out.credential !== null && typeof out.credential === "object"
-                ? (out.credential as Record<string, unknown>)
-                : undefined;
-            if (cred !== undefined) {
-              // 平台凭据键值对（credentialSchema 形状）；平台取路由 :id——同一处理路径服务多平台
+            // poll 产物契约 = SDK QrPairPollOut（qr-pair 协议形状）；handle 统一
+            // 返回面是 WebuiRouteOut，宿主中介以 QrPairPollOutSchema 锚定完整形状
+            // （违反协议 = 可操作错误，防连接器实现 bug 静默坏数据）
+            const raw = await route.handle(webuiInput(req, { path: sub, query }));
+            const gate = QrPairPollOutSchema.safeParse(raw);
+            if (!gate.success) {
+              reply.code(502).send({
+                error: `平台 ${target.id} 的 poll 路由返回不符合 qr-pair 协议：${formatZodIssues(gate.error, "poll 产物")}`,
+              });
+              return;
+            }
+            const out = gate.data;
+            if (out.status === "completed") {
               const credentials: Record<string, string> = {};
-              for (const [k, v] of Object.entries(cred)) {
-                if (typeof v === "string" && v !== "") credentials[k] = v;
+              for (const [k, v] of Object.entries(out.credential)) {
+                if (v !== "") credentials[k] = v;
               }
               const registered = await registry.add({
                 platform: target.id,
@@ -476,14 +476,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             });
             return;
           }
-          const out = await hit.route.handler(
-            webuiReq({
-              method: req.method as WebuiMethod,
-              path: sub,
-              params: hit.params,
-              query,
-              body: req.body,
-            }),
+          const out = await hit.route.handle(
+            webuiInput(req, { path: sub, params: hit.params, query }),
           );
           reply.send(out);
         } catch (e) {
@@ -510,9 +504,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               "QQ 连接器未注册，扫码绑定不可用。可改用手动方式添加（appid + AppSecret）。",
             );
           }
-          const out = (await route.handler(webuiReq())) as {
-            task_id?: string;
-          };
+          const out = await route.handle(webuiInput(_req, { path: "/login/qr/create" }));
           uiLog.info("qr bind task created", { taskId: out.task_id ?? "" });
           reply.send(out);
         } catch (e) {
@@ -523,25 +515,24 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
 
       plugin.post("/qr-bind/poll", async (req, reply) => {
         try {
-          const body = (req.body ?? {}) as Record<string, unknown>;
-          const taskId =
-            typeof body.task_id === "string" ? body.task_id.trim() : "";
           const route = qqRoute("POST", "/login/qr/poll");
           if (route === undefined) {
             // 任务态不可用：前端据此重开任务或走手动添加
             return { status: "expired" };
           }
-          const out = (await route.handler(
-            webuiReq({ body: { task_id: taskId } }),
-          )) as Record<string, unknown>;
+          const raw = await route.handle(webuiInput(req, { path: "/login/qr/poll" }));
+          const gate = QrPairPollOutSchema.safeParse(raw);
+          if (!gate.success) {
+            throw new QrBindError(
+              `poll 路由返回不符合 qr-pair 协议：${formatZodIssues(gate.error, "poll 产物")}`,
+            );
+          }
+          const out = gate.data;
           if (out.status !== "completed") return out;
           // 完成 → 既有注册管线（官方两级凭据校验 + 落库 + 拉起网关）；
           // AppSecret 全程不出本进程，凭据绝不下发浏览器
-          const cred = out.credential as
-            | { appid?: unknown; secret?: unknown }
-            | undefined;
-          const appid = typeof cred?.appid === "string" ? cred.appid : "";
-          const secret = typeof cred?.secret === "string" ? cred.secret : "";
+          const appid = out.credential["appid"] ?? "";
+          const secret = out.credential["secret"] ?? "";
           const registered = await registry.add({
             platform: "qq",
             credentials: { appid, secret },
@@ -1122,12 +1113,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           if (route === undefined) {
             throw new Error("QQ 连接器未注册，额度水位不可用。");
           }
-          return await route.handler(
-            webuiReq({
-              method: "GET",
-              path: "/quota",
-              query: { bot: botId },
-            }),
+          return await route.handle(
+            webuiInput(req, { path: "/quota", query: { bot: botId } }),
           );
         } catch (e) {
           const m = mapError(uiLog, e);

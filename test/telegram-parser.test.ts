@@ -12,6 +12,7 @@ import {
   ConnectorRegistry,
   createMemoryHost,
   FakeNetKit,
+  jsonResponse,
   type ConnectorLogger,
   type ConnectorPlugin,
   type NormalizedMessage,
@@ -273,13 +274,9 @@ test("ingest 管线（表驱动）：telegram / qq 信封各归各的插件 norm
 test("TG-atMe：mention 实体比对 getMe 身份（精确 true/false；身份未知省略；私聊不标）", async () => {
   // 身份经真实链路进入 normalize：create → getMe（FakeNetKit 假端点）→ 插件 identities 缓存
   const kitA = new FakeNetKit();
-  kitA.onMatch((u) => u.endsWith("/getMe"), () => ({
-    body: { ok: true, result: { id: 777, username: "roujia_bot" } },
-  }));
+  kitA.onMatch((u) => u.endsWith("/getMe"), () => jsonResponse({ ok: true, result: { id: 777, username: "roujia_bot" } }));
   const kitB = new FakeNetKit();
-  kitB.onMatch((u) => u.endsWith("/getMe"), () => ({
-    body: { ok: true, result: { id: 777, username: "other_bot" } },
-  }));
+  kitB.onMatch((u) => u.endsWith("/getMe"), () => jsonResponse({ ok: true, result: { id: 777, username: "other_bot" } }));
   const plugA = createTelegramConnector({ net: kitA });
   const plugB = createTelegramConnector({ net: kitB });
   const plugUnknown = createTelegramConnector();
