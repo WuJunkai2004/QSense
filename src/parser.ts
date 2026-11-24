@@ -34,25 +34,21 @@ function userNameOf(u: TelegramUser | undefined): string | undefined {
   return name === "" ? undefined : name;
 }
 
-/** 实体 → mentions（mention=@username 文本切片；text_mention 带用户对象） */
+/** 实体 → mentions（mention=@username 文本切片；text_mention 带用户对象）。
+ * 实体结构由 wire schema 保证（type/offset/length/user 已类型化）——无防御 typeof。 */
 function parseMentions(
   msg: TelegramMessage,
 ): NormalizedMention[] {
   const text = msg.text ?? "";
   const out: NormalizedMention[] = [];
   for (const e of msg.entities ?? []) {
-    const type = typeof e["type"] === "string" ? e["type"] : "";
-    const offset = typeof e["offset"] === "number" ? e["offset"] : -1;
-    const length = typeof e["length"] === "number" ? e["length"] : -1;
-    if (offset < 0 || length <= 0 || offset + length > text.length) continue;
-    const slice = text.slice(offset, offset + length);
-    if (type === "mention") {
+    if (e.type === undefined || e.offset === undefined || e.length === undefined) continue;
+    if (e.offset < 0 || e.length <= 0 || e.offset + e.length > text.length) continue;
+    const slice = text.slice(e.offset, e.offset + e.length);
+    if (e.type === "mention") {
       out.push({ id: slice }); // @username（Telegram 侧定位标识）
-    } else if (type === "text_mention") {
-      const user = e["user"] as TelegramUser | undefined;
-      if (user !== undefined) {
-        out.push({ id: String(user.id), name: userNameOf(user) });
-      }
+    } else if (e.type === "text_mention" && e.user !== undefined) {
+      out.push({ id: String(e.user.id), name: userNameOf(e.user) });
     }
   }
   return out;
@@ -64,19 +60,17 @@ export interface TelegramSelf {
   username?: string;
 }
 
-/** 群消息是否 @ 本 bot：text_mention 比对数字 id；mention 实体比对 @username（大小写不敏感） */
+/** 群消息是否 @ 本 bot：text_mention 比对数字 id；mention 实体比对 @username（大小写不敏感）。
+ * 实体结构由 wire schema 保证——无防御 typeof。 */
 function mentionedSelf(msg: TelegramMessage, self: TelegramSelf): boolean {
   const text = msg.text ?? "";
   for (const e of msg.entities ?? []) {
-    const type = typeof e["type"] === "string" ? e["type"] : "";
-    if (type === "text_mention") {
-      const user = e["user"] as TelegramUser | undefined;
-      if (user !== undefined && user.id === self.id) return true;
-    } else if (type === "mention" && self.username !== undefined) {
-      const offset = typeof e["offset"] === "number" ? e["offset"] : -1;
-      const length = typeof e["length"] === "number" ? e["length"] : -1;
-      if (offset < 0 || length <= 0 || offset + length > text.length) continue;
-      const slice = text.slice(offset, offset + length);
+    if (e.type === "text_mention") {
+      if (e.user !== undefined && e.user.id === self.id) return true;
+    } else if (e.type === "mention" && self.username !== undefined) {
+      if (e.offset === undefined || e.length === undefined) continue;
+      if (e.offset < 0 || e.length <= 0 || e.offset + e.length > text.length) continue;
+      const slice = text.slice(e.offset, e.offset + e.length);
       if (slice.toLowerCase() === `@${self.username.toLowerCase()}`) return true;
     }
   }

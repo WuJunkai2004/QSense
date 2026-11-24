@@ -1,6 +1,11 @@
 // Telegram 连接器实例（每 bot 一个）：getUpdates 长轮询生命周期 + 状态上报 +
 // 原始载荷上行（host.ingest）+ 发送原语（net.*）。
 //
+// B⁺ T4.1：轮询循环迁上 SDK NetKit 的 longPoll 驱动（游标生命周期/fatal 分档/
+// 批次摄取留本包 spec——驱动只承担机械不变量：批全摄完才推进游标、指数退避、
+// abort 即时、失败逐次上报 degraded）；发送节流/媒体物化/魔数嗅探/时钟全部
+// 走 ctx.net——测试驱动权统一收口 FakeNetKit，包内零测试注入管道。
+//
 // 与 QQ（WS Gateway + RESUME）的本质差异：
 // - 长轮询无会话概念，断线连续性 = StatePort 持久化的 poll:offset（重启凭它补拉；
 //   至少一次语义由 core 按 msg_id 幂等入库兜底）；
@@ -12,19 +17,25 @@
 import type {
   ConnectorInstance,
   ConnectorNet,
-  HostApi,
+  MediaKind,
   MediaSourceWire,
+  PluginContext,
   ProactiveWire,
   RecallWire,
   ReplyWire,
   UploadMediaWire,
 } from "@qsense/connector-sdk";
+import { z } from "zod";
 import {
   describeSendFailure,
   isRetryableApiError,
   TG_ERROR_CONFLICT,
   TG_ERROR_UNAUTHORIZED,
+  TG_POLL_TIMEOUT_S,
   TelegramApiError,
+  TelegramFileSchema,
+  TelegramMessageIdResultSchema,
+  TelegramUpdateSchema,
   type TelegramApi,
   type TelegramInboundPayload,
   type TelegramMessage,
@@ -33,16 +44,9 @@ import {
 import { tt } from "./texts";
 
 export interface TelegramInstanceDeps {
-  host: HostApi;
+  ctx: PluginContext;
   botId: string;
   api: TelegramApi;
-  /** 身份回传：轮询启动时 getMe 一次性获取（id+username），插件缓存供 atMe 判定 */
-  onIdentity?: (identity: { id: number; username?: string }) => void;
-  /** 测试注入：轮询间隔/缩略图开关（缺省全走真实通道） */
-  overrides?: {
-    /** 覆写单条 update 的摄取前处理（缩略图富化）；缺省=真实 getFile+下载 */
-    enrich?: (msg: TelegramMessage) => Promise<Record<string, string>>;
-  };
 }
 
 /** Telegram 单聊频率约束（官方 ~1 msg/s/_chat）：发送间最小间隔（保守 1.2s） */
@@ -66,8 +70,9 @@ function msgIdNum(id: string | undefined): number | undefined {
 export function createTelegramInstance(
   deps: TelegramInstanceDeps,
 ): ConnectorInstance {
-  const { host, botId, api } = deps;
-  const log = host.log.child("poll").child(botId);
+  const { ctx, botId, api } = deps;
+  const kit = ctx.net;
+  const log = ctx.log.child("poll").child(botId);
   let controller: AbortController | null = null;
   let loop: Promise<void> | null = null;
 
@@ -82,69 +87,25 @@ export function createTelegramInstance(
   let handleSeq = 0;
 
   function sweepMaterials(): void {
-    const now = Date.now();
+    const now = kit.now();
     for (const [k, v] of materials) {
       if (now - v.createdAt > MEDIA_HANDLE_TTL_MS) materials.delete(k);
     }
   }
 
-  /** 来源物化（connector 只做字节进出：下载/解码/读盘 + 机械嗅探） */
-  async function materialize(src: MediaSourceWire): Promise<Materialized> {
-    let buffer: Buffer;
-    if (src.kind === "url") {
-      const res = await fetch(src.url, { signal: AbortSignal.timeout(30_000) });
-      if (!res.ok) {
-        throw new Error(`来源下载失败（HTTP ${res.status}）`);
-      }
-      buffer = Buffer.from(await res.arrayBuffer());
-    } else if (src.kind === "b64") {
-      buffer = Buffer.from(src.data, "base64");
-    } else {
-      const { readFile } = await import("node:fs/promises");
-      buffer = await readFile(src.path);
-    }
+  /** 来源物化（字节进出归 NetKit：下载/解码/读盘；嗅探归 NetKit，兜底按媒体类别） */
+  async function materialize(src: MediaSourceWire, kind: MediaKind): Promise<Materialized> {
+    const m = await kit.materialize(src);
     return {
-      buffer,
-      mime: sniffMime(buffer, src.kind),
-      filename: guessFilename(src),
-      createdAt: Date.now(),
+      buffer: m.buf,
+      mime: kit.sniffMime(m.buf, kind === "voice" ? "audio/mpeg" : "image/jpeg"),
+      filename: m.name ?? `media-${kit.now()}`,
+      createdAt: kit.now(),
     };
   }
 
-  /** 魔数嗅探（机械编码问题，非语义判断）：JPEG/PNG/GIF → 图；ID3/OGG → 音频；按 kind 兜底 */
-  function sniffMime(buf: Buffer, kind: string): string {
-    if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8) return "image/jpeg";
-    if (buf.length >= 4 && buf.subarray(0, 4).toString("ascii") === "RIFF") {
-      return "audio/wav";
-    }
-    if (buf.length >= 3 && buf.subarray(0, 3).toString("ascii") === "ID3") return "audio/mpeg";
-    if (buf.length >= 4 && buf.subarray(0, 4).toString("ascii") === "OggS") return "audio/ogg";
-    if (buf.length >= 8 && buf.subarray(0, 8).toString("hex") === "89504e470d0a1a0a") return "image/png";
-    if (buf.length >= 3 && buf.subarray(0, 3).toString("ascii") === "GIF") return "image/gif";
-    // 按 wire 的类别兜底（core MediaKind: image|voice；b64 源无 mime 信息）
-    return buf.length > 0 && (kind === "voice" || kind === "audio") ? "audio/mpeg" : "image/jpeg";
-  }
-
-  function guessFilename(src: MediaSourceWire): string {
-    if (src.kind === "url") {
-      const m = /\/([^/?#]+)\.[a-z0-9]+(?=$|[?#])/i.exec(src.url);
-      if (m !== null) return m[1]!;
-    }
-    if (src.kind === "file") {
-      const seg = src.path.split(/[\\/]/).pop();
-      if (seg !== undefined && seg !== "") return seg;
-    }
-    return `media-${Date.now()}`;
-  }
-
-  /** 发送间保守节流（官方 ~1 msg/s/chat；突发靠 1.2s 间隔避开 429） */
-  const lastSendAt = new Map<string, number>();
-  async function pace(target: string): Promise<void> {
-    const last = lastSendAt.get(target) ?? 0;
-    const wait = last + MIN_SEND_INTERVAL_MS - Date.now();
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    lastSendAt.set(target, Date.now());
-  }
+  /** 发送间保守节流（官方 ~1 msg/s/chat；突发靠 1.2s 间隔避开 429）——NetKit 机械 */
+  const pace = kit.throttle(MIN_SEND_INTERVAL_MS);
 
   /** 发送公共尾段：media 有 → multipart（caption=content）；无 → sendMessage */
   async function sendWire(
@@ -174,8 +135,9 @@ export function createTelegramInstance(
       const method = media.kind === "voice" ? "sendVoice" : "sendPhoto";
       const field = media.kind === "voice" ? "voice" : "photo";
       // multipart 复杂字段官方约定 JSON 序列化传递（reply_parameters 为嵌套对象）
-      const result = await api.upload<{ message_id: number }>(
+      const result = await api.upload(
         method,
+        TelegramMessageIdResultSchema,
         { buffer: mat.buffer, filename: mat.filename, mime: mat.mime },
         field,
         {
@@ -196,7 +158,7 @@ export function createTelegramInstance(
     if (content === "") {
       throw new Error("消息内容为空（文本与媒体均缺失）。");
     }
-    const result = await api.call<{ message_id: number }>("sendMessage", {
+    const result = await api.call("sendMessage", TelegramMessageIdResultSchema, {
       chat_id: chatIdOf(wire.target),
       text: content,
       ...(replyParams ?? {}),
@@ -238,15 +200,15 @@ export function createTelegramInstance(
       if (id === undefined) {
         throw new Error(`撤回目标不是合法的 Telegram message_id：${wire.providerMsgId}。`);
       }
-      await api.call("deleteMessage", {
+      await api.call("deleteMessage", z.boolean(), {
         chat_id: chatIdOf(wire.target),
         message_id: id,
       });
     },
     async uploadMedia(wire: UploadMediaWire) {
       sweepMaterials();
-      const mat = await materialize(wire.source);
-      const handle = `tgm-${botId}-${Date.now()}-${(handleSeq += 1)}`;
+      const mat = await materialize(wire.source, wire.kind);
+      const handle = `tgm-${botId}-${kit.now()}-${(handleSeq += 1)}`;
       materials.set(handle, mat);
       return { handle };
     },
@@ -257,19 +219,18 @@ export function createTelegramInstance(
     msg: TelegramMessage,
   ): Promise<Record<string, string>> {
     const blobs: Record<string, string> = {};
-    const sizes = msg.photo ?? [];
-    const thumb = sizes[0]; // 最小尺寸（带宽最优；get_media 只要求"能看"）
+    const thumb = msg.photo?.[0]; // 最小尺寸（带宽最优；get_media 只要求"能看"）
     if (thumb === undefined) return blobs;
     try {
-      const file = await api.call<{ file_path?: string }>("getFile", {
+      const file = await api.call("getFile", TelegramFileSchema, {
         file_id: thumb.file_id,
       });
       if (file.file_path === undefined) return blobs;
-      const res = await fetch(api.fileUrl(file.file_path), {
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!res.ok) return blobs;
-      const buf = Buffer.from(await res.arrayBuffer());
+      const res = await kit
+        .http({ timeoutMs: 15_000 })
+        .request(api.fileUrl(file.file_path));
+      if (res.status < 200 || res.status >= 300) return blobs;
+      const buf = Buffer.from(await res.raw.arrayBuffer());
       if (buf.length === 0 || buf.length > THUMB_MAX_BYTES) return blobs;
       blobs[thumb.file_id] = `data:image/jpeg;base64,${buf.toString("base64")}`;
     } catch (e) {
@@ -286,94 +247,106 @@ export function createTelegramInstance(
     update: TelegramUpdate,
     blobs: Record<string, string>,
   ): void {
-    host.ingest({
+    ctx.ingest({
       botId,
       payload: {
         platform: "telegram",
         update,
         ...(Object.keys(blobs).length > 0 ? { mediaBlobs: blobs } : {}),
       } satisfies TelegramInboundPayload,
-      receivedAt: Date.now(),
+      receivedAt: kit.now(),
     });
   }
 
   async function runPollLoop(signal: AbortSignal): Promise<void> {
-    let offset =
-      (await host.state.get<number>("poll:offset")) ?? 0;
-    let backoffMs = 1000;
-    let firstSuccess = false;
-    // 自身身份一次性获取（atMe 判定依据）：失败只降级 atMe 精度（wait 层从宽
-    // 兜底），不阻塞轮询主循环
     try {
-      const me = await api.call<{ id: number; username?: string }>("getMe");
-      deps.onIdentity?.({ id: me.id, username: me.username });
-    } catch {
-      /* 身份未知 → atMe 省略；群 mention 过滤按未知从宽 */
-    }
-    while (!signal.aborted) {
-      try {
-        const updates = await api.call<TelegramUpdate[]>(
-          "getUpdates",
-          {
-            offset: offset === 0 ? undefined : offset,
-            timeout: 50,
-            allowed_updates: ["message"],
+      await kit.longPoll(
+        {
+          // 游标 = 下一次 getUpdates 的 offset 参数（last update_id + 1；0=首拉）
+          loadCursor: async () =>
+            (await ctx.state.get<number>("poll:offset")) ?? 0,
+          saveCursor: async (offset) => {
+            await ctx.state.set("poll:offset", offset);
           },
-          { signal },
-        );
-        for (const update of updates) {
-          const msg = update.message;
-          const blobs =
-            msg?.photo !== undefined
-              ? await (deps.overrides?.enrich?.(msg) ?? enrichThumb(msg))
-              : {};
-          ingestUpdate(update, blobs);
+          fetch: async (offset, sig) => {
+            const updates = await api.call(
+              "getUpdates",
+              z.array(TelegramUpdateSchema),
+              {
+                offset: offset === 0 ? undefined : offset,
+                timeout: TG_POLL_TIMEOUT_S,
+                allowed_updates: ["message"],
+              },
+              { signal: sig },
+            );
+            return {
+              items: updates,
+              next:
+                updates.length > 0
+                  ? updates[updates.length - 1]!.update_id + 1
+                  : undefined,
+            };
+          },
+          onItem: async (item) => {
+            // 批次层已过 schema；此处是驱动契约（items: unknown[]）的兜底窄化——
+            // 违规告警（不含正文）后跳过单条，不挡同批其余消息
+            const parsed = TelegramUpdateSchema.safeParse(item);
+            if (!parsed.success) {
+              log.warn("poll item failed wire schema", {
+                reason: parsed.error.issues[0]?.path.join(".") ?? "(root)",
+              });
+              return;
+            }
+            const update = parsed.data;
+            const msg = update.message;
+            const blobs =
+              msg?.photo !== undefined ? await enrichThumb(msg) : {};
+            ingestUpdate(update, blobs);
+          },
+          // 401/409 及其他不可重试 4xx → fatal（驱动上抛，下方翻译文案）
+          isFatal: (e) =>
+            e instanceof TelegramApiError && !isRetryableApiError(e),
+          onState: (s) => {
+            if (s === "ready") {
+              ctx.reportStatus({ state: "ready" });
+              log.info("polling started");
+            } else if (s === "degraded") {
+              // 驱动逐次失败上报（退避重试中）；detail 由 longPoll 不携带——
+              // 记日志带原因，状态面给降级标记
+              ctx.reportStatus({ state: "disconnected" });
+            }
+          },
+          policy: { retryMs: 1000, backoffMs: 2, maxDelayMs: 30_000 },
+        },
+        signal,
+      );
+    } catch (e) {
+      if (signal.aborted) return;
+      // fatal 文案与状态上报（与既有语义逐字对齐）
+      if (e instanceof TelegramApiError) {
+        if (e.errorCode === TG_ERROR_UNAUTHORIZED) {
+          log.error(tt("tg_token_invalid", { reason: e.description }));
+          ctx.reportStatus({ state: "fatal", detail: "401 token 无效" });
+          return;
         }
-        if (updates.length > 0) {
-          offset = updates[updates.length - 1]!.update_id + 1;
-          await host.state.set("poll:offset", offset);
+        if (e.errorCode === TG_ERROR_CONFLICT) {
+          log.error(tt("tg_poll_conflict", {}));
+          ctx.reportStatus({ state: "fatal", detail: "409 getUpdates 冲突" });
+          return;
         }
-        if (!firstSuccess) {
-          firstSuccess = true;
-          host.reportStatus({ state: "ready" });
-          log.info("polling started");
-        }
-        backoffMs = 1000; // 成功即重置退避
-      } catch (e) {
-        if (signal.aborted) return;
-        if (e instanceof TelegramApiError) {
-          if (e.errorCode === TG_ERROR_UNAUTHORIZED) {
-            log.error(tt("tg_token_invalid", { reason: e.description }));
-            host.reportStatus({ state: "fatal", detail: "401 token 无效" });
-            return;
-          }
-          if (e.errorCode === TG_ERROR_CONFLICT) {
-            log.error(tt("tg_poll_conflict", {}));
-            host.reportStatus({
-              state: "fatal",
-              detail: "409 getUpdates 冲突",
-            });
-            return;
-          }
-          if (!isRetryableApiError(e)) {
-            // 其他 4xx（如 400 参数错）不盲重试——fatal 人工处理
-            log.error("poll fatal error", {
-              code: e.errorCode,
-              detail: e.description,
-            });
-            host.reportStatus({
-              state: "fatal",
-              detail: `${e.errorCode} ${e.description}`,
-            });
-            return;
-          }
-        }
-        const detail = e instanceof Error ? e.message : String(e);
-        log.warn("poll error; will retry", { backoffMs, detail });
-        host.reportStatus({ state: "disconnected", detail });
-        await new Promise((r) => setTimeout(r, backoffMs));
-        backoffMs = Math.min(backoffMs * 2, 30_000);
+        log.error("poll fatal error", {
+          code: e.errorCode,
+          detail: e.description,
+        });
+        ctx.reportStatus({
+          state: "fatal",
+          detail: `${e.errorCode} ${e.description}`,
+        });
+        return;
       }
+      // 理论不可达（isFatal 只放行 TelegramApiError）；保守按 fatal 上报
+      const detail = e instanceof Error ? e.message : String(e);
+      ctx.reportStatus({ state: "fatal", detail });
     }
   }
 

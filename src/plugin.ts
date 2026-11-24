@@ -7,19 +7,27 @@
 // - passiveWindow=false：Telegram 无被动窗口概念，任意时刻可发 → 发送只走
 //   proactive 通道（net.reply 仅为契约兼容别名）；
 // - quota=false：无官方日额度（限流是 ~1 msg/s/chat 的网络节流，归 connector
-//   net 内部 pace，不做门禁工具）；
+//   net 内部节流，不做门禁工具）；
 // - recall=true：deleteMessage（bot 只能删自己的消息）；
 // - media 全支持：图（sendPhoto）/语音（sendVoice，OGG/MP3/M4A）。
+//
+// B⁺ T4.1：测试驱动权收口——opts.net 注入 FakeNetKit（verifyCredential 的
+// 控制面 HTTP；缺省真 NetKit）。实例数据面一律用宿主 ctx.net。
+// 自身身份（getMe）内聚在本插件：create 时 fire-and-forget 拉取（失败只降级
+// atMe 精度，wait 层从宽兜底），实例不感知身份——身份是 parser 的判定依据，
+// 归插件自持（identities 缓存）。
 
 import type {
   ConnectorLogger,
   ConnectorPlugin,
-  HostApi,
   NormalizedInbound,
+  PluginContext,
 } from "@qsense/connector-sdk";
+import { createNetKit, type NetKit } from "@qsense/connector-sdk";
 import {
   createTelegramApi,
   TelegramApiError,
+  TelegramMeSchema,
   TG_ERROR_UNAUTHORIZED,
   type TelegramInboundPayload,
 } from "./api";
@@ -30,8 +38,8 @@ import { tt } from "./texts";
 export interface TelegramConnectorOpts {
   /** 宿主根日志器（loadModule 注入；缺省=静默 noop，仅独立调试用） */
   log?: ConnectorLogger;
-  /** 测试注入：替换 Bot API 端点/fetch（CI 不碰真实网络） */
-  apiOverrides?: Parameters<typeof createTelegramApi>[1];
+  /** 控制面 NetKit（verifyCredential / 身份拉取；测试注入 FakeNetKit，缺省真实现） */
+  net?: NetKit;
 }
 
 /** 无日志器缺省（分仓包不依赖 SDK 运行时值，noop 本地实现） */
@@ -55,8 +63,10 @@ export function createTelegramConnector(
   opts: TelegramConnectorOpts = {},
 ): ConnectorPlugin {
   void (opts.log ?? noopLog()); // 当前无插件级共享服务；占位对齐 connector-qq 形态
+  // 控制面 HTTP（verifyCredential 等无实例上下文的注册期调用）
+  const controlHttp = (opts.net ?? createNetKit()).http({ timeoutMs: 30_000 });
 
-  // 自身身份缓存（botId → getMe 产物）：实例启动时回传，normalize 据此精确判 atMe。
+  // 自身身份缓存（botId → getMe 产物）：实例创建时拉取，normalize 据此精确判 atMe。
   // 未知（未回传前）→ atMe 省略，wait 层 mention 过滤按未知从宽。
   const identities = new Map<string, { id: number; username?: string }>();
 
@@ -120,8 +130,8 @@ export function createTelegramConnector(
           );
         }
         try {
-          const api = createTelegramApi(token, opts.apiOverrides);
-          const me = await api.call<{ id: number }>("getMe");
+          const api = createTelegramApi(controlHttp, token);
+          const me = await api.call("getMe", TelegramMeSchema);
           if (String(me.id) !== expected) {
             throw new Error(
               tt("tg_appid_mismatch", {
@@ -138,17 +148,19 @@ export function createTelegramConnector(
         }
       },
     },
-    create: (host: HostApi, creds) => {
-      const api = createTelegramApi(
-        creds.credential["token"] ?? "",
-        opts.apiOverrides,
-      );
-      return createTelegramInstance({
-        host,
-        botId: creds.botId,
-        api,
-        onIdentity: (identity) => identities.set(creds.botId, identity),
-      });
+    create: (ctx: PluginContext, creds) => {
+      const api = createTelegramApi(ctx.net.http({ timeoutMs: 30_000 }), creds.credential["token"] ?? "");
+      // 自身身份一次性获取（atMe 判定依据）：失败只降级精度，不阻塞实例启动。
+      // （内聚收口：身份归插件自持，实例不感知——T4.1 删除 onIdentity 回调）
+      api.call("getMe", TelegramMeSchema)
+        .then((me) => {
+          identities.set(creds.botId, {
+            id: me.id,
+            ...(me.username !== undefined ? { username: me.username } : {}),
+          });
+        })
+        .catch(() => undefined);
+      return createTelegramInstance({ ctx, botId: creds.botId, api });
     },
   };
 }

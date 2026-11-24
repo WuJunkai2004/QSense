@@ -1,8 +1,17 @@
 // Telegram Bot API 客户端（每 bot 一个）：JSON/Multipart 两路 + 可操作错误翻译。
-// 零运行时依赖（Node 20 全局 fetch/FormData/Blob）；测试经 overrides.fetch 注入假端点。
+// B⁺ T4.1：传输机械走 SDK NetKit（HttpClient 统一超时/中止合并/unref 定时器），
+// 应答经本包 wire schema（zod）校验——网络层出来的数据 = 插件声明类型，无盲转型；
+// 测试驱动权统一收口到 FakeNetKit（包内不再自持 overrides.fetch / 假端点管道）。
 // 分仓纪律：connector 只做网络（字节进出与机械编解码），不解码、不判断——
-// 载荷解读权在 core 的 normalize/telegram parser。
+// 载荷解读权在本包 normalize parser。
+//
+// 信封语义（不在 NetKit json() 层做，保错误保真）：Telegram 业务错误走应答体
+// {ok:false, error_code, description} 且 HTTP 状态同步 4xx/5xx——错误体的
+// description（"Bad Request: chat not found" 等）是可操作文案的正则锚点，
+// 必须读出来，不能用 NetError("http", status) 把它吞掉。
 
+import { z, type ZodType } from "zod";
+import { isNetError, type HttpClient, type HttpResponse } from "@qsense/connector-sdk";
 import { tt } from "./texts";
 
 /** Telegram API 错误（description 可读、error_code 官方码；分档判断在调用侧） */
@@ -20,22 +29,146 @@ export class TelegramApiError extends Error {
 export const TG_ERROR_UNAUTHORIZED = 401;
 export const TG_ERROR_CONFLICT = 409;
 
-/** 覆写点：字段名与官方 API 一致（snake_case 直通，不做映射层） */
-export interface TelegramApiOverrides {
-  fetch?: typeof globalThis.fetch;
-  /** 缺省 https://api.telegram.org */
-  baseUrl?: string;
-  /** 长轮询超时秒（官方建议 30-50；测试注入 0 短轮询） */
-  pollTimeoutS?: number;
-}
+/** 长轮询官方建议挂起时长（秒，50-30）；HTTP 超时 = 挂起时长 + 网络余量 */
+export const TG_POLL_TIMEOUT_S = 50;
 
-/** 官方 Update（只声明本项目消费的字段；透传未知键） */
-export interface TelegramUpdate {
-  update_id: number;
-  message?: TelegramMessage;
-  edited_message?: TelegramMessage;
+// ---------------------------------------------------------------------------
+// wire schema（官方线格式；looseObject 保透传键——宽容接收方原则）。
+// 纪律：轮询路径的 schema 只做结构守门（字段在不在、类型对不对），词表过滤
+// （chat.type 等）归 parser——官方新增枚举值不得把整批 update 卡死在网关。
+// 递归形状（reply_to_message / pinned_message）需要手写接口做显式标注——
+// schema 仍是运行时权威，接口仅编译期锚点（zod 无法推断递归类型）。
+// ---------------------------------------------------------------------------
+
+export interface TelegramUser {
+  id: number;
+  is_bot?: boolean;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
   [key: string]: unknown;
 }
+
+export const TelegramUserSchema = z.looseObject({
+  id: z.number(),
+  is_bot: z.boolean().optional(),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+  username: z.string().optional(),
+});
+
+export interface TelegramChat {
+  id: number;
+  /** 官方词表 private|group|supergroup|channel；schema 宽容为 string，词表过滤归 parser */
+  type: string;
+  title?: string;
+  first_name?: string;
+  last_name?: string;
+  [key: string]: unknown;
+}
+
+export const TelegramChatSchema = z.looseObject({
+  id: z.number(),
+  type: z.string(),
+  title: z.string().optional(),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+});
+
+export interface TelegramPhotoSize {
+  file_id: string;
+  file_unique_id?: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+export const TelegramPhotoSizeSchema = z.looseObject({
+  file_id: z.string(),
+  file_unique_id: z.string().optional(),
+  width: z.number(),
+  height: z.number(),
+  file_size: z.number().optional(),
+});
+
+export interface TelegramSticker {
+  file_id: string;
+  emoji?: string;
+  set_name?: string;
+  width?: number;
+  height?: number;
+  [key: string]: unknown;
+}
+
+export const TelegramStickerSchema = z.looseObject({
+  file_id: z.string(),
+  emoji: z.string().optional(),
+  set_name: z.string().optional(),
+  width: z.number().optional(),
+  height: z.number().optional(),
+});
+
+export interface TelegramVoice {
+  file_id: string;
+  duration: number;
+  mime_type?: string;
+  file_size?: number;
+}
+
+export const TelegramVoiceSchema = z.looseObject({
+  file_id: z.string(),
+  duration: z.number(),
+  mime_type: z.string().optional(),
+  file_size: z.number().optional(),
+});
+
+export interface TelegramVideo {
+  file_id: string;
+  duration: number;
+  width: number;
+  height: number;
+  mime_type?: string;
+  file_size?: number;
+}
+
+export const TelegramVideoSchema = z.looseObject({
+  file_id: z.string(),
+  duration: z.number(),
+  width: z.number(),
+  height: z.number(),
+  mime_type: z.string().optional(),
+  file_size: z.number().optional(),
+});
+
+export interface TelegramDocument {
+  file_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+export const TelegramDocumentSchema = z.looseObject({
+  file_id: z.string(),
+  file_name: z.string().optional(),
+  mime_type: z.string().optional(),
+  file_size: z.number().optional(),
+});
+
+/** 消息实体（mention/text_mention 等；parser 消费 type/offset/length/user） */
+export interface TelegramEntity {
+  type?: string;
+  offset?: number;
+  length?: number;
+  user?: TelegramUser;
+  [key: string]: unknown;
+}
+
+export const TelegramEntitySchema = z.looseObject({
+  type: z.string().optional(),
+  offset: z.number().optional(),
+  length: z.number().optional(),
+  user: TelegramUserSchema.optional(),
+});
 
 export interface TelegramMessage {
   message_id: number;
@@ -50,7 +183,7 @@ export interface TelegramMessage {
   video?: TelegramVideo;
   document?: TelegramDocument;
   sticker?: TelegramSticker;
-  entities?: Array<Record<string, unknown>>;
+  entities?: TelegramEntity[];
   // —— 服务消息（群生命周期；内容进括注行，与 QQ [卡片] 括注约定同风格） ——
   new_chat_members?: TelegramUser[];
   left_chat_member?: TelegramUser;
@@ -62,63 +195,43 @@ export interface TelegramMessage {
   [key: string]: unknown;
 }
 
-export interface TelegramSticker {
-  file_id: string;
-  emoji?: string;
-  set_name?: string;
-  width?: number;
-  height?: number;
+export const TelegramMessageSchema: z.ZodType<TelegramMessage> = z.lazy(() =>
+  z.looseObject({
+    message_id: z.number(),
+    from: TelegramUserSchema.optional(),
+    chat: TelegramChatSchema,
+    date: z.number().optional(),
+    text: z.string().optional(),
+    caption: z.string().optional(),
+    reply_to_message: z.lazy(() => TelegramMessageSchema).optional(),
+    photo: z.array(TelegramPhotoSizeSchema).optional(),
+    voice: TelegramVoiceSchema.optional(),
+    video: TelegramVideoSchema.optional(),
+    document: TelegramDocumentSchema.optional(),
+    sticker: TelegramStickerSchema.optional(),
+    entities: z.array(TelegramEntitySchema).optional(),
+    new_chat_members: z.array(TelegramUserSchema).optional(),
+    left_chat_member: TelegramUserSchema.optional(),
+    new_chat_title: z.string().optional(),
+    new_chat_photo: TelegramPhotoSizeSchema.optional(),
+    delete_chat_photo: z.literal(true).optional(),
+    group_chat_created: z.literal(true).optional(),
+    pinned_message: z.lazy(() => TelegramMessageSchema).optional(),
+  }),
+);
+
+export interface TelegramUpdate {
+  update_id: number;
+  message?: TelegramMessage;
+  edited_message?: TelegramMessage;
   [key: string]: unknown;
 }
 
-export interface TelegramUser {
-  id: number;
-  is_bot?: boolean;
-  first_name?: string;
-  last_name?: string;
-  username?: string;
-  [key: string]: unknown;
-}
-
-export interface TelegramChat {
-  id: number;
-  type: "private" | "group" | "supergroup" | "channel";
-  title?: string;
-  first_name?: string;
-  last_name?: string;
-  [key: string]: unknown;
-}
-
-export interface TelegramPhotoSize {
-  file_id: string;
-  file_unique_id?: string;
-  width: number;
-  height: number;
-  file_size?: number;
-}
-
-export interface TelegramVoice {
-  file_id: string;
-  duration: number;
-  mime_type?: string;
-  file_size?: number;
-}
-
-export interface TelegramVideo {
-  file_id: string;
-  duration: number;
-  width: number;
-  height: number;
-  mime_type?: string;
-  file_size?: number;
-}
-
-export interface TelegramDocument {
-  file_id: string;
-  file_name?: string;
-  mime_type?: string;
-  file_size?: number;
-}
+export const TelegramUpdateSchema = z.looseObject({
+  update_id: z.number(),
+  message: TelegramMessageSchema.optional(),
+  edited_message: TelegramMessageSchema.optional(),
+});
 
 /** getFile 的返回（file_path 拼下载 URL 用；<4h 有效） */
 export interface TelegramFile {
@@ -126,6 +239,34 @@ export interface TelegramFile {
   file_path?: string;
   file_size?: number;
 }
+
+export const TelegramFileSchema = z.looseObject({
+  file_id: z.string(),
+  file_path: z.string().optional(),
+  file_size: z.number().optional(),
+});
+
+/** getMe 产物（atMe 身份判定 + verifyCredential 的 appid 对照） */
+export interface TelegramMe {
+  id: number;
+  username?: string;
+  [key: string]: unknown;
+}
+
+export const TelegramMeSchema = z.looseObject({
+  id: z.number(),
+  username: z.string().optional(),
+});
+
+/** sendMessage/sendPhoto/sendVoice 回执（发送侧只消费 message_id） */
+export interface TelegramMessageIdResult {
+  message_id: number;
+  [key: string]: unknown;
+}
+
+export const TelegramMessageIdResultSchema = z.looseObject({
+  message_id: z.number(),
+});
 
 /** 上行载荷信封（TelegramInboundPayload）：core ingest 按 platform 字段路由到
  * normalize/telegram parser。core 侧经包名 type-only 导入同一形状（对齐 ui.ts
@@ -139,17 +280,20 @@ export interface TelegramInboundPayload {
 
 export interface TelegramApi {
   /**
-   * JSON POST 调用（Bot API 绝大多数方法是 POST+JSON 可用）；
-   * opts.signal 透传 fetch（长轮询打断——stop() 即时生效，不必等 timeout 到期）
+   * JSON POST 调用（Bot API 绝大多数方法是 POST+JSON 可用）。
+   * 结果经 result schema 校验返回（网络层出来的数据 = 声明类型）；
+   * opts.signal 透传（长轮询打断——stop() 即时生效，不必等 timeout 到期）。
    */
   call<T>(
     method: string,
+    result: ZodType<T>,
     body?: Record<string, unknown>,
     opts?: { signal?: AbortSignal },
   ): Promise<T>;
   /** multipart 上传（sendPhoto/sendVoice 等的文件直传） */
   upload<T>(
     method: string,
+    result: ZodType<T>,
     file: { buffer: Buffer; filename: string; mime: string },
     field: string,
     fields: Record<string, string>,
@@ -158,71 +302,63 @@ export interface TelegramApi {
   fileUrl(filePath: string): string;
 }
 
-export function createTelegramApi(
-  token: string,
-  overrides: TelegramApiOverrides = {},
-): TelegramApi {
-  const doFetch = overrides.fetch ?? globalThis.fetch;
-  const base = (overrides.baseUrl ?? "https://api.telegram.org").replace(
-    /\/$/,
-    "",
-  );
-  const pollTimeoutS = overrides.pollTimeoutS ?? 50;
+const BASE_URL = "https://api.telegram.org";
 
-  async function unwrap<T>(res: Response): Promise<T> {
-    let body: { ok?: boolean; result?: T; description?: string; error_code?: number };
+/** 应答信封：ok 缺失/为 false → TelegramApiError（保真 description/error_code）；
+ * ok=true → result 字段过 wire schema（违规=可定位字段路径，不带数据值）。 */
+const EnvelopeSchema = z.looseObject({
+  ok: z.boolean(),
+  description: z.string().optional(),
+  error_code: z.number().optional(),
+});
+
+function unwrap<T>(res: HttpResponse, result: ZodType<T>): Promise<T> {
+  return (async () => {
+    let raw: unknown;
     try {
-      body = (await res.json()) as typeof body;
+      raw = await res.json();
     } catch {
+      throw new TelegramApiError(`HTTP ${res.status}（响应非 JSON）`, res.status);
+    }
+    const env = EnvelopeSchema.safeParse(raw);
+    if (!env.success || env.data.ok !== true) {
       throw new TelegramApiError(
-        `HTTP ${res.status}（响应非 JSON）`,
+        (env.success ? env.data.description : undefined) ?? `HTTP ${res.status}`,
+        (env.success ? env.data.error_code : undefined) ?? res.status,
+      );
+    }
+    const parsed = result.safeParse(env.data["result"]);
+    if (!parsed.success) {
+      const paths = parsed.error.issues
+        .slice(0, 5)
+        .map((iss) => `${iss.path.join(".") || "(root)"}: ${iss.message}`)
+        .join("; ");
+      throw new TelegramApiError(
+        `响应不符合 wire schema：${paths}`,
         res.status,
       );
     }
-    if (body.ok !== true || body.result === undefined) {
-      throw new TelegramApiError(
-        body.description ?? `HTTP ${res.status}`,
-        body.error_code ?? res.status,
-      );
-    }
-    return body.result;
-  }
+    return parsed.data;
+  })();
+}
 
+export function createTelegramApi(http: HttpClient, token: string): TelegramApi {
+  const url = (method: string): string => `${BASE_URL}/bot${token}/${method}`;
   return {
-    async call<T>(
-      method: string,
-      body: Record<string, unknown> = {},
-      opts?: { signal?: AbortSignal },
-    ): Promise<T> {
-      let res: Response;
-      try {
-        res = await doFetch(`${base}/bot${token}/${method}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-          signal:
-            opts?.signal ??
-            AbortSignal.timeout(
-              // 长轮询按官方 timeout + 网络余量；其余方法 30s 足够
-              method === "getUpdates" ? pollTimeoutS * 1000 + 15_000 : 30_000,
-            ),
-        });
-      } catch (e) {
-        // 网络层失败（超时/DNS/重置/中断）→ 统一按 0 码抛出（调用侧按可重试分档）
-        throw new TelegramApiError(
-          e instanceof Error ? e.message : String(e),
-          0,
-        );
-      }
-      return unwrap<T>(res);
+    async call(method, result, body = {}, opts) {
+      const res = await http.request(url(method), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        timeoutMs:
+          // 长轮询按官方 timeout + 网络余量；其余方法 30s 足够
+          method === "getUpdates" ? TG_POLL_TIMEOUT_S * 1000 + 15_000 : 30_000,
+        ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+      });
+      return unwrap(res, result);
     },
 
-    async upload<T>(
-      method: string,
-      file: { buffer: Buffer; filename: string; mime: string },
-      field: string,
-      fields: Record<string, string>,
-    ): Promise<T> {
+    async upload(method, result, file, field, fields) {
       const form = new FormData();
       for (const [k, v] of Object.entries(fields)) form.append(k, v);
       form.append(
@@ -230,35 +366,31 @@ export function createTelegramApi(
         new Blob([new Uint8Array(file.buffer)], { type: file.mime }),
         file.filename,
       );
-      let res: Response;
-      try {
-        res = await doFetch(`${base}/bot${token}/${method}`, {
-          method: "POST",
-          body: form,
-          signal: AbortSignal.timeout(60_000),
-        });
-      } catch (e) {
-        throw new TelegramApiError(
-          e instanceof Error ? e.message : String(e),
-          0,
-        );
-      }
-      return unwrap<T>(res);
+      const res = await http.request(url(method), {
+        method: "POST",
+        body: form,
+        timeoutMs: 60_000,
+      });
+      return unwrap(res, result);
     },
 
     fileUrl(filePath: string): string {
-      return `${base}/file/bot${token}/${filePath}`;
+      return `${BASE_URL}/file/bot${token}/${filePath}`;
     },
   };
 }
 
-/** 可重试分档：网络层失败（code=0）/ 5xx / 429 → true（实例退避重试）；401/409 → fatal */
+/** 可重试分档：NetError 机械档（timeout/network）→ true；TelegramApiError
+ * 网络 0 码 / 5xx / 429 → true（实例退避重试）；401/409 及其他 4xx → false（fatal） */
 export function isRetryableApiError(e: unknown): boolean {
-  if (!(e instanceof TelegramApiError)) return true; // 非 API 错误（编程错误除外）保守可重试
-  if (e.errorCode === 0) return true;
-  if (e.errorCode === TG_ERROR_UNAUTHORIZED) return false;
-  if (e.errorCode === TG_ERROR_CONFLICT) return false;
-  return e.errorCode >= 500 || e.errorCode === 429;
+  if (isNetError(e)) return e.kind === "network" || e.kind === "timeout";
+  if (e instanceof TelegramApiError) {
+    if (e.errorCode === 0) return true;
+    if (e.errorCode === TG_ERROR_UNAUTHORIZED) return false;
+    if (e.errorCode === TG_ERROR_CONFLICT) return false;
+    return e.errorCode >= 500 || e.errorCode === 429;
+  }
+  return true; // 非 API/网络错误保守可重试
 }
 
 /** 发送类错误的可操作翻译（connector 自带平台提示，宿主/基座不再加工平台语义） */
