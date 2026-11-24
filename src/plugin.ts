@@ -13,16 +13,25 @@ import type {
   ConnectorPlugin,
   NormalizedInbound,
   PluginContext,
-  PluginToolCtx,
-  ToolPayload,
+  QrPairCreateOut,
+  QrPairPollOut,
+  WebuiRouteOut,
 } from "@qsense/connector-sdk";
-import { createNetKit, type NetKit } from "@qsense/connector-sdk";
+import {
+  createNetKit,
+  pluginTool,
+  webuiJsonRoute,
+  webuiRoute,
+  type NetKit,
+} from "@qsense/connector-sdk";
+import { z } from "zod";
 import { createQqInstance, type QqOverrides } from "./instance";
 import {
   PER_GROUP_DAILY,
   createQuota,
   dailyTotalOf,
   type QqSendLimits,
+  type QuotaSnapshot,
 } from "./quota";
 import { createQrBindTask, pollQrBind } from "./qrbind";
 import { appOfCreds, type QqNetDeps } from "./net";
@@ -64,6 +73,18 @@ const QR_TASK_TTL_MS = 10 * 60_000;
 export interface QqConnectorPlugin extends ConnectorPlugin {
   /** 移除 bot 时的运行时卫生（清 token 缓存 + 释放 host/app 映射）；宿主 removeBot 调用 */
   forget(botId: string): void;
+}
+
+// —— webui 路由返回形状（B⁺ T6：qr-pair 协议形状在 SDK 契约；平台自有路由
+// 返回接口 extends WebuiRouteOut）——
+
+/** GET /quota：主动发送额度水位（平台自有路由形状） */
+interface QuotaWaterlineOut extends WebuiRouteOut {
+  bot: string;
+  send_enabled: boolean;
+  auth_level: string;
+  proactive_sent_today: number;
+  buckets: QuotaSnapshot;
 }
 
 export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin {
@@ -113,12 +134,13 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
     credentialSecrets: ["secret"],
     login: { kind: "qr-pair", create: "/login/qr/create", poll: "/login/qr/poll" },
     tools: [
-      {
+      pluginTool({
         name: "quota",
         description:
           "主动消息额度水位（只读）：发送开关、认证等级、令牌桶余量、当日已发、官方限额常量。",
         inputSchema: { type: "object", properties: {} },
-        handler: async (_args, ctx: PluginToolCtx): Promise<ToolPayload> => {
+        argsSchema: z.object({}),
+        run: async (_args, ctx) => {
           const date = new Date().toISOString().slice(0, 10); // 与旧实现一致（UTC 日期查询）
           const payload = {
             send_enabled: ctx.config.sendEnabled ?? false,
@@ -140,14 +162,14 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
             content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
           };
         },
-      },
+      }),
     ],
     webui: [
-      {
+      webuiRoute({
         method: "POST",
         path: "/login/qr/create",
         summary: "创建扫码绑定任务（官方 lite 接口）",
-        handler: async () => {
+        handler: async (): Promise<QrPairCreateOut> => {
           pruneQrTasks();
           const task = await createQrBindTask(controlHttp);
           qrTasks.set(task.taskId, {
@@ -160,17 +182,14 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
             interval_s: 2,
           };
         },
-      },
-      {
+      }),
+      webuiJsonRoute({
         method: "POST",
         path: "/login/qr/poll",
         summary: "轮询扫码绑定结果",
-        handler: async (req) => {
-          const body = (req.body ?? {}) as Record<string, unknown>;
-          const taskId =
-            typeof body["task_id"] === "string"
-              ? (body["task_id"] as string).trim()
-              : "";
+        bodySchema: z.object({ task_id: z.string().optional() }),
+        handler: async (req): Promise<QrPairPollOut> => {
+          const taskId = (req.body.task_id ?? "").trim();
           const task = qrTasks.get(taskId);
           if (task === undefined) {
             // 任务不存在 / 已过期清理 / 进程重启：前端据此重开任务
@@ -189,12 +208,12 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
             user_openid: r.userOpenid,
           };
         },
-      },
-      {
+      }),
+      webuiRoute({
         method: "GET",
         path: "/quota",
         summary: "主动发送额度水位",
-        handler: async (req) => {
+        handler: async (req): Promise<QuotaWaterlineOut> => {
           const raw = req.query["bot"];
           const botId = typeof raw === "string" ? raw.trim() : "";
           const config = req.configOf(botId);
@@ -208,7 +227,7 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
             buckets: await quota.snapshot(botId, config, state),
           };
         },
-      },
+      }),
     ],
     hooks: {
       verifyCredential: async (credential) => {

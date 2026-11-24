@@ -11,6 +11,8 @@ import type {
   ProactiveVerdict,
   StatePort,
 } from "@qsense/connector-sdk";
+import { parseJsonWith } from "@qsense/connector-sdk";
+import { z } from "zod";
 import { tt } from "./texts";
 
 export const PER_RELATION_QPM = 20;
@@ -72,8 +74,14 @@ interface DailyStore {
   targets: Record<string, number>;
 }
 
+/** DailyStore 持久化形状（JSON 文本解析锚；坏档按空计数器） */
+const DailyStoreSchema = z.object({
+  targets: z.record(z.string(), z.number()),
+});
+
 async function readStore(state: StatePort, date: string): Promise<DailyStore> {
-  return (await state.get<DailyStore>(quotaKey(date))) ?? { targets: {} };
+  const raw = await state.get(quotaKey(date));
+  return parseJsonWith(DailyStoreSchema, raw ?? "") ?? { targets: {} };
 }
 
 /** 单关系当日已发（原 repo.proactiveCountFor 语义） */
@@ -102,7 +110,7 @@ async function incrDaily(
 ): Promise<void> {
   const store = await readStore(state, date);
   store.targets[target] = (store.targets[target] ?? 0) + 1;
-  await state.set(quotaKey(date), store);
+  await state.set(quotaKey(date), JSON.stringify(store));
 }
 
 // —— 额度模块（门禁 + 记账 + 快照） ——

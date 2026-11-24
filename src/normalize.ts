@@ -10,11 +10,14 @@
 // 返回 null（容错丢弃语义不变）。
 
 import type {
+  ArkCard,
   NormalizedAttachment,
   NormalizedInbound,
   NormalizedMessage,
   NormalizedMention,
+  RawEnvelope,
 } from "@qsense/connector-sdk";
+import { ArkCardSchema } from "@qsense/connector-sdk";
 import type { QqAttachment, QqAuthor, QqMention } from "./wire";
 import { QQ_EL_FORWARD } from "./wire";
 import {
@@ -114,9 +117,13 @@ function authorField(author: QqAuthor | undefined, keys: readonly AuthorTextFiel
   return "";
 }
 
-/** ARK 卡片原始对象提取（ark / ark_data 字段名都试；合法不透明边界，契约 ark?: unknown） */
-function extractArk(r: QqMessageEventData): unknown {
-  return r.ark_data ?? r.ark;
+/** ARK 卡片提取（ark / ark_data 字段名都试）：ArkCard 契约形状校验
+ * （SDK ArkCardSchema，真机采样锚定）；不合形状 = 无卡片（可观测降级） */
+function extractArk(r: QqMessageEventData): ArkCard | undefined {
+  const v = r.ark_data ?? r.ark;
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const parsed = ArkCardSchema.safeParse(v);
+  return parsed.success ? parsed.data : undefined;
 }
 
 /** 消息类事件 → NormalizedMessage（元素树分解为语义件）；非消息事件/形状不符返回 null */
@@ -224,7 +231,7 @@ export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
     ark: extractArk(r),
     msgIdx: extMsgIdx,
     ...(atMe !== undefined ? { atMe } : {}),
-    raw: r,
+    rawJson: JSON.stringify(r),
   };
 }
 
@@ -252,7 +259,7 @@ function userOpenidOf(data: unknown): string {
  */
 export function normalizeQqEnvelope(
   botId: string,
-  payload: unknown,
+  payload: RawEnvelope,
 ): NormalizedInbound | null {
   const env = QqEnvelopeSchema.safeParse(payload);
   if (!env.success) return null;

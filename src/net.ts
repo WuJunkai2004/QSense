@@ -28,6 +28,7 @@ import type {
   SendReceipt,
   UploadMediaWire,
 } from "@qsense/connector-sdk";
+import { flatLogMeta } from "./logmeta";
 
 /** 官方消息 API 最小接口（生产=SDK MessageApi/MediaApi 适配；测试=记录调用的 mock） */
 export interface QQSendApi {
@@ -153,10 +154,10 @@ export function buildSdkSendApi(
 ): QQSendApi {
   const client = new ApiClient({
     logger: {
-      info: (msg, meta) => deps.log.debug(msg, meta),
-      error: (msg, meta) => deps.log.error(msg, meta),
-      warn: (msg, meta) => deps.log.warn(msg, meta),
-      debug: (msg, meta) => deps.log.debug(msg, meta),
+      info: (msg, meta) => deps.log.debug(msg, flatLogMeta(meta)),
+      error: (msg, meta) => deps.log.error(msg, flatLogMeta(meta)),
+      warn: (msg, meta) => deps.log.warn(msg, flatLogMeta(meta)),
+      debug: (msg, meta) => deps.log.debug(msg, flatLogMeta(meta)),
     },
   });
   const messageApi = new MessageApi(client, deps.tokenManager, {

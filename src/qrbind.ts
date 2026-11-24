@@ -18,7 +18,9 @@
 // appid+AppSecret 添加路径常驻不删，本模块故障不影响添加功能。
 
 import { createDecipheriv, randomBytes } from "node:crypto";
+import { z } from "zod";
 import type { HttpClient, HttpResponse } from "@qsense/connector-sdk";
+import { parseJsonWith } from "@qsense/connector-sdk";
 
 export const QQ_BIND_HOST = "q.qq.com";
 
@@ -43,12 +45,33 @@ export type QrPollResult =
 
 export class QrBindError extends Error {}
 
+/**
+ * 官方 lite 应答统一信封（retcode=0 才算成功）：形状按实际读取字段定义
+ * （create→data.task_id；poll→data.status/bot_appid/bot_encrypt_secret/user_openid），
+ * 其余官方字段经 looseObject 透传（宽容接收方原则）。
+ */
+const LiteRespSchema = z.object({
+  retcode: z.number().optional(),
+  msg: z.string().optional(),
+  data: z
+    .looseObject({
+      task_id: z.string().optional(),
+      status: z.number().optional(),
+      bot_appid: z.string().optional(),
+      bot_encrypt_secret: z.string().optional(),
+      user_openid: z.string().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+type LiteResp = z.infer<typeof LiteRespSchema>;
+
 /** 统一 POST JSON + retcode 检查（官方 lite 风格：retcode=0 才算成功） */
 async function postLite(
   http: HttpClient,
   path: string,
   payload: Record<string, string>,
-): Promise<Record<string, unknown>> {
+): Promise<LiteResp> {
   let res: HttpResponse;
   try {
     res = await http.request(`https://${QQ_BIND_HOST}${path}`, {
@@ -66,18 +89,20 @@ async function postLite(
         "可改用手动方式添加（appid + AppSecret）。",
     );
   }
-  const body = (await res.json().catch(() => null)) as
-    (Record<string, unknown> & { retcode?: unknown; msg?: unknown }) | null;
-  if (res.status < 200 || res.status >= 300 || body === null) {
+  const okStatus = res.status >= 200 && res.status < 300;
+  const body = okStatus
+    ? parseJsonWith(LiteRespSchema, await res.text().catch(() => ""))
+    : null;
+  if (!okStatus || body === null) {
     throw new QrBindError(
       `扫码绑定接口异常（HTTP ${res.status}）。可改用手动方式添加。`,
     );
   }
-  const retcode = Number(body.retcode ?? 0);
+  const retcode = body.retcode ?? 0;
   if (retcode !== 0) {
     throw new QrBindError(
       `扫码绑定接口失败（retcode=${retcode}）：${
-        typeof body.msg === "string" && body.msg !== "" ? body.msg : "未知原因"
+        body.msg !== undefined && body.msg !== "" ? body.msg : "未知原因"
       }`,
     );
   }
@@ -88,8 +113,7 @@ async function postLite(
 export async function createQrBindTask(http: HttpClient): Promise<QrTask> {
   const bindKey = randomBytes(32).toString("base64");
   const body = await postLite(http, "/lite/create_bind_task", { key: bindKey });
-  const data = body.data as Record<string, unknown> | undefined;
-  const taskId = typeof data?.task_id === "string" ? data.task_id.trim() : "";
+  const taskId = (body.data?.task_id ?? "").trim();
   if (taskId === "") {
     throw new QrBindError(
       "扫码绑定任务创建失败：官方响应缺少 task_id。可改用手动方式添加。",
@@ -110,15 +134,11 @@ export async function pollQrBind(
   const body = await postLite(http, "/lite/poll_bind_result", {
     task_id: task.taskId,
   });
-  const data = body.data as Record<string, unknown> | undefined;
-  const status = Number(data?.status ?? 0);
+  const data = body.data;
+  const status = data?.status ?? 0;
   if (status === 2) {
-    const appid =
-      typeof data?.bot_appid === "string" ? data.bot_appid.trim() : "";
-    const enc =
-      typeof data?.bot_encrypt_secret === "string"
-        ? data.bot_encrypt_secret.trim()
-        : "";
+    const appid = (data?.bot_appid ?? "").trim();
+    const enc = (data?.bot_encrypt_secret ?? "").trim();
     if (appid === "" || enc === "") {
       throw new QrBindError(
         "扫码完成但官方未返回完整凭据（缺 appid 或密文），请重试或手动添加。",
@@ -128,7 +148,7 @@ export async function pollQrBind(
       status: "completed",
       appid,
       secret: decryptBindSecret(enc, task.bindKey),
-      userOpenid: typeof data?.user_openid === "string" ? data.user_openid : "",
+      userOpenid: data?.user_openid ?? "",
     };
   }
   if (status === 3) return { status: "expired" };

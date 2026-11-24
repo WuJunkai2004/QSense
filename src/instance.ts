@@ -19,6 +19,9 @@ import type {
   PluginContext,
   StatePort,
 } from "@qsense/connector-sdk";
+import { parseJsonWith } from "@qsense/connector-sdk";
+import { z } from "zod";
+import { flatLogMeta } from "./logmeta";
 import { OUR_INTENTS } from "./intents";
 import { createQqNet, appOfCreds, type QQSendApi } from "./net";
 import { fetchGatewayUrl } from "./url";
@@ -61,7 +64,8 @@ function sessionPort(
     load: () => cached,
     save: (session: PersistedSession): void => {
       cached = session;
-      void state.set("gw:session", session);
+      // StatePort 值 = JSON 文本（B⁺ T6 字符串化；旧数据本就是 stringify 产物，兼容）
+      void state.set("gw:session", JSON.stringify(session));
     },
     clear: (): void => {
       cached = null;
@@ -70,12 +74,18 @@ function sessionPort(
   };
 }
 
-/** 坏数据视为无会话，走全新 IDENTIFY（与旧 kvSessionPort 校验一致） */
+/** 坏数据视为无会话，走全新 IDENTIFY（schema 解析 + 形状校验双兜底） */
 function validSession(v: PersistedSession | null | undefined): PersistedSession | null {
   if (v === null || v === undefined) return null;
   if (typeof v.sessionId !== "string" || v.sessionId === "") return null;
   return v;
 }
+
+/** gw:session 持久化形状（官方 PersistedSession 的 JSON 文本解析锚） */
+const PersistedSessionSchema = z.object({
+  sessionId: z.string(),
+  lastSeq: z.number().nullable(),
+});
 
 export function createQqInstance(deps: QqInstanceDeps): ConnectorInstance {
   const { ctx, creds, tokens, overrides } = deps;
@@ -104,7 +114,10 @@ export function createQqInstance(deps: QqInstanceDeps): ConnectorInstance {
       if (!overrides?.getAccessToken) tokens.startBackground(app);
       loop = (async () => {
         const initial = validSession(
-          await host.state.get<PersistedSession>("gw:session"),
+          parseJsonWith(
+            PersistedSessionSchema,
+            (await host.state.get("gw:session")) ?? "",
+          ),
         );
         const connection = new GatewayConnection({
           account: {
@@ -114,9 +127,9 @@ export function createQqInstance(deps: QqInstanceDeps): ConnectorInstance {
           },
           abortSignal: c.signal,
           log: {
-            info: (msg, meta) => log.debug(msg, meta),
-            warn: (msg, meta) => log.warn(msg, meta),
-            error: (msg, meta) => log.error(msg, meta),
+            info: (msg, meta) => log.debug(msg, flatLogMeta(meta)),
+            warn: (msg, meta) => log.warn(msg, flatLogMeta(meta)),
+            error: (msg, meta) => log.error(msg, flatLogMeta(meta)),
           },
           intents: OUR_INTENTS,
           session: sessionPort(host.state, initial),

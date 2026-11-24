@@ -7,21 +7,18 @@
 import { tt, type QqTextKey } from "./texts";
 
 /** 容错提取业务错误码（不 import 官方 SDK 类型，避免测试造错误对象时的类型耦合） */
-export function extractBizCode(e: unknown): number | null {
-  if (e !== null && typeof e === "object") {
-    const code = (e as { bizCode?: unknown }).bizCode;
-    if (typeof code === "number") return code;
-  }
-  return null;
+export function extractBizCode(e: Error): number | null {
+  const code = (e as { bizCode?: number }).bizCode;
+  return typeof code === "number" ? code : null;
 }
 
 /** 304036：Markdown 无模板权限 → 自动降级纯文本（唯一在发送器内自动重试的码） */
-export function isMarkdownPermissionError(e: unknown): boolean {
+export function isMarkdownPermissionError(e: Error): boolean {
   return extractBizCode(e) === 304036;
 }
 
 /** 304023/304024：异步受理进入人工审核 → pending_audit，勿重发 */
-export function isAuditPendingCode(e: unknown): boolean {
+export function isAuditPendingCode(e: Error): boolean {
   const code = extractBizCode(e);
   return code === 304023 || code === 304024;
 }
@@ -47,7 +44,7 @@ const DIRECT: Record<number, QqTextKey> = {
 export const qqSendError = {
   isAuditPending: isAuditPendingCode,
   isMarkdownDowngrade: isMarkdownPermissionError,
-  describe(e: unknown): string | undefined {
+  describe(e: Error): string | undefined {
     const biz = extractBizCode(e);
     if (biz === null) return undefined;
     const key = DIRECT[biz];

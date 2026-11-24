@@ -4,6 +4,7 @@
 
 import { z } from "zod";
 import type { HttpClient, HttpResponse } from "@qsense/connector-sdk";
+import { parseJsonWith } from "@qsense/connector-sdk";
 import { tt } from "./texts";
 
 export const QQ_API_BASE = "https://api.bot.qq.com";
@@ -28,14 +29,15 @@ export async function fetchGatewayUrl(
       }),
     );
   }
-  const raw: unknown = await res.json().catch(() => null);
-  const parsed =
+  // 应答体 JSON 文本 → parseJsonWith（schema 把关；坏 JSON/形状不符 → null）
+  const text = await res.text().catch(() => "");
+  const url =
     res.status >= 200 && res.status < 300
-      ? GatewayUrlSchema.safeParse(raw)
-      : null;
-  if (parsed !== null && parsed.success) {
-    return parsed.data.url;
+      ? parseJsonWith(GatewayUrlSchema, text)?.url
+      : undefined;
+  if (url !== undefined && url !== "") {
+    return url;
   }
-  const reason = raw !== null ? JSON.stringify(raw).slice(0, 200) : "empty body";
+  const reason = text !== "" ? text.slice(0, 200) : "empty body";
   throw new Error(tt("gw_url_fail", { status: res.status, reason }));
 }

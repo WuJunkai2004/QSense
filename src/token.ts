@@ -5,6 +5,7 @@
 
 import { TokenManager } from "@tencent-connect/qqbot-nodejs/protocol";
 import type { ConnectorLogger } from "@qsense/connector-sdk";
+import { flatLogMeta } from "./logmeta";
 
 /** QQ 凭据形状（bots 表列投影；P3 起由 BotCreds.credential JSON 承载） */
 export interface QqApp {
@@ -19,10 +20,10 @@ export class TokenService {
   constructor(log: ConnectorLogger, baseUrl?: string) {
     this.manager = new TokenManager({
       logger: {
-        info: (msg, meta) => log.debug(msg, meta),
-        warn: (msg, meta) => log.warn(msg, meta),
-        error: (msg, meta) => log.error(msg, meta),
-        debug: (msg, meta) => log.debug(msg, meta),
+        info: (msg, meta) => log.debug(msg, flatLogMeta(meta)),
+        warn: (msg, meta) => log.warn(msg, flatLogMeta(meta)),
+        error: (msg, meta) => log.error(msg, flatLogMeta(meta)),
+        debug: (msg, meta) => log.debug(msg, flatLogMeta(meta)),
       },
       ...(baseUrl !== undefined ? { baseUrl } : {}),
     });
