@@ -11,7 +11,7 @@
 
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   ConnectorError,
   formatZodIssues,
@@ -21,6 +21,7 @@ import {
   type PluginWebuiRoute,
   type WebuiMethod,
 } from "@qsense/connector-sdk";
+import { z } from "zod";
 import { QrBindError } from "@qsense/connector-qq";
 import { BotRegistryError, type BotRegistry } from "../bots";
 import type { ConnectorRuntime, GatewayStatus } from "../connectors/runtime";
@@ -67,31 +68,118 @@ const MIME: Record<string, string> = {
 /** 统一错误映射：BotRegistryError（含参数类错误）→ 400，ConnectorError（插件声明 status）
  *  透传，QrBindError（上游扫码接口）→ 502，TtsError（TTS 上游）→ 502，其余 → 500（记日志）。
  *  连接器对 SDK 只做类型导入（各自打包后 instanceof 跨包不成立），其自带的可操作错误以
- *  「Error 上带合法 status」的鸭子类型识别：透传状态与文案，不落入通用 500 文案。 */
-function mapError(
-  log: Logger,
-  e: unknown,
-): { status: number; message: string } {
+ *  「Error 上带合法 status」的鸭子类型识别：`in` 运行时窄化取 status，透传状态与文案，
+ *  不落入通用 500 文案。 */
+function mapError(log: Logger, e: Error): { status: number; message: string } {
   if (e instanceof BotRegistryError) return { status: 400, message: e.message };
   if (e instanceof ConnectorError) return { status: e.status, message: e.message };
   if (e instanceof QrBindError) return { status: 502, message: e.message };
   if (e instanceof TtsError) return { status: 502, message: e.message };
-  if (e instanceof Error) {
-    const status = (e as { status?: unknown }).status;
+  if ("status" in e) {
+    const status = e.status; // in 窄化（TS 4.9 unlisted property）：typeof 现场校验
     if (typeof status === "number" && Number.isInteger(status) && status >= 400 && status < 600) {
       return { status, message: e.message };
     }
   }
-  const message = e instanceof Error ? e.message : String(e);
-  log.error("ui api error", { reason: message.slice(0, 300) });
+  log.error("ui api error", { reason: e.message.slice(0, 300) });
   return { status: 500, message: "内部错误，请查看服务日志。" };
 }
+
+// —— wire 边界（B⁺ T6）：unknown 库类型（Fastify query/body）在入口 zod 收口 ——
+// 「语言级 unknown 来自库签名 → 立即过 zod schema」是既定例外路径（types.md §一）；
+// 解析产物即具体类型，业务检查（文案锚点）留在 handler。
+
+/** query 字典：Fastify query（库类型 unknown，运行时为字符串/重复参数数组）→ 字符串字典
+ * （数组值=重复参数，跳过——与旧 typeof 过滤语义一致）；垃圾形状兜底空字典 */
+const QueryDict = z
+  .record(z.string(), z.union([z.string(), z.array(z.string())]))
+  .catch({})
+  .transform((q) => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(q)) {
+      if (typeof v === "string") out[k] = v;
+    }
+    return out;
+  });
+
+/** 设置页 wire 形状（PUT /settings）：全部可选段；业务校验（appid 已注册等）留 handler */
+const SettingsWire = z.object({
+  send_enabled: z.boolean().optional(),
+  allow_groups: z
+    .array(
+      z.object({ appid: z.string(), groups: z.array(z.string().min(1)) }),
+    )
+    .optional(),
+  auth_levels: z
+    .array(
+      z.object({
+        appid: z.string(),
+        auth_level: z.enum(["certified", "uncertified"]),
+      }),
+    )
+    .optional(),
+  tts_enabled: z
+    .array(z.object({ appid: z.string(), enabled: z.boolean() }))
+    .optional(),
+  receive_enabled: z
+    .array(z.object({ appid: z.string(), enabled: z.boolean() }))
+    .optional(),
+  mcp_enabled: z
+    .array(z.object({ appid: z.string(), enabled: z.boolean() }))
+    .optional(),
+});
+
+/** TTS 配置/试听 wire 形状：字段全可选（缺省回退已存配置），词表校验留 handler */
+const TtsWire = z.object({
+  base_url: z.string().nullish(),
+  model: z.string().nullish(),
+  voice: z.string().nullish(),
+  api_key: z.string().nullish(),
+  format: z.string().nullish(),
+});
+
+/** WebUI 发送 wire 形状（POST /send） */
+const SendWire = z.object({
+  text: z.string().nullish(),
+  group: z.string().nullish(),
+  reply_msg_id: z.string().nullish(),
+  type: z.string().nullish(),
+  bot: z.string().nullish(),
+});
+
+/** bot 注册 wire 形状（POST /bots）：looseObject 保真——凭据键由该平台
+ *  credentialSchema.properties 运行时给出（宿主不感知具体键），逐键 typeof 收字符串 */
+const BotCreateWire = z.looseObject({
+  platform: z.string().nullish(),
+  name: z.string().nullish(),
+  auth_level: z.string().nullish(),
+});
+
+/** bot 备注名 wire 形状（PATCH /bots/:appid） */
+const BotRenameWire = z.object({ name: z.string().nullish() });
 
 export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
   const { log, repo, registry, supervisor, connectors, version } = deps;
   const uiLog = log.child("ui");
   // WebUI 静态产物根（config.toml ui_dist_dir；env UI_DIST_DIR 已退役）
   const distRoot = deps.uiDistDir?.trim() || "./ui/dist";
+
+  /** catch 出口统一：语言级 catch 变量窄化为 Error 后映射 + 回写（15 处 catch 去样板） */
+  const replyError = (reply: FastifyReply, e: Error): void => {
+    const m = mapError(uiLog, e);
+    reply.code(m.status).send({ error: m.message });
+  };
+
+  /** body wire 解析：形状违规 → BotRegistryError(400)（文案点名字段路径，不含载荷值） */
+  const bodyOf = <T>(schema: z.ZodType<T>, req: FastifyRequest): T => {
+    const gate = schema.safeParse(req.body ?? {});
+    if (!gate.success) {
+      throw new BotRegistryError(
+        `请求体不合法：${formatZodIssues(gate.error, "请求体")}`,
+      );
+    }
+    return gate.data;
+  };
 
   // —— 静态托管（无鉴权：纯前端壳，不含数据） ——
 
@@ -176,10 +264,9 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       });
 
       /** bot 解析：与工具面 resolveBotId 同语义（单 bot 缺省，多 bot 必填） */
-      const resolveBot = (raw: unknown): string => {
+      const resolveBot = (raw: string | undefined): string => {
         const bots = registry.list();
-        const asked =
-          typeof raw === "string" && raw.trim() !== "" ? raw.trim() : undefined;
+        const asked = raw?.trim() !== "" && raw !== undefined ? raw.trim() : undefined;
         if (asked !== undefined) {
           if (!bots.some((b) => b.botId === asked)) {
             throw new BotRegistryError(
@@ -195,7 +282,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       };
 
       const intParam = (
-        raw: unknown,
+        raw: string | undefined,
         min: number,
         max: number,
         fallback: number,
@@ -210,7 +297,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
         return n;
       };
 
-      const groupOf = (raw: unknown): string => {
+      const groupOf = (raw: string | undefined): string => {
         const g = typeof raw === "string" ? raw.trim() : "";
         if (g === "")
           throw new BotRegistryError("缺少 group 参数（群 openid）。");
@@ -243,13 +330,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
 
       plugin.post("/bots", async (req, reply) => {
         try {
-          const body = (req.body ?? {}) as Record<string, unknown>;
+          const body = bodyOf(BotCreateWire, req);
           // 平台缺省 qq（兼容旧前端/脚本）；凭据键按该平台 credentialSchema 的属性名从
           // 请求体取字符串值——表单本身即按该 schema 渲染，宿主不感知具体键
-          const platform =
-            typeof body.platform === "string" && body.platform.trim() !== ""
-              ? body.platform.trim()
-              : "qq";
+          const platform = body.platform?.trim() || "qq";
           const target = connectors.get(platform);
           if (target === undefined) {
             throw new BotRegistryError(
@@ -260,10 +344,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           }
           const credentials: Record<string, string> = {};
           for (const key of Object.keys(target.credentialSchema.properties ?? {})) {
-            const v = body[key];
+            const v = body[key]; // 动态凭据键（协议面）：typeof 逐键收字符串
             if (typeof v === "string") credentials[key] = v;
           }
-          const name = typeof body.name === "string" ? body.name : undefined;
+          const name = body.name ?? undefined;
           if (
             body.auth_level !== undefined &&
             body.auth_level !== "certified" &&
@@ -296,8 +380,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换。",
           };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -350,7 +433,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
        * body 只以 JSON 文本跨界（schema 解析在 webuiRoute 工厂闭包内完成），
        * 插件拿不到 fastify 原生对象。 */
       const webuiInput = (
-        req: { body?: unknown },
+        req: FastifyRequest,
         over: { path: string; params?: Record<string, string>; query?: Record<string, string> },
       ): PluginWebuiInput => ({
         path: over.path,
@@ -378,12 +461,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             return;
           }
           const sub = `/${params["*"] ?? ""}`;
-          const query: Record<string, string> = {};
-          for (const [k, v] of Object.entries(
-            req.query as Record<string, unknown>,
-          )) {
-            if (typeof v === "string") query[k] = v;
-          }
+          const query = QueryDict.parse(req.query);
           const login =
             target.login !== undefined && target.login.kind === "qr-pair"
               ? target.login
@@ -481,8 +559,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           );
           reply.send(out);
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -508,8 +585,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           uiLog.info("qr bind task created", { taskId: out.task_id ?? "" });
           reply.send(out);
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -548,8 +624,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             note: "agent_token 仅本次返回：请立即保存。再次获取请走设置页轮换。",
           };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -557,8 +632,8 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       plugin.patch("/bots/:appid", async (req, reply) => {
         try {
           const appid = (req.params as { appid: string }).appid;
-          const body = (req.body ?? {}) as Record<string, unknown>;
-          const name = typeof body.name === "string" ? body.name : "";
+          const body = bodyOf(BotRenameWire, req);
+          const name = body.name ?? "";
           const renamed = registry.rename(appid, name);
           uiLog.info("bot renamed via ui", { appid, name: renamed.name });
           return {
@@ -566,8 +641,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             bot: { appid: renamed.appid, name: renamed.name },
           };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -593,109 +667,84 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
 
       plugin.put("/settings", async (req, reply) => {
         try {
-          const body = (req.body ?? {}) as Record<string, unknown>;
-          if (typeof body.send_enabled === "boolean") {
+          const body = bodyOf(SettingsWire, req);
+          if (body.send_enabled !== undefined) {
             deps.repo.setSendEnable(body.send_enabled);
             uiLog.info("send toggle via ui", { enabled: body.send_enabled });
           }
-          if (Array.isArray(body.allow_groups)) {
+          if (body.allow_groups !== undefined) {
             for (const item of body.allow_groups) {
-              const rec = (item ?? {}) as Record<string, unknown>;
-              const appid = typeof rec.appid === "string" ? rec.appid : "";
-              const groups = rec.groups;
-              if (
-                registry.get(appid) === undefined ||
-                !Array.isArray(groups) ||
-                !groups.every((g) => typeof g === "string" && g !== "")
-              ) {
+              // 业务校验（appid 已注册）留 handler；groups 词法形状已由 schema 保证
+              if (registry.get(item.appid) === undefined) {
                 throw new BotRegistryError(
                   "allow_groups 项无效：需要 { appid, groups: string[] }，且 appid 已注册、groups 全为非空字符串。",
                 );
               }
-              registry.setAllowGroups(appid, groups);
+              registry.setAllowGroups(item.appid, item.groups);
               uiLog.info("allow groups via ui", {
-                appid,
-                count: groups.length,
+                appid: item.appid,
+                count: item.groups.length,
               });
             }
           }
-          if (Array.isArray(body.auth_levels)) {
+          if (body.auth_levels !== undefined) {
             for (const item of body.auth_levels) {
-              const rec = (item ?? {}) as Record<string, unknown>;
-              const appid = typeof rec.appid === "string" ? rec.appid : "";
-              if (
-                registry.get(appid) === undefined ||
-                (rec.auth_level !== "certified" &&
-                  rec.auth_level !== "uncertified")
-              ) {
+              if (registry.get(item.appid) === undefined) {
                 throw new BotRegistryError(
                   'auth_levels 项无效：需要 { appid, auth_level: "certified" | "uncertified" }，且 appid 已注册。',
                 );
               }
-              registry.setAuthLevel(appid, rec.auth_level);
+              registry.setAuthLevel(item.appid, item.auth_level);
               uiLog.info("auth level via ui", {
-                appid,
-                auth_level: rec.auth_level,
+                appid: item.appid,
+                auth_level: item.auth_level,
               });
             }
           }
-          if (Array.isArray(body.tts_enabled)) {
+          if (body.tts_enabled !== undefined) {
             for (const item of body.tts_enabled) {
-              const rec = (item ?? {}) as Record<string, unknown>;
-              const appid = typeof rec.appid === "string" ? rec.appid : "";
-              if (
-                registry.get(appid) === undefined ||
-                typeof rec.enabled !== "boolean"
-              ) {
+              if (registry.get(item.appid) === undefined) {
                 throw new BotRegistryError(
                   "tts_enabled 项无效：需要 { appid, enabled: boolean }，且 appid 已注册。",
                 );
               }
-              deps.repo.setTtsEnabled(appid, rec.enabled);
-              uiLog.info("tts toggle via ui", { appid, enabled: rec.enabled });
+              deps.repo.setTtsEnabled(item.appid, item.enabled);
+              uiLog.info("tts toggle via ui", { appid: item.appid, enabled: item.enabled });
             }
           }
           // 接收消息：落库后即时接入/断开该 bot 的官方网关（缓存与注册保留）
-          if (Array.isArray(body.receive_enabled)) {
+          if (body.receive_enabled !== undefined) {
             for (const item of body.receive_enabled) {
-              const rec = (item ?? {}) as Record<string, unknown>;
-              const appid = typeof rec.appid === "string" ? rec.appid : "";
-              const app = registry.get(appid);
-              if (app === undefined || typeof rec.enabled !== "boolean") {
+              const app = registry.get(item.appid);
+              if (app === undefined) {
                 throw new BotRegistryError(
                   "receive_enabled 项无效：需要 { appid, enabled: boolean }，且 appid 已注册。",
                 );
               }
-              registry.setReceiveEnabled(appid, rec.enabled);
-              if (rec.enabled) supervisor.addBot(app);
-              else supervisor.removeBot(appid);
+              registry.setReceiveEnabled(item.appid, item.enabled);
+              if (item.enabled) supervisor.addBot(app);
+              else supervisor.removeBot(item.appid);
               uiLog.info("receive toggle via ui", {
-                appid,
-                enabled: rec.enabled,
+                appid: item.appid,
+                enabled: item.enabled,
               });
             }
           }
           // MCP 访问：不涉及网关；落库后该 token 的下一次请求即被 /mcp 拒绝
-          if (Array.isArray(body.mcp_enabled)) {
+          if (body.mcp_enabled !== undefined) {
             for (const item of body.mcp_enabled) {
-              const rec = (item ?? {}) as Record<string, unknown>;
-              const appid = typeof rec.appid === "string" ? rec.appid : "";
-              if (
-                registry.get(appid) === undefined ||
-                typeof rec.enabled !== "boolean"
-              ) {
+              if (registry.get(item.appid) === undefined) {
                 throw new BotRegistryError(
                   "mcp_enabled 项无效：需要 { appid, enabled: boolean }，且 appid 已注册。",
                 );
               }
-              registry.setMcpEnabled(appid, rec.enabled);
-              uiLog.info("mcp toggle via ui", { appid, enabled: rec.enabled });
+              registry.setMcpEnabled(item.appid, item.enabled);
+              uiLog.info("mcp toggle via ui", { appid: item.appid, enabled: item.enabled });
             }
           }
           return settingsPayload();
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -720,15 +769,12 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
 
       plugin.put("/tts/config", async (req, reply) => {
         try {
-          const body = (req.body ?? {}) as Record<string, unknown>;
-          const text = (k: string): string =>
-            typeof body[k] === "string" ? (body[k] as string).trim() : "";
-          const base_url = text("base_url");
-          const model = text("model");
-          const voice = text("voice");
-          const apiKey = text("api_key");
-          const rawFormat =
-            body.format === undefined ? "wav" : (body.format as string);
+          const body = bodyOf(TtsWire, req);
+          const base_url = body.base_url?.trim() ?? "";
+          const model = body.model?.trim() ?? "";
+          const voice = body.voice?.trim() ?? "";
+          const apiKey = body.api_key?.trim() ?? "";
+          const rawFormat = body.format ?? "wav";
           if (base_url === "" || model === "" || voice === "") {
             throw new BotRegistryError(
               "TTS 配置不完整：base_url / model / voice 均必填（api_key 可空 = 服务无鉴权）。",
@@ -747,8 +793,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           uiLog.info("tts config via ui", { base_url, model, voice, format });
           return { ok: true, configured: true, api_key_masked: maskKey(key) };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -756,14 +801,12 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       // 固定合成 "hi"，返回音频字节由浏览器播放。TTS 上游故障 → 502 + 可操作文案。
       plugin.post("/tts/test", async (req, reply) => {
         try {
-          const body = (req.body ?? {}) as Record<string, unknown>;
+          const body = bodyOf(TtsWire, req);
           const stored = deps.repo.getTtsConfig();
-          const text = (k: string, fallback: string): string =>
-            typeof body[k] === "string" && (body[k] as string).trim() !== ""
-              ? (body[k] as string).trim()
-              : fallback;
+          const text = (v: string | null | undefined, fallback: string): string =>
+            v !== undefined && v !== null && v.trim() !== "" ? v.trim() : fallback;
           const rawFormat =
-            typeof body.format === "string" && body.format !== ""
+            body.format !== undefined && body.format !== ""
               ? body.format
               : (stored?.format ?? "wav");
           if (rawFormat !== "mp3" && rawFormat !== "wav") {
@@ -773,10 +816,10 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           }
           const format: TtsFormat = rawFormat; // 上方校验已穷举枚举
           const cfg = {
-            base_url: text("base_url", stored?.base_url ?? ""),
-            api_key: text("api_key", stored?.api_key ?? ""),
-            model: text("model", stored?.model ?? ""),
-            voice: text("voice", stored?.voice ?? ""),
+            base_url: text(body.base_url, stored?.base_url ?? ""),
+            api_key: text(body.api_key, stored?.api_key ?? ""),
+            model: text(body.model, stored?.model ?? ""),
+            voice: text(body.voice, stored?.voice ?? ""),
             format,
           };
           if (cfg.base_url === "" || cfg.model === "" || cfg.voice === "") {
@@ -787,8 +830,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           const { buf, mime } = await synthesizeSpeech(cfg, "hi", deps.ttsDeps);
           reply.type(mime).send(buf);
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -805,8 +847,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             note: "agent_token 仅本次返回：旧 token 已立即失效。请立即更新到 MCP 客户端配置。",
           };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -818,14 +859,13 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           uiLog.info("bot removed via ui", { appid: removed.botId });
           return { ok: true, appid };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
       plugin.get("/groups", async (req, reply) => {
         try {
-          const q = req.query as Record<string, unknown>;
+          const q = QueryDict.parse(req.query);
           const botId = resolveBot(q.bot);
           // type=all（缺省）合并单聊会话：单聊自建于 c2c_messages，作者名=群聊名册映射
           // （saveC2cMessage）；会话键统一走 group_openid 字段（单聊时为对端 user_openid）
@@ -885,8 +925,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           );
           return { bot: botId, groups: sessions };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -894,20 +933,19 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
        *  避免群成员经消息注入诱导 agent 删数据。DELETE 无 body（踩坑#16：勿带 json Content-Type）。 */
       plugin.delete("/groups/:groupOpenid", async (req, reply) => {
         try {
-          const botId = resolveBot((req.query as Record<string, unknown>).bot);
+          const botId = resolveBot(QueryDict.parse(req.query).bot);
           const group = (req.params as { groupOpenid: string }).groupOpenid;
           const purged = repo.purgeGroupAll(botId, group);
           uiLog.info("group purged via ui", { bot: botId, group, ...purged });
           return { ok: true, bot: botId, group, purged };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
       plugin.get("/messages", async (req, reply) => {
         try {
-          const q = req.query as Record<string, unknown>;
+          const q = QueryDict.parse(req.query);
           const botId = resolveBot(q.bot);
           const group = groupOf(q.group);
           const limit = intParam(q.limit, 1, 200, 50);
@@ -976,14 +1014,13 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               next_before: rows.length > 0 ? rows[0].rid : null,
             };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
       plugin.get("/message", async (req, reply) => {
         try {
-          const q = req.query as Record<string, unknown>;
+          const q = QueryDict.parse(req.query);
           const botId = resolveBot(q.bot);
           const group = groupOf(q.group);
           const msgId = typeof q.msg_id === "string" ? q.msg_id.trim() : "";
@@ -1047,14 +1084,13 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             raw: row.raw_json ? JSON.parse(row.raw_json) : null,
           };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
       plugin.get("/members", async (req, reply) => {
         try {
-          const q = req.query as Record<string, unknown>;
+          const q = QueryDict.parse(req.query);
           const botId = resolveBot(q.bot);
           const group = groupOf(q.group);
           // 单聊无名册（openid 按 bot 隔离，映射名见 saveC2cMessage）；返回空列表保持响应同形
@@ -1074,14 +1110,13 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           }));
           return { bot: botId, group, members };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
       plugin.get("/sends", async (req, reply) => {
         try {
-          const q = req.query as Record<string, unknown>;
+          const q = QueryDict.parse(req.query);
           const botId = resolveBot(q.bot);
           const group = groupOf(q.group);
           const limit = intParam(q.limit, 1, 100, 30);
@@ -1100,14 +1135,13 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           }));
           return { bot: botId, group, sends };
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
       plugin.get("/quota", async (req, reply) => {
         try {
-          const botId = resolveBot((req.query as Record<string, unknown>).bot);
+          const botId = resolveBot(QueryDict.parse(req.query).bot);
           // 额度水位是平台语义（QQ）：委托 QQ 插件 webui 路由（形状与旧实现一致）
           const route = qqRoute("GET", "/quota");
           if (route === undefined) {
@@ -1117,8 +1151,7 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
             webuiInput(req, { path: "/quota", query: { bot: botId } }),
           );
         } catch (e) {
-          const m = mapError(uiLog, e);
-          reply.code(m.status).send({ error: m.message });
+          replyError(reply, e instanceof Error ? e : new Error(String(e)));
         }
       });
 
@@ -1128,22 +1161,18 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
           reply.code(400).send({ error: "发送功能未装配（Sender 未注入）。" });
           return;
         }
-        const body = (req.body ?? {}) as Record<string, unknown>;
-        const text = typeof body.text === "string" ? body.text : "";
-        const group = typeof body.group === "string" ? body.group.trim() : "";
-        const replyMsgId =
-          typeof body.reply_msg_id === "string" && body.reply_msg_id !== ""
-            ? body.reply_msg_id
-            : undefined;
-        // type=chat → 单聊（group 字段=对端 user_openid；门禁=opt-in 开关，见 Sender.gate）
-        const kind = body.type === "chat" ? ("chat" as const) : ("group" as const);
-        if (group === "" || text.trim() === "") {
-          reply.code(400).send({ error: "参数 group 与 text 均不能为空。" });
-          return;
-        }
-        // body.quote 已弃用（sendAuto 语义：reply_msg_id 即引用样式，自动判定被动/主动）
         try {
-          const botId = resolveBot(body.bot);
+          const body = bodyOf(SendWire, req);
+          const text = body.text ?? "";
+          const group = body.group?.trim() ?? "";
+          const replyMsgId = body.reply_msg_id || undefined;
+          // type=chat → 单聊（group 字段=对端 user_openid；门禁=opt-in 开关，见 Sender.gate）
+          const kind = body.type === "chat" ? ("chat" as const) : ("group" as const);
+          if (group === "" || text.trim() === "") {
+            throw new BotRegistryError("参数 group 与 text 均不能为空。");
+          }
+          // body.quote 已弃用（sendAuto 语义：reply_msg_id 即引用样式，自动判定被动/主动）
+          const botId = resolveBot(body.bot ?? undefined);
           // 统一走 sendAuto（caps 感知路由）：passiveWindow=true 平台窗内被动优先
           //（reply_msg_id 作引用样式），false 平台（微信/Telegram）恒走主动——
           // 旧形态在此直呼 sender.reply 曾对微信爆 TypeError（无被动原语）。
