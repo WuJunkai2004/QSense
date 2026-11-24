@@ -34,6 +34,8 @@ import type {
   RecallWire,
   UploadMediaWire,
 } from "@qsense/connector-sdk";
+import { parseJsonWith } from "@qsense/connector-sdk";
+import { z } from "zod";
 import {
   LONG_POLL_TIMEOUT_MS,
   WeixinApiError,
@@ -124,16 +126,17 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
   const ctxTokens = new Map<string, string>();
 
   async function loadCtxTokens(): Promise<void> {
-    const saved = await host.state.get<unknown>(STATE_CTX);
-    if (saved === null || typeof saved !== "object" || Array.isArray(saved)) return;
-    for (const [k, v] of Object.entries(saved as Record<string, unknown>)) {
-      if (typeof v === "string" && v !== "") ctxTokens.set(k, v);
+    const raw = await host.state.get(STATE_CTX);
+    const parsed = parseJsonWith(z.record(z.string(), z.string()), raw ?? "");
+    if (parsed === null) return;
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v !== "") ctxTokens.set(k, v);
     }
   }
 
   async function persistCtxTokens(): Promise<void> {
     try {
-      await host.state.set(STATE_CTX, Object.fromEntries(ctxTokens));
+      await host.state.set(STATE_CTX, JSON.stringify(Object.fromEntries(ctxTokens)));
     } catch (e) {
       log.warn("context token persist failed", { reason: reasonOf(e) });
     }
@@ -156,17 +159,14 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
   let quotesDirty = false;
 
   async function loadQuotes(): Promise<void> {
-    const saved = await host.state.get<{ q?: unknown }>(STATE_QUOTES);
-    const pairs = saved?.q;
-    if (!Array.isArray(pairs)) return;
-    for (const pair of pairs) {
-      if (
-        Array.isArray(pair) &&
-        typeof pair[0] === "string" &&
-        typeof pair[1] === "string"
-      ) {
-        quotes.set(pair[0], pair[1]);
-      }
+    const raw = await host.state.get(STATE_QUOTES);
+    const parsed = parseJsonWith(
+      z.object({ q: z.array(z.tuple([z.string(), z.string()])) }),
+      raw ?? "",
+    );
+    if (parsed === null) return;
+    for (const [k, v] of parsed.q) {
+      quotes.set(k, v);
     }
   }
 
@@ -174,7 +174,7 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
     if (!quotesDirty) return;
     quotesDirty = false;
     try {
-      await host.state.set(STATE_QUOTES, { q: [...quotes] });
+      await host.state.set(STATE_QUOTES, JSON.stringify({ q: [...quotes] }));
     } catch (e) {
       log.warn("quote cache persist failed", { reason: reasonOf(e) });
     }
@@ -230,8 +230,12 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
   // —— 长轮询主循环（驱动承担机械不变量；wx 协议语义收在 spec） ——
 
   async function runLoop(signal: AbortSignal): Promise<void> {
-    const savedBuf = await host.state.get<string>(STATE_BUF);
-    const resumed = typeof savedBuf === "string" && savedBuf !== "";
+    // 游标 = JSON 文本（StatePort B⁺ T6 字符串化；旧数据本就是 stringify 产物，兼容）
+    const savedBuf = parseJsonWith(
+      z.string(),
+      (await host.state.get(STATE_BUF)) ?? "",
+    );
+    const resumed = savedBuf !== null && savedBuf !== "";
     await Promise.all([loadCtxTokens(), loadQuotes()]);
 
     // 在线状态对账（best-effort：失败不挡轮询）
@@ -270,11 +274,12 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
       await kit.longPoll(
         {
           loadCursor: async () => {
-            const v = await host.state.get<string>(STATE_BUF);
-            return typeof v === "string" && v !== "" ? v : null;
+            const raw = await host.state.get(STATE_BUF);
+            const v = parseJsonWith(z.string(), raw ?? "");
+            return v !== null && v !== "" ? v : null;
           },
           saveCursor: async (buf) => {
-            await host.state.set(STATE_BUF, buf);
+            await host.state.set(STATE_BUF, JSON.stringify(buf));
           },
           // wx 语义：连败 ≥ maxFailures 且带旧游标 → 游标可能已失效（重绑/服务端
           // 重置）→ 清空重拉（至少一次语义由 core 按 msg_id 去重兜底）
@@ -312,8 +317,8 @@ export function createWeixinInstance(deps: WeixinInstanceDeps): ConnectorInstanc
                 );
               }
               log.warn("getupdates api error", {
-                ret: resp.ret,
-                errcode: resp.errcode,
+                ret: resp.ret ?? null,
+                errcode: resp.errcode ?? null,
               });
               throw new WeixinApiError(
                 `getupdates ret=${resp.ret ?? "-"} errcode=${resp.errcode ?? "-"}`,

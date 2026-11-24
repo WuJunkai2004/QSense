@@ -17,8 +17,17 @@ import type {
   ConnectorPlugin,
   NormalizedInbound,
   PluginContext,
+  QrPairCreateOut,
+  QrPairPollOut,
 } from "@qsense/connector-sdk";
-import { createNetKit, formatZodIssues, type NetKit } from "@qsense/connector-sdk";
+import {
+  createNetKit,
+  formatZodIssues,
+  webuiJsonRoute,
+  webuiRoute,
+  type NetKit,
+} from "@qsense/connector-sdk";
+import { z } from "zod";
 import { WeixinApiError, createWeixinApi } from "./api";
 import { WeixinError } from "./errors";
 import { createWeixinInstance } from "./instance";
@@ -143,11 +152,11 @@ export function createWeixinConnector(
     login: { kind: "qr-pair", create: "/login/qr/create", poll: "/login/qr/poll" },
     tools: [],
     webui: [
-      {
+      webuiRoute({
         method: "POST",
         path: "/login/qr/create",
         summary: "创建微信扫码登录任务（iLink get_bot_qrcode）",
-        handler: async () => {
+        handler: async (): Promise<QrPairCreateOut> => {
           const task = await qr.start(localTokenList());
           return {
             task_id: task.taskId,
@@ -155,18 +164,25 @@ export function createWeixinConnector(
             interval_s: QR_POLL_INTERVAL_S,
           };
         },
-      },
-      {
+      }),
+      webuiJsonRoute({
         method: "POST",
         path: "/login/qr/poll",
         summary: "轮询微信扫码登录状态",
-        handler: async (req) => {
-          const body = (req.body ?? {}) as Record<string, unknown>;
-          const taskId = typeof body["task_id"] === "string" ? body["task_id"] : "";
-          const state = qr.poll(taskId);
+        bodySchema: z.object({ task_id: z.string().optional() }),
+        handler: async (req): Promise<QrPairPollOut> => {
+          const state = qr.poll(req.body.task_id ?? "");
           if (state.status === "completed") {
-            // 凭据只交回宿主（core 拦截 → verifyCredential → 注册），绝不下发浏览器
-            return { status: "completed", credential: state.credential };
+            // 凭据只交回宿主（core 拦截 → verifyCredential → 注册），绝不下发浏览器。
+            // QrCredential → 凭据键值对：字段级显式搬运（契约 = credentialSchema 键集）
+            const c = state.credential;
+            const credential: Record<string, string> = {
+              appid: c.appid,
+              token: c.token,
+              ...(c.base_url !== undefined ? { base_url: c.base_url } : {}),
+              ...(c.owner_id !== undefined ? { owner_id: c.owner_id } : {}),
+            };
+            return { status: "completed", credential };
           }
           if (state.status === "failed") {
             // 带状态的包内错误：宿主 mapError 透传状态与可操作文案
@@ -174,7 +190,7 @@ export function createWeixinConnector(
           }
           return { status: state.status };
         },
-      },
+      }),
     ],
     hooks: {
       verifyCredential: async (credential) => {

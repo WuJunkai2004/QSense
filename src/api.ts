@@ -272,7 +272,7 @@ export function createWeixinApi(
       });
     } catch (e) {
       // NetKit 机械档 → 平台错误档（调用侧语义不变：timeout/aborted/network）
-      if (isNetError(e)) {
+      if (e instanceof Error && isNetError(e)) {
         if (e.kind === "timeout") {
           throw new WeixinApiError(`请求超时（${opts.timeoutMs ?? init.defaultTimeout}ms）`, "timeout");
         }

@@ -334,10 +334,10 @@ export function normalizeWeixinMessage(
     // 被引锚：他人引用本条时 core 懒补作者（msgIdx 查 messages.msg_idx）
     msgIdx: msgId,
     // context_token 是出站回带凭据：入库前打码（已单独持久化在 StatePort）
-    raw: {
+    rawJson: JSON.stringify({
       ...msg,
       ...(msg.context_token !== undefined ? { context_token: REDACTED } : {}),
-    },
+    }),
   };
 }
 
