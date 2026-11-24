@@ -1,0 +1,16 @@
+{
+  "name": "@qsense/connector-weixin",
+  "version": "0.1.0",
+  "description": "QSense 微信连接器：iLink bot API 长轮询收消息 + sendMessage 发送 + CDN 加密媒体 + 扫码配对（协议参照 @tencent-weixin/openclaw-weixin 2.4.10 解包自研，零运行时依赖）",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "private": true,
+  "license": "MIT"
+}
