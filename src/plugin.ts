@@ -100,6 +100,7 @@ export function createWeixinConnector(
       recall: false,
       passiveWindow: false,
       quota: false,
+      proactiveOptIn: false, // iLink：无 opt 事件概念，能对话即能发
     },
     // 契约 v2：解读权在本插件——core ingest 表驱动按 payload.platform="weixin" 路由到此
     normalize: (botId, payload): NormalizedInbound | null =>
