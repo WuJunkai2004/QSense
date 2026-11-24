@@ -30,6 +30,7 @@ export {
   TG_POLL_TIMEOUT_S,
 } from "./api";
 export type { TelegramApi } from "./api";
+export type { TgCallBody } from "./api";
 // —— parser（契约 v2 自 core 下沉）：信封级入口供测试/宿主按需引用 ——
 export { normalizeTelegramInbound } from "./parser";
 
