@@ -151,6 +151,20 @@ function elementAttachments(el: ElementLike): NormalizedAttachment[] {
   return out;
 }
 
+/** 被引媒体的文字占位（官方客户端同款词汇：引用一张图 → body=[图片]） */
+function quoteMediaLabel(atts: NormalizedAttachment[]): string {
+  const labels = atts.map((a) =>
+    a.kind === "image"
+      ? "[图片]"
+      : a.kind === "voice"
+        ? "[语音]"
+        : a.kind === "video"
+          ? "[视频]"
+          : "[文件]",
+  );
+  return [...new Set(labels)].join("");
+}
+
 // —— 记录子消息字段容错提取（官方对 102 子消息的字段命名未给全样例，真机样本核验后收紧） ——
 
 function recordAuthorId(el: ElementLike): string {
@@ -271,8 +285,9 @@ export interface Decomposed {
  * - 101 并行：`[并行消息]` 标记 + 子元素透传下钻
  * - 102 聊天记录：renderLines 只留 `[标题·N条]`，子消息拍平进 records（嵌套记录不产行、
  *   子层 depth+1；子行 103 引用结构化为子行 quote；子行媒体进宿主编号 + 子行子集留存）
- * - 103 引用（顶层）：结构化为 quote（msgIdx 优先 message_scene.ext 令牌，body=元素自带快照），
- *   被引文字**不进任何文本列**；自带媒体照常占位（真机核实 103 携带被引图片）
+ * - 103 引用（顶层）：结构化为 quote（msgIdx 优先 message_scene.ext 令牌，body=元素自带快照；
+ *   纯媒体被引 → body=[图片] 文字占位），被引文字**不进任何文本列**，被引媒体进
+ *   quote.attachments（不混入本条正文/附件——2026-11-24 真机 bug 修复）
  * - 未知类型：有文本抽文本，保证不静默丢内容
  */
 export function decomposeElements(
@@ -364,18 +379,26 @@ export function decomposeElements(
           out.renderLines.push(fwdText);
         }
       } else if (type === TYPE_QUOTE) {
+        // 被引媒体（真机核实 103 自带被引图片）归引用结构，不混入本条正文/附件——
+        // 混入会让 agent 把被引图误当本条自己的图（2026-11-24 真机 bug）。
+        // 被引正文为纯媒体时 body 用文字占位（官方 parallel_message 同款「[图片]」词汇）。
+        const atts = elementAttachments(el);
         if (out.quote === null) {
           // 被引锚点取元素自带 msg_idx（=目标消息的锚）；scene.ext 的 msg_idx 是
           // 本条消息自己的锚（供别人引用），二者不可混用
+          const text = textOf(el).trim();
           out.quote = {
             msgIdx:
               typeof el.msg_idx === "string" && el.msg_idx !== ""
                 ? el.msg_idx
                 : undefined,
-            body: textOf(el).trim(),
+            body: text !== "" ? text : quoteMediaLabel(atts),
+            ...(atts.length > 0 ? { attachments: atts } : {}),
           };
+        } else if (atts.length > 0) {
+          // 罕见多引用元素：媒体并入同一引用（QQ 线上恒单条 103，此为容错）
+          out.quote.attachments = [...(out.quote.attachments ?? []), ...atts];
         }
-        pushMedia(el);
         // children 通常为空（真机核实）；有则透传兜底
         walk(childrenOf(el), depth + 1);
       } else {
