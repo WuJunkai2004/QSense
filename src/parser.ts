@@ -207,7 +207,7 @@ export function normalizeTelegramUpdate(
       records: [],
       mentions: [],
       attachments: [],
-      raw: payload.update,
+      rawJson: JSON.stringify(payload.update),
     };
   }
 
@@ -231,7 +231,7 @@ export function normalizeTelegramUpdate(
       records: [],
       mentions: [],
       attachments: [],
-      raw: payload.update,
+      rawJson: JSON.stringify(payload.update),
     };
   }
 
@@ -263,7 +263,7 @@ export function normalizeTelegramUpdate(
     ...(scope === "group" && self !== undefined
       ? { atMe: mentionedSelf(msg, self) }
       : {}),
-    raw: payload.update,
+    rawJson: JSON.stringify(payload.update),
   };
 }
 

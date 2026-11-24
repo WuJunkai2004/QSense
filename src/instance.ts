@@ -25,6 +25,7 @@ import type {
   ReplyWire,
   UploadMediaWire,
 } from "@qsense/connector-sdk";
+import { parseJsonWith } from "@qsense/connector-sdk";
 import { z } from "zod";
 import {
   describeSendFailure,
@@ -262,11 +263,14 @@ export function createTelegramInstance(
     try {
       await kit.longPoll(
         {
-          // 游标 = 下一次 getUpdates 的 offset 参数（last update_id + 1；0=首拉）
-          loadCursor: async () =>
-            (await ctx.state.get<number>("poll:offset")) ?? 0,
+          // 游标 = 下一次 getUpdates 的 offset 参数（last update_id + 1；0=首拉）。
+          // StatePort 值 = JSON 文本（B⁺ T6 字符串化；旧数据本就是 stringify 数字，兼容）
+          loadCursor: async () => {
+            const raw = await ctx.state.get("poll:offset");
+            return parseJsonWith(z.number(), raw ?? "") ?? 0;
+          },
           saveCursor: async (offset) => {
-            await ctx.state.set("poll:offset", offset);
+            await ctx.state.set("poll:offset", JSON.stringify(offset));
           },
           fetch: async (offset, sig) => {
             const updates = await api.call(

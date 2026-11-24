@@ -11,7 +11,7 @@
 // 必须读出来，不能用 NetError("http", status) 把它吞掉。
 
 import { z, type ZodType } from "zod";
-import { isNetError, type HttpClient, type HttpResponse } from "@qsense/connector-sdk";
+import { isNetError, parseJsonWith, type HttpClient, type HttpResponse } from "@qsense/connector-sdk";
 import { tt } from "./texts";
 
 /** Telegram API 错误（description 可读、error_code 官方码；分档判断在调用侧） */
@@ -322,20 +322,19 @@ const EnvelopeSchema = z.looseObject({
 
 function unwrap<T>(res: HttpResponse, result: ZodType<T>): Promise<T> {
   return (async () => {
-    let raw: unknown;
-    try {
-      raw = await res.json();
-    } catch {
+    // 应答体 JSON 文本 → parseJsonWith（信封 schema 把关；坏 JSON → 可操作错误）
+    const text = await res.text().catch(() => "");
+    const env = parseJsonWith(EnvelopeSchema, text);
+    if (env === null) {
       throw new TelegramApiError(`HTTP ${res.status}（响应非 JSON）`, res.status);
     }
-    const env = EnvelopeSchema.safeParse(raw);
-    if (!env.success || env.data.ok !== true) {
+    if (env.ok !== true) {
       throw new TelegramApiError(
-        (env.success ? env.data.description : undefined) ?? `HTTP ${res.status}`,
-        (env.success ? env.data.error_code : undefined) ?? res.status,
+        env.description ?? `HTTP ${res.status}`,
+        env.error_code ?? res.status,
       );
     }
-    const parsed = result.safeParse(env.data["result"]);
+    const parsed = result.safeParse(env["result"]);
     if (!parsed.success) {
       const paths = parsed.error.issues
         .slice(0, 5)
@@ -391,7 +390,9 @@ export function createTelegramApi(http: HttpClient, token: string): TelegramApi 
 /** 可重试分档：NetError 机械档（timeout/network）→ true；TelegramApiError
  * 网络 0 码 / 5xx / 429 → true（实例退避重试）；401/409 及其他 4xx → false（fatal） */
 export function isRetryableApiError(e: unknown): boolean {
-  if (isNetError(e)) return e.kind === "network" || e.kind === "timeout";
+  if (e instanceof Error && isNetError(e)) {
+    return e.kind === "network" || e.kind === "timeout";
+  }
   if (e instanceof TelegramApiError) {
     if (e.errorCode === 0) return true;
     if (e.errorCode === TG_ERROR_UNAUTHORIZED) return false;
