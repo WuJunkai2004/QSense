@@ -1,17 +1,24 @@
 // Telegram parser + ingest 管线测试（P3.5 试金石；P5 契约 v2 起 parser 归 connector-telegram 包）：
 // Update → NormalizedMessage 映射形状、缩略图 data: URL 落附件、引用快照、私聊 opt-in 等价
 // 映射、群注册表、sessions 登记——入库路径走真管线（表驱动路由 → 插件 normalize → 效应落地）。
+// B⁺ T4.1：normalizeTelegramUpdate 命名导出已收口——测试一律走声明面 plugin.normalize()。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConnectorRegistry, type ConnectorLogger } from "@qsense/connector-sdk";
+import {
+  ConnectorRegistry,
+  createMemoryHost,
+  FakeNetKit,
+  type ConnectorLogger,
+  type ConnectorPlugin,
+  type NormalizedMessage,
+} from "@qsense/connector-sdk";
 import { createQqConnector } from "@qsense/connector-qq";
 import {
   createTelegramConnector,
-  normalizeTelegramUpdate,
   type TelegramInboundPayload,
 } from "@qsense/connector-telegram";
 import { createIngestPipeline } from "../src/connectors/ingest";
@@ -39,6 +46,15 @@ function payloadOf(update: Record<string, unknown>): TelegramInboundPayload {
   return { platform: "telegram", update: update as never };
 }
 
+// —— 声明面 normalize（T4.1 收口：不再直呼 parser 内部函数） ——
+
+const PLUGIN = createTelegramConnector();
+
+/** Update → NormalizedMessage（经 plugin.normalize 声明面；null 透传） */
+function normalizeOf(update: Record<string, unknown>): NormalizedMessage | null {
+  return PLUGIN.normalize("TG", payloadOf(update))?.messages[0] ?? null;
+}
+
 const GROUP_TEXT = {
   update_id: 1,
   message: {
@@ -54,7 +70,7 @@ const GROUP_TEXT = {
 };
 
 test("parser：群文本消息 → NormalizedMessage 形状（scope/会话id/mentions/quote 空）", () => {
-  const m = normalizeTelegramUpdate("TG", payloadOf(GROUP_TEXT));
+  const m = normalizeOf(GROUP_TEXT);
   assert.equal(m?.scope, "group");
   assert.equal(m?.scopeId, "-100999");
   assert.equal(m?.msgId, "42");
@@ -85,7 +101,7 @@ test("parser：photo 消息 → ![附件1] 占位 + 缩略图 data:URL 落附件
   };
   const p = payloadOf(upd);
   p.mediaBlobs = { thumb: "data:image/jpeg;base64,QUJD" };
-  const m = normalizeTelegramUpdate("TG", p);
+  const m = PLUGIN.normalize("TG", p)?.messages[0] ?? null;
   assert.equal(m?.text, "看这张");
   assert.equal(m?.content, "![附件1] 看这张");
   const att = m?.attachments[0]!;
@@ -113,14 +129,15 @@ test("parser：reply → quote 快照（msgId/body/作者）；edited_message �
       },
     },
   };
-  const m = normalizeTelegramUpdate("TG", payloadOf(upd));
-  assert.equal(m?.quote?.msgId, "42");
-  assert.equal(m?.quote?.body, "被引的原文第一行");
-  assert.equal(m?.quote?.authorOpenid, "99");
-  assert.equal(m?.quote?.authorName, "柔嘉");
+  const m = normalizeOf(upd);
+  const quote = m?.quote;
+  assert.equal(quote?.msgId, "42");
+  assert.equal(quote?.body, "被引的原文第一行");
+  assert.equal(quote?.authorOpenid, "99");
+  assert.equal(quote?.authorName, "柔嘉");
   // 仅编辑事件（v1 不消费）
   const edited = { update_id: 4, edited_message: upd.message };
-  assert.equal(normalizeTelegramUpdate("TG", payloadOf(edited)), null);
+  assert.equal(normalizeOf(edited), null);
 });
 
 test("parser：私聊 → scope chat；handler 私聊落 C2C 开关（opt-in 等价映射）", () => {
@@ -162,19 +179,16 @@ test("parser：私聊 → scope chat；handler 私聊落 C2C 开关（opt-in 等
 
 test("parser：服务消息 → 括注行（text 留空）；贴纸 → [贴纸] emoji", () => {
   const mk = (extra: Record<string, unknown>) =>
-    normalizeTelegramUpdate(
-      "TG",
-      payloadOf({
-        update_id: 9,
-        message: {
-          message_id: 50,
-          from: { id: 42, first_name: "Venti" },
-          chat: { id: -100999, type: "supergroup" },
-          date: 1700000010,
-          ...extra,
-        },
-      }),
-    );
+    normalizeOf({
+      update_id: 9,
+      message: {
+        message_id: 50,
+        from: { id: 42, first_name: "Venti" },
+        chat: { id: -100999, type: "supergroup" },
+        date: 1700000010,
+        ...extra,
+      },
+    });
   assert.equal(
     mk({ new_chat_members: [{ id: 7, first_name: "阿尼" }] })?.content,
     "[入群] 阿尼 加入了群聊",
@@ -256,22 +270,37 @@ test("ingest 管线（表驱动）：telegram / qq 信封各归各的插件 norm
   }
 });
 
-test("TG-atMe：mention 实体比对 getMe 身份（精确 true/false；身份未知省略；私聊不标）", () => {
-  // @roujia_bot 命中自身 username → true
-  const m = normalizeTelegramUpdate("TG", payloadOf(GROUP_TEXT), {
-    id: 777,
-    username: "roujia_bot",
+test("TG-atMe：mention 实体比对 getMe 身份（精确 true/false；身份未知省略；私聊不标）", async () => {
+  // 身份经真实链路进入 normalize：create → getMe（FakeNetKit 假端点）→ 插件 identities 缓存
+  const kitA = new FakeNetKit();
+  kitA.onMatch((u) => u.endsWith("/getMe"), () => ({
+    body: { ok: true, result: { id: 777, username: "roujia_bot" } },
+  }));
+  const kitB = new FakeNetKit();
+  kitB.onMatch((u) => u.endsWith("/getMe"), () => ({
+    body: { ok: true, result: { id: 777, username: "other_bot" } },
+  }));
+  const plugA = createTelegramConnector({ net: kitA });
+  const plugB = createTelegramConnector({ net: kitB });
+  const plugUnknown = createTelegramConnector();
+  plugA.create(createMemoryHost({ net: kitA }).host, {
+    botId: "TGA",
+    platform: "telegram",
+    credential: { appid: "777", token: "x" },
   });
-  assert.equal(m?.atMe, true);
+  plugB.create(createMemoryHost({ net: kitB }).host, {
+    botId: "TGB",
+    platform: "telegram",
+    credential: { appid: "777", token: "x" },
+  });
+  const atMeOf = (p: ConnectorPlugin, botId: string): boolean | undefined =>
+    p.normalize(botId, payloadOf(GROUP_TEXT))?.messages[0]?.atMe;
+  // @roujia_bot 命中自身 username → true（等待 fire-and-forget getMe 完成）
+  await waitFor(() => atMeOf(plugA, "TGA") === true, "identity A cached");
   // 其他 username 被提到 → false（权威否定，wait 层严格排除）
-  const m2 = normalizeTelegramUpdate("TG", payloadOf(GROUP_TEXT), {
-    id: 777,
-    username: "other_bot",
-  });
-  assert.equal(m2?.atMe, false);
+  assert.equal(atMeOf(plugB, "TGB"), false);
   // 身份未知（getMe 未回）→ atMe 省略，wait 层从宽兜底
-  const m3 = normalizeTelegramUpdate("TG", payloadOf(GROUP_TEXT));
-  assert.equal(m3?.atMe, undefined);
+  assert.equal(atMeOf(plugUnknown, "TGX"), undefined);
   // text_mention 数字 id 比对
   const upd = {
     update_id: 2,
@@ -289,11 +318,10 @@ test("TG-atMe：mention 实体比对 getMe 身份（精确 true/false；身份�
       ],
     },
   };
-  const m4 = normalizeTelegramUpdate("TG", payloadOf(upd), {
-    id: 777,
-    username: "roujia_bot",
-  });
-  assert.equal(m4?.atMe, true);
+  assert.equal(
+    plugA.normalize("TGA", payloadOf(upd))?.messages[0]?.atMe,
+    true,
+  );
   // 私聊恒不标 atMe（mention 过滤的私聊命中走 scope 语义）
   const priv = {
     update_id: 3,
@@ -306,9 +334,18 @@ test("TG-atMe：mention 实体比对 getMe 身份（精确 true/false；身份�
       entities: [{ type: "mention", offset: 0, length: 11 }],
     },
   };
-  const m5 = normalizeTelegramUpdate("TG", payloadOf(priv), {
-    id: 777,
-    username: "roujia_bot",
-  });
-  assert.equal(m5?.atMe, undefined);
+  assert.equal(
+    plugA.normalize("TGA", payloadOf(priv))?.messages[0]?.atMe,
+    undefined,
+  );
 });
+
+// —— 工具 ——
+
+async function waitFor(cond: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 3000;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`waitFor 超时：${what}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}

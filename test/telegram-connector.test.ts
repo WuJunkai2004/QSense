@@ -1,27 +1,33 @@
-// Telegram 连接器单测（P3.5 试金石）：零真实网络——
+// Telegram 连接器单测（P3.5 试金石；B⁺ T4.1 起 FakeNetKit 驱动，零真实网络）：
 // 轮询生命周期（offset 持久化/至少一次摄取/401 与 409 fatal/退避重试）、
 // net 原语（sendMessage 形状/引用映射/媒体 multipart/句柄单次使用/上限拒绝）、
-// verifyCredential 三档、Sender caps 感知路由（passiveWindow=false 恒主动通道）。
+// 缩略图富化真链路（getFile + 文件下载）、verifyCredential 三档、
+// Sender caps 感知路由（passiveWindow=false 恒主动通道）。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  ConnectorLogger,
-  ConnectorStatus,
-  HostApi,
-  StatePort,
+import {
+  FakeNetKit,
+  type ConnectorLogger,
+  type ConnectorStatus,
+  type FakeReply,
+  type HostApi,
+  type StatePort,
 } from "@qsense/connector-sdk";
-import { TelegramApiError, type TelegramApi, type TelegramUpdate } from "../packages/connector-telegram/src/api";
+import {
+  createTelegramApi,
+  createTelegramConnector,
+  type TelegramUpdate,
+} from "../packages/connector-telegram/src/index";
 import { createTelegramInstance } from "../packages/connector-telegram/src/instance";
-import { createTelegramConnector } from "../packages/connector-telegram/src/plugin";
-import { Sender } from "../src/sender";
-import { BotRegistry } from "../src/bots";
-import { Repo } from "../src/store/repo";
-import { openDatabase, runMigrations, type DB } from "../src/store/db";
-import { migrations } from "../src/store/migrations";
+
+const BASE = "https://api.telegram.org";
+const TOKEN = "9167497677:AAGtest00000000000000000000000000";
+const BOT = "9167497677";
+const botUrl = (method: string): string => `${BASE}/bot${TOKEN}/${method}`;
 
 // —— 假宿主（StatePort=Map；ingest/statuses 记录） ——
 
@@ -66,59 +72,53 @@ function noopLog(): ConnectorLogger {
   return logger;
 }
 
-// —— 假 TelegramApi：记录调用；getUpdates 按脚本出队，脚本耗尽后挂起到 abort ——
+// —— FakeNetKit 台架：getUpdates 出队脚本（耗尽后挂起，模拟真长轮询） ——
+//
+// 驱动的空批空转走 FakeNetKit.sleep（立即返回）——脚本耗尽若回空批会变成
+// 微任务热循环饿死测试计时器；挂起 + release() 放行是唯一能让 start() 在
+// stop() 后安静退出的形态（等价真实现：挂起中的长轮询被服务端应答唤醒）。
 
-interface FakeApi {
-  api: TelegramApi;
-  calls: Array<{ method: string; body: Record<string, unknown> }>;
-  uploads: Array<{
-    method: string;
-    file: { buffer: Buffer; filename: string; mime: string };
-    field: string;
-    fields: Record<string, string>;
-  }>;
-  /** 追加 getUpdates 出队脚本（元素=批次或要抛的错误） */
-  queue(items: Array<TelegramUpdate[] | Error>): void;
+interface PollScript {
+  /** 预置 getUpdates 出队脚本（元素=批次 / 完整假应答 / 要抛的错误） */
+  queue(items: Array<TelegramUpdate[] | FakeReply | Error>): void;
+  /** 放行挂起中的 getUpdates（空批）——配合 inst.stop() 让驱动观察到 abort */
+  release(): void;
 }
 
-function fakeApi(): FakeApi {
-  const calls: FakeApi["calls"] = [];
-  const uploads: FakeApi["uploads"] = [];
-  let script: Array<TelegramUpdate[] | Error> = [];
-  const api: TelegramApi = {
-    async call(method, body = {}, opts) {
-      calls.push({ method, body });
-      if (method === "getUpdates") {
-        const next = script.shift();
-        if (next === undefined) {
-          // 脚本耗尽：挂起到 abort（模拟真实长轮询；停服即时返回而非空转）
-          await new Promise<void>((resolve) => {
-            opts?.signal?.addEventListener("abort", () => resolve(), {
-              once: true,
-            });
-          });
-          throw new TelegramApiError("aborted", 0);
-        }
-        if (next instanceof Error) throw next;
-        return next as unknown as never;
-      }
-      if (method === "getMe") return { id: 9167497677 } as never;
-      if (method === "sendMessage") return { message_id: 901 } as never;
-      if (method === "deleteMessage") return true as never;
-      return {} as never;
+function scriptPoll(kit: FakeNetKit): PollScript {
+  let script: Array<TelegramUpdate[] | FakeReply | Error> = [];
+  let release: ((r: FakeReply) => void) | undefined;
+  kit.on(botUrl("getUpdates"), (): FakeReply | Error | Promise<FakeReply> => {
+    const next = script.shift();
+    if (next instanceof Error) throw next;
+    if (next !== undefined) {
+      return next instanceof Array ? { body: { ok: true, result: next } } : next;
+    }
+    // 脚本耗尽：挂起（模拟真实长轮询挂起；release() 放行空批）
+    return new Promise<FakeReply>((resolve) => {
+      release = resolve;
+    });
+  });
+  return {
+    queue: (items) => {
+      script = items;
     },
-    async upload(method, file, field, fields) {
-      uploads.push({ method, file, field, fields });
-      return { message_id: 902 } as never;
-    },
-    fileUrl(path) {
-      return `https://fake/file/${path}`;
-    },
+    release: () => release?.({ body: { ok: true, result: [] } }),
   };
-  return { api, calls, uploads, queue: (items) => (script = items) };
 }
 
-const BOT = "9167497677";
+/** 实例台架：FakeNetKit + 真 api 工厂 + 假宿主（ctx 注入） */
+function makeInstance(
+  kit: FakeNetKit,
+  fx: ReturnType<typeof fakeHost>,
+): ReturnType<typeof createTelegramInstance> {
+  const api = createTelegramApi(kit.http({ timeoutMs: 30_000 }), TOKEN);
+  return createTelegramInstance({
+    ctx: { ...fx.host, net: kit },
+    botId: BOT,
+    api,
+  });
+}
 
 function textUpdate(updateId: number, chatId: number, text: string): TelegramUpdate {
   return {
@@ -133,17 +133,22 @@ function textUpdate(updateId: number, chatId: number, text: string): TelegramUpd
   };
 }
 
+function jsonBody(log: { body?: string | Uint8Array | FormData }): Record<string, unknown> {
+  assert.equal(typeof log.body, "string");
+  return JSON.parse(log.body as string) as Record<string, unknown>;
+}
+
 // —— 轮询生命周期 ——
 
 test("轮询：首批摄取 + offset 持久化 + 二轮带 offset；停服即时返回", async () => {
   const fx = fakeHost();
-  const fake = fakeApi();
-  fake.queue([[textUpdate(5, -100999, "hello"), textUpdate(7, -100999, "world")], []]);
-  const inst = createTelegramInstance({
-    host: fx.host,
-    botId: BOT,
-    api: fake.api,
-  });
+  const kit = new FakeNetKit();
+  const poll = scriptPoll(kit);
+  poll.queue([[
+    textUpdate(5, -100999, "hello"),
+    textUpdate(7, -100999, "world"),
+  ]]);
+  const inst = makeInstance(kit, fx);
   const start = inst.start();
   await waitFor(() => fx.state.get("poll:offset") !== undefined, "offset persisted");
   assert.equal(fx.state.get("poll:offset"), 8); // last update_id + 1
@@ -154,18 +159,25 @@ test("轮询：首批摄取 + offset 持久化 + 二轮带 offset；停服即时
   );
   assert.equal(fx.statuses.some((s) => s.state === "ready"), true);
   // 二轮 getUpdates 携带 offset=8
-  const second = fake.calls.filter((c) => c.method === "getUpdates")[1];
-  assert.equal(second?.body["offset"], 8);
+  const calls = kit.requests.filter((r) => r.url === botUrl("getUpdates"));
+  assert.equal(calls.length >= 2, true);
+  assert.equal(jsonBody(calls[1]!)["offset"], 8);
   inst.stop();
+  poll.release(); // 放行挂起的 getUpdates → 驱动观察到 abort 安静退出
   await Promise.race([
     start,
     new Promise((_, rej) => setTimeout(() => rej(new Error("stop 未即时返回")), 2000)),
   ]);
 });
 
-test("缩略图富化：photo 消息摄取携带 mediaBlobs（overrides.enrich 注入）", async () => {
+test("缩略图富化：photo 消息走真链路（getFile + 文件下载）摄取携带 mediaBlobs", async () => {
   const fx = fakeHost();
-  const fake = fakeApi();
+  const kit = new FakeNetKit();
+  const poll = scriptPoll(kit);
+  kit.on(botUrl("getFile"), () => ({
+    body: { ok: true, result: { file_id: "thumb-fid", file_path: "photos/thumb.jpg" } },
+  }));
+  kit.on(`${BASE}/file/bot${TOKEN}/photos/thumb.jpg`, () => ({ body: "QUJD" }));
   const upd: TelegramUpdate = {
     update_id: 1,
     message: {
@@ -179,32 +191,29 @@ test("缩略图富化：photo 消息摄取携带 mediaBlobs（overrides.enrich �
       ],
     },
   };
-  fake.queue([[upd], []]);
-  const inst = createTelegramInstance({
-    host: fx.host,
-    botId: BOT,
-    api: fake.api,
-    overrides: {
-      enrich: async () => ({ "thumb-fid": "data:image/jpeg;base64,QUJD" }),
-    },
-  });
+  poll.queue([[upd]]);
+  const inst = makeInstance(kit, fx);
   const start = inst.start();
   await waitFor(() => fx.ingested.length > 0, "ingested");
   const payload = fx.ingested[0]!.payload as { mediaBlobs?: Record<string, string> };
-  assert.equal(payload.mediaBlobs?.["thumb-fid"], "data:image/jpeg;base64,QUJD");
+  const blob = payload.mediaBlobs?.["thumb-fid"];
+  assert.match(blob ?? "", /^data:image\/jpeg;base64,/);
+  assert.equal(kit.count(`${BASE}/file/bot${TOKEN}/photos/thumb.jpg`), 1);
   inst.stop();
+  poll.release();
   await start;
 });
 
 test("401 → fatal 不重试；409 → fatal；500 → 退避后成功 ready", async () => {
-  for (const [err, expectFatal] of [
-    [new TelegramApiError("Unauthorized", 401), true],
-    [new TelegramApiError("Conflict", 409), true],
+  for (const [reply, expectFatal] of [
+    [{ status: 401, body: { ok: false, error_code: 401, description: "Unauthorized" } }, true],
+    [{ status: 409, body: { ok: false, error_code: 409, description: "Conflict" } }, true],
   ] as const) {
     const fx = fakeHost();
-    const fake = fakeApi();
-    fake.queue([err]);
-    const inst = createTelegramInstance({ host: fx.host, botId: BOT, api: fake.api });
+    const kit = new FakeNetKit();
+    const poll = scriptPoll(kit);
+    poll.queue([reply]);
+    const inst = makeInstance(kit, fx);
     const start = inst.start();
     await Promise.race([
       start,
@@ -214,9 +223,13 @@ test("401 → fatal 不重试；409 → fatal；500 → 退避后成功 ready", 
   }
   // 500 → disconnected → 重试成功 → ready
   const fx = fakeHost();
-  const fake = fakeApi();
-  fake.queue([new TelegramApiError("boom", 500), []]);
-  const inst = createTelegramInstance({ host: fx.host, botId: BOT, api: fake.api });
+  const kit = new FakeNetKit();
+  const poll = scriptPoll(kit);
+  poll.queue([
+    { status: 500, body: { ok: false, error_code: 500, description: "boom" } },
+    { body: { ok: true, result: [] } },
+  ]);
+  const inst = makeInstance(kit, fx);
   const start = inst.start();
   await waitFor(
     () => fx.statuses.some((s) => s.state === "ready"),
@@ -224,6 +237,7 @@ test("401 → fatal 不重试；409 → fatal；500 → 退避后成功 ready", 
   );
   assert.equal(fx.statuses.some((s) => s.state === "disconnected"), true);
   inst.stop();
+  poll.release();
   await start;
 });
 
@@ -231,8 +245,11 @@ test("401 → fatal 不重试；409 → fatal；500 → 退避后成功 ready", 
 
 test("net.proactive 文本：sendMessage 形状 + 引用映射 reply_parameters", async () => {
   const fx = fakeHost();
-  const fake = fakeApi();
-  const inst = createTelegramInstance({ host: fx.host, botId: BOT, api: fake.api });
+  const kit = new FakeNetKit();
+  kit.on(botUrl("sendMessage"), () => ({
+    body: { ok: true, result: { message_id: 901 } },
+  }));
+  const inst = makeInstance(kit, fx);
   const receipt = await inst.net.proactive!({
     botId: BOT,
     target: "-100999",
@@ -240,9 +257,9 @@ test("net.proactive 文本：sendMessage 形状 + 引用映射 reply_parameters"
     content: "hi",
   });
   assert.equal(receipt.providerMsgId, "901");
-  const call = fake.calls.find((c) => c.method === "sendMessage");
-  assert.equal(call?.body["chat_id"], -100999); // 数字 id 侧转数字
-  assert.equal(call?.body["text"], "hi");
+  const sends = kit.requests.filter((r) => r.url === botUrl("sendMessage"));
+  assert.equal(jsonBody(sends[0]!)["chat_id"], -100999); // 数字 id 侧转数字
+  assert.equal(jsonBody(sends[0]!)["text"], "hi");
   await inst.net.proactive!({
     botId: BOT,
     target: "-100999",
@@ -250,8 +267,10 @@ test("net.proactive 文本：sendMessage 形状 + 引用映射 reply_parameters"
     content: "hi2",
     quoteMsgId: "77",
   });
-  const quoted = fake.calls.filter((c) => c.method === "sendMessage")[1];
-  assert.deepEqual(quoted?.body["reply_parameters"], {
+  const quoted = jsonBody(
+    kit.requests.filter((r) => r.url === botUrl("sendMessage"))[1]!,
+  );
+  assert.deepEqual(quoted["reply_parameters"], {
     message_id: 77,
     allow_sending_without_reply: false,
   });
@@ -259,8 +278,14 @@ test("net.proactive 文本：sendMessage 形状 + 引用映射 reply_parameters"
 
 test("net 媒体：uploadMedia 物化 → sendPhoto multipart → 句柄单次使用；voice 走 sendVoice", async () => {
   const fx = fakeHost();
-  const fake = fakeApi();
-  const inst = createTelegramInstance({ host: fx.host, botId: BOT, api: fake.api });
+  const kit = new FakeNetKit();
+  kit.on(botUrl("sendPhoto"), () => ({
+    body: { ok: true, result: { message_id: 902 } },
+  }));
+  kit.on(botUrl("sendVoice"), () => ({
+    body: { ok: true, result: { message_id: 903 } },
+  }));
+  const inst = makeInstance(kit, fx);
   const TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   const up = await inst.net.uploadMedia!({
     botId: BOT,
@@ -276,13 +301,14 @@ test("net 媒体：uploadMedia 物化 → sendPhoto multipart → 句柄单次�
     content: "cap",
     media: { kind: "image", handle: up.handle },
   });
-  const up1 = fake.uploads[0]!;
-  assert.equal(up1.method, "sendPhoto");
-  assert.equal(up1.field, "photo");
-  assert.equal(up1.fields["caption"], "cap");
-  assert.equal(up1.fields["chat_id"], "-100999");
+  const photoReqs = kit.requests.filter((r) => r.url === botUrl("sendPhoto"));
+  assert.equal(photoReqs.length, 1);
+  const form = photoReqs[0]!.body as FormData;
+  assert.equal(form.get("caption"), "cap");
+  assert.equal(form.get("chat_id"), "-100999");
+  const file = form.get("photo") as File;
   assert.deepEqual(
-    Buffer.from(up1.file.buffer).subarray(0, 4).toString("hex"),
+    Buffer.from(await file.arrayBuffer()).subarray(0, 4).toString("hex"),
     "89504e47",
   ); // PNG 魔数原样透传
   // 句柄单次使用（同 request_upload 票据纪律）
@@ -297,7 +323,7 @@ test("net 媒体：uploadMedia 物化 → sendPhoto multipart → 句柄单次�
       }),
     /句柄/,
   );
-  // voice → sendVoice（fields.file 字段名 = voice）
+  // voice → sendVoice（multipart 字段名 = voice；OggS 魔数嗅探 audio/ogg）
   const up2 = await inst.net.uploadMedia!({
     botId: BOT,
     target: "-100999",
@@ -312,22 +338,27 @@ test("net 媒体：uploadMedia 物化 → sendPhoto multipart → 句柄单次�
     content: "",
     media: { kind: "voice", handle: up2.handle },
   });
-  assert.equal(fake.uploads[1]!.method, "sendVoice");
-  assert.equal(fake.uploads[1]!.field, "voice");
+  const voiceForm = kit.requests.find(
+    (r) => r.url === botUrl("sendVoice"),
+  )!.body as FormData;
+  assert.equal(voiceForm.get("voice") !== null, true);
 });
 
 test("net.recall：deleteMessage 数字 id；上限拒绝（4096 文本/1024 caption）", async () => {
   const fx = fakeHost();
-  const fake = fakeApi();
-  const inst = createTelegramInstance({ host: fx.host, botId: BOT, api: fake.api });
+  const kit = new FakeNetKit();
+  kit.on(botUrl("deleteMessage"), () => ({
+    body: { ok: true, result: true },
+  }));
+  const inst = makeInstance(kit, fx);
   await inst.net.recall!({
     botId: BOT,
     target: "-100999",
     scope: "group",
     providerMsgId: "901",
   });
-  const call = fake.calls.find((c) => c.method === "deleteMessage");
-  assert.deepEqual(call?.body, { chat_id: -100999, message_id: 901 });
+  const call = kit.requests.find((r) => r.url === botUrl("deleteMessage"));
+  assert.deepEqual(jsonBody(call!), { chat_id: -100999, message_id: 901 });
 
   await assert.rejects(
     () =>
@@ -361,23 +392,20 @@ test("net.recall：deleteMessage 数字 id；上限拒绝（4096 文本/1024 cap
 
 // —— verifyCredential ——
 
-test("verifyCredential：形制错/401/appid 不匹配/全对", async () => {
-  const plugin = createTelegramConnector({});
+test("verifyCredential：形制错/401/appid 不匹配/全对（FakeNetKit 假端点）", async () => {
+  const plugin = createTelegramConnector();
   const verify = plugin.hooks!.verifyCredential!;
   await assert.rejects(
     () => verify({ appid: "9167497677", token: "bad" }),
     /形制/,
   );
-  // getMe 401（真实 401 走不到——形制检查先挡；构造合法形制 + 假 401 fetch）
-  const reject = createTelegramConnector({
-    apiOverrides: {
-      fetch: (async () =>
-        new Response(
-          JSON.stringify({ ok: false, error_code: 401, description: "Unauthorized" }),
-          { status: 401, headers: { "Content-Type": "application/json" } },
-        )) as typeof fetch,
-    },
-  });
+  // getMe 401（真实 401 走不到——形制检查先挡；构造合法形制 + 假 401 端点）
+  const kit401 = new FakeNetKit();
+  kit401.onMatch((u) => u.endsWith("/getMe"), () => ({
+    status: 401,
+    body: { ok: false, error_code: 401, description: "Unauthorized" },
+  }));
+  const reject = createTelegramConnector({ net: kit401 });
   await assert.rejects(
     () =>
       reject.hooks!.verifyCredential!({
@@ -387,15 +415,11 @@ test("verifyCredential：形制错/401/appid 不匹配/全对", async () => {
     /BotFather/,
   );
   // appid 与 getMe id 不一致
-  const mismatch = createTelegramConnector({
-    apiOverrides: {
-      fetch: (async () =>
-        new Response(
-          JSON.stringify({ ok: true, result: { id: 9167497677 } }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        )) as typeof fetch,
-    },
-  });
+  const kitOk = new FakeNetKit();
+  kitOk.onMatch((u) => u.endsWith("/getMe"), () => ({
+    body: { ok: true, result: { id: 9167497677 } },
+  }));
+  const mismatch = createTelegramConnector({ net: kitOk });
   await assert.rejects(
     () =>
       mismatch.hooks!.verifyCredential!({
@@ -405,16 +429,7 @@ test("verifyCredential：形制错/401/appid 不匹配/全对", async () => {
     /不匹配/,
   );
   // 全对
-  const ok = createTelegramConnector({
-    apiOverrides: {
-      fetch: (async () =>
-        new Response(
-          JSON.stringify({ ok: true, result: { id: 9167497677 } }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        )) as typeof fetch,
-    },
-  });
-  await ok.hooks!.verifyCredential!({
+  await createTelegramConnector({ net: kitOk }).hooks!.verifyCredential!({
     appid: "9167497677",
     token: "9167497677:AAGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   });
@@ -422,7 +437,7 @@ test("verifyCredential：形制错/401/appid 不匹配/全对", async () => {
 
 // —— Sender caps 感知路由（核心接线行为） ——
 
-function setupDb(): { db: DB; close: () => void } {
+function setupDb(): { db: import("../src/store/db").DB; close: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "tg-sender-"));
   const db = openDatabase(dir);
   runMigrations(db, migrations);
@@ -450,9 +465,12 @@ test("Sender caps 路由：passiveWindow=false 恒主动通道（旧消息也直
     registry.setAllowGroups(BOT, ["-100999"]);
 
     const fxh = fakeHost();
-    const fake = fakeApi();
-    const inst = createTelegramInstance({ host: fxh.host, botId: BOT, api: fake.api });
-    const plugin = createTelegramConnector({});
+    const kit = new FakeNetKit();
+    kit.on(botUrl("sendMessage"), () => ({
+      body: { ok: true, result: { message_id: 901 } },
+    }));
+    const inst = makeInstance(kit, fxh);
+    const plugin = createTelegramConnector();
     const sender = new Sender({
       log: createLoggerCompat(),
       repo,
@@ -476,6 +494,12 @@ test("Sender caps 路由：passiveWindow=false 恒主动通道（旧消息也直
 });
 
 // —— 工具 ——
+
+import { Sender } from "../src/sender";
+import { BotRegistry } from "../src/bots";
+import { Repo } from "../src/store/repo";
+import { openDatabase, runMigrations } from "../src/store/db";
+import { migrations } from "../src/store/migrations";
 
 function createLoggerCompat(): import("../src/utils/logger").Logger {
   // eslint 不涉足测试文件；直接构造结构兼容的静默 logger
