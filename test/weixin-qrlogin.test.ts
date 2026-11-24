@@ -8,10 +8,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type {
   ConnectorLogger,
-  HostApi,
+  PluginContext,
   PluginWebuiRequest,
   StatePort,
 } from "@qsense/connector-sdk";
+import { createNetKit } from "@qsense/connector-sdk";
 import {
   WeixinError,
   createWeixinConnector,
@@ -34,7 +35,7 @@ function noopLog(): ConnectorLogger {
   return logger;
 }
 
-function fakeHost(): HostApi {
+function fakeHost(): PluginContext {
   const noop = (): void => undefined;
   return {
     log: noopLog(),
@@ -47,6 +48,7 @@ function fakeHost(): HostApi {
     } satisfies StatePort,
     ingest: noop,
     reportStatus: noop,
+    net: createNetKit(),
   };
 }
 

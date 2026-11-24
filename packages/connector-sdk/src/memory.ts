@@ -1,10 +1,12 @@
 // 内存实现：StatePort / HostApi —— 供 harness 与各 connector 仓测试使用。
 // core 侧生产实现（SQLite kv 落盘）在 P1 落地，不在此包。
 
+import type { NetKit } from "./net";
+import { createNetKit } from "./net";
 import type {
   ConnectorLogger,
   ConnectorStatus,
-  HostApi,
+  PluginContext,
   RawInbound,
   StatePort,
 } from "./types";
@@ -46,7 +48,8 @@ export function noopLogger(scope = "sdk"): ConnectorLogger {
 }
 
 export interface MemoryHostHandle {
-  host: HostApi;
+  /** 宿主注入面 v3：HostApi + net（缺省真 NetKit；测试可注入 FakeNetKit） */
+  host: PluginContext;
   /** 经 ingest 上行的原始载荷（顺序记录） */
   ingested: RawInbound[];
   /** 生命周期状态上报（顺序记录） */
@@ -58,12 +61,14 @@ export function createMemoryHost(opts?: {
   log?: ConnectorLogger;
   botId?: string;
   onIngest?: (e: RawInbound) => void;
+  /** 缺省真 NetKit；连接器测试注入 FakeNetKit 驱动假端点 */
+  net?: NetKit;
 }): MemoryHostHandle {
   const ingested: RawInbound[] = [];
   const statuses: ConnectorStatus[] = [];
   const state = new MemoryStatePort();
   const log = opts?.log ?? noopLogger();
-  const host: HostApi = {
+  const host: PluginContext = {
     log,
     state,
     ingest(e: RawInbound): void {
@@ -77,6 +82,7 @@ export function createMemoryHost(opts?: {
     reportStatus(s: ConnectorStatus): void {
       statuses.push(s);
     },
+    net: opts?.net ?? createNetKit(),
   };
   return { host, ingested, statuses, state };
 }

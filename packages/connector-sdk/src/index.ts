@@ -1,6 +1,7 @@
 // @qsense/connector-sdk —— 桶导出。
 export * from "./types";
 export * from "./message";
+export * from "./net";
 export * from "./semver";
 export { GateError, validateCredentialSchema, validateJsonSchema, validateLoginFlow, validatePlugin, validatePluginTool, validateWebuiRoutes } from "./gates";
 export type { ToolRoute } from "./router";
@@ -12,6 +13,7 @@ export {
   noopLogger,
   type MemoryHostHandle,
 } from "./memory";
+export { FakeNetKit, type FakeReply, type FakeRequestLog } from "./net-fake";
 export {
   runConformance,
   type ConformanceCheck,

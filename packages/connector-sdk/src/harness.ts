@@ -6,12 +6,13 @@
 import { validatePlugin } from "./gates";
 import { createMemoryHost } from "./memory";
 import { assertNormalizedInbound } from "./message";
+import type { NetKit } from "./net";
 import type {
   BotCreds,
   ConnectorInstance,
   ConnectorLogger,
   ConnectorPlugin,
-  HostApi,
+  PluginContext,
 } from "./types";
 
 export interface ConformanceCheck {
@@ -35,7 +36,12 @@ export interface HarnessOptions {
    * 用途：注入假网关 → 断言 host.ingest 收到回放载荷 / net.* 原语行为。
    * 抛错即 probe 检查失败（detail 取 message）。
    */
-  probe?(host: HostApi, instance: ConnectorInstance): Promise<void>;
+  probe?(host: PluginContext, instance: ConnectorInstance): Promise<void>;
+  /**
+   * 宿主 net 注入（T3）：传 FakeNetKit 驱动假端点——probe 与生命周期检查的
+   * host.net 即此假件；缺省真 NetKit。
+   */
+  net?: NetKit;
   /**
    * normalize 形状探针样本（契约 v2）：一份有代表性的真实载荷（如群文本消息）。
    * 提供后 harness 跑 normalize-shape 检查——normalize 产物过 assertNormalizedInbound
@@ -74,7 +80,7 @@ export async function runConformance(
 
   // 2. 生命周期：create → start → stop → 重建实例再走一遍（宿主重启语义）
   try {
-    const h1 = createMemoryHost({ log: opts.log });
+    const h1 = createMemoryHost({ log: opts.log, net: opts.net });
     const i1 = plugin.create(h1.host, creds);
     await i1.start();
     i1.stop();
@@ -103,7 +109,7 @@ export async function runConformance(
   //    passiveWindow=true → net.reply 必备；否则 net.proactive 必备。
   //    caps.recall=true → net.recall；caps.media 任一 true → net.uploadMedia。
   try {
-    const h = createMemoryHost({ log: opts.log });
+    const h = createMemoryHost({ log: opts.log, net: opts.net });
     const inst = plugin.create(h.host, creds);
     const missing: string[] = [];
     if (plugin.caps.passiveWindow && inst.net.reply === undefined) {
@@ -146,7 +152,7 @@ export async function runConformance(
 
   // 6. 连接器自定义探针（可选）
   if (opts.probe !== undefined) {
-    const h = createMemoryHost({ log: opts.log });
+    const h = createMemoryHost({ log: opts.log, net: opts.net });
     try {
       const inst = plugin.create(h.host, creds);
       await inst.start();

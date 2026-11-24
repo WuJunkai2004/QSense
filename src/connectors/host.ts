@@ -5,9 +5,10 @@ import type {
   BotConfigSnapshot,
   ConnectorLogger,
   ConnectorStatus,
-  HostApi,
+  PluginContext,
   StatePort,
 } from "@qsense/connector-sdk";
+import { createNetKit } from "@qsense/connector-sdk";
 import type { BotRegistry } from "../bots";
 import type { Logger } from "../utils/logger";
 import type { Repo } from "../store/repo";
@@ -61,13 +62,16 @@ export interface BotHostOpts {
   onStatus: (s: ConnectorStatus) => void;
 }
 
-/** 每 bot HostApi（core Logger 结构兼容 ConnectorLogger，可直接传入） */
-export function createBotHost(opts: BotHostOpts): HostApi {
-  const host: HostApi = {
+/** 每 bot HostApi（core Logger 结构兼容 ConnectorLogger，可直接传入）。
+ * T3 起返回 PluginContext（HostApi + net 注入）——结构类型是 HostApi 超集，
+ * 旧声明面零改动。 */
+export function createBotHost(opts: BotHostOpts): PluginContext {
+  const host: PluginContext = {
     log: opts.log as ConnectorLogger,
     state: kvStatePort({ db: opts.db, platform: opts.platform, botId: opts.botId }),
     ingest: (raw) => opts.ingest(raw),
     reportStatus: (s) => opts.onStatus(s),
+    net: createNetKit(),
   };
   return host;
 }

@@ -14,11 +14,12 @@ import {
   BASE_TOOL_NAMES,
   ToolRouter,
   runConformance,
+  createNetKit,
   type ConnectorInstance,
   type ConnectorLogger,
   type ConnectorPlugin,
   type ConnectorStatus,
-  type HostApi,
+  type PluginContext,
   type StatePort,
 } from "@qsense/connector-sdk";
 import {
@@ -47,7 +48,7 @@ const USER = "f2d8a1c4b7e9@im.wechat";
 // —— 假宿主（StatePort=Map；ingest/statuses 记录） ——
 
 function fakeHost(): {
-  host: HostApi;
+  host: PluginContext;
   ingested: Array<{ botId: string; payload: unknown }>;
   statuses: ConnectorStatus[];
   state: Map<string, unknown>;
@@ -55,7 +56,7 @@ function fakeHost(): {
   const state = new Map<string, unknown>();
   const ingested: Array<{ botId: string; payload: unknown }> = [];
   const statuses: ConnectorStatus[] = [];
-  const host: HostApi = {
+  const host: PluginContext = {
     log: noopLog(),
     state: {
       async get<T = unknown>(key: string) {
@@ -70,6 +71,7 @@ function fakeHost(): {
     } satisfies StatePort,
     ingest: (e) => ingested.push(e),
     reportStatus: (s) => statuses.push(s),
+    net: createNetKit(),
   };
   return { host, ingested, statuses, state };
 }
@@ -788,7 +790,7 @@ test("conformance harness：声明闸门 / 生命周期 / 原语齐备 / normali
     ...plugin,
     create: (host, creds) => {
       const statuses: ConnectorStatus[] = [];
-      const wrapped: HostApi = {
+      const wrapped: PluginContext = {
         ...host,
         reportStatus: (s) => {
           statuses.push(s);

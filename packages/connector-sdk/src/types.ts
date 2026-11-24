@@ -13,6 +13,7 @@
 // bump 2.0.0，sdkRange 三方锁版承担。
 
 import type { NormalizedInbound } from "./message";
+import type { NetKit } from "./net";
 
 /** SDK 契约版本：宿主加载插件时用 satisfiesRange(SDK_VERSION, plugin.sdkRange) 校验 */
 export const SDK_VERSION = "2.3.0";
@@ -407,7 +408,17 @@ export interface ConnectorPlugin {
    * 载荷无法解读/无需落地（容错丢弃）；parser 内部不得抛错逃逸由 core 兜底 warn。
    */
   normalize(botId: string, payload: unknown): NormalizedInbound | null;
-  create(host: HostApi, creds: BotCreds): ConnectorInstance;
+  /**
+   * 实例工厂（T3 起 ctx: PluginContext = HostApi + net）。结构类型向后兼容：
+   * 声明 (host: HostApi) => … 的旧插件照常接收并忽略 net（双轨期渐进迁移）。
+   */
+  create(ctx: PluginContext, creds: BotCreds): ConnectorInstance;
+}
+
+/** 宿主注入面 v3（B⁺ T3）：HostApi + NetKit。旧插件零破坏（结构类型子集） */
+export interface PluginContext extends HostApi {
+  /** 协议无关传输机械（超时/中止/重试/节流/物化/嗅探/休眠/长轮询驱动） */
+  readonly net: NetKit;
 }
 
 /** loadModule 传给插件工厂的宿主 init（工厂据此建自有服务，如 TokenService） */

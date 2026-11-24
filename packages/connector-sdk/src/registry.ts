@@ -8,7 +8,7 @@ import {
   type ConnectorInstance,
   type ConnectorPlugin,
   type ConnectorPluginFactory,
-  type HostApi,
+  type PluginContext,
   type PluginModuleInit,
 } from "./types";
 
@@ -53,7 +53,7 @@ export class ConnectorRegistry {
   /** 创建实例（宿主装配用；creds.platform 必须与插件 id 一致） */
   instantiate(
     id: string,
-    host: HostApi,
+    host: PluginContext,
     creds: BotCreds,
   ): ConnectorInstance {
     const plugin = this.require(id);
