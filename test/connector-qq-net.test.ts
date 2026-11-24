@@ -1,5 +1,5 @@
-// connector-qq 协议面规格：语义 wire → QQ 官方线格式（P1 自 sender.test 迁入的
-// 真机验证形态规格，勿改——全部对应已真机验证的官方受理形态）。
+// connector-qq 协议面规格：语义 wire → QQ 官方线格式。
+// 全部对应已真机验证的官方受理形态，勿改断言。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -192,6 +192,8 @@ test("proactiveBody：主动消息无 msg_id/msg_seq；文本/媒体/引用块�
 test("scopeToApi：core 会话形态标签 → 官方 API scope（chat→c2c，group→group）", () => {
   assert.equal(scopeToApi("chat"), "c2c");
   assert.equal(scopeToApi("group"), "group");
+  // T7：词表外的值不再静默回落 "group"，抛可操作错误（防止 typo 把单聊发进群）
+  assert.throws(() => scopeToApi("c2c"));
 });
 
 test("createQqNet：wire → QQSendApi 映射（scope/目标/凭据/线格式/回执）", async () => {

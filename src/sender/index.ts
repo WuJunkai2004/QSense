@@ -1,4 +1,4 @@
-// 发送器·策略半（P1 收口后形态）：被动窗口管理、msg_seq 幂等账本、
+// 发送器·策略半：被动窗口管理、msg_seq 幂等账本、
 // 通道自动路由（被动优先）、双重门禁、Markdown 无权限自动降级、人工审核
 // （304023/304024）pending 标记、官方错误码翻译、自发消息补记。
 //
@@ -62,8 +62,8 @@ export interface SendResult {
 export type MediaKind = "image" | "voice";
 
 /** 富媒体来源（传输自足：MCP 服务可能与智能体不同机，不收智能体侧本地路径；
- * "file" 为服务端资产（DATA_DIR/assets，经 request_upload 票据上传），跨机安全）
- * （与 SDK MediaSourceWire 同形；P1 保留本名以稳测试导入） */
+ * "file" 为服务端资产（DATA_DIR/assets，经 request_upload 票据上传），跨机安全）。
+ * 与 SDK MediaSourceWire 同形。 */
 export type MediaSource = import("@qsense/connector-sdk").MediaSourceWire;
 
 /** 回复/主动共用的媒体载荷：handle=官方转存句柄（file_info），label=补记占位符标签 */
@@ -110,7 +110,7 @@ export interface BoundConnectorHooks {
 
 export interface SenderDeps {
   log: Logger;
-  /** 历史遗留字段（旧测试仍在传）；P1 后策略半不再直连 DB */
+  /** 保留的构造参数以兼容既有调用方；发送策略不直连 DB */
   db?: DB;
   repo: Repo;
   /** 机器人注册表（bots 表域层）：bot 查找、白名单、认证等级展示 */
@@ -118,11 +118,11 @@ export interface SenderDeps {
   /** 传输原语按 bot 解析（宿主运行时装配；测试注入 mock）；缺省=写路径硬拒绝 */
   transportFor?: (botId: string) => ConnectorNet | undefined;
   /**
-   * 平台 caps 按 bot 解析（P3.5 caps 感知路由）：passiveWindow=false 平台
-   * （Telegram）发送恒走主动通道、原语校验放宽；缺省=严格校验（QQ 现行为不变）
+   * 平台 caps 按 bot 解析：passiveWindow=false 的平台发送恒走主动通道，原语
+   * 校验相应放宽；缺省时采用严格校验。
    */
   capsFor?: (botId: string) => PlatformCaps | undefined;
-  /** 每 bot 发送错误语义面（契约 v2.2.2）：平台官方码判定与文案由连接器声明；
+  /** 每 bot 发送错误语义面：平台官方码判定与文案由连接器声明；
    * 缺省=平台无对应语义（如 Telegram），全部走 core 通用兜底 */
   sendErrorFor?: (botId: string) => SendErrorSemantics | undefined;
   /** 平台策略钩子（QQ=额度门禁/记账）；缺省=无额度语义平台，直接放行 */
@@ -139,10 +139,9 @@ export class Sender {
   }
 
   /**
-   * 传输原语解析；未装配=发送面关闭，硬拒绝。原语必备性按 caps 判定
-   * （P3.5 caps 感知）：caps 未装配=现行严格校验（QQ 现行为/存量测试不变）；
-   * passiveWindow=false 平台不需要 reply；recall=false 不需要 recall；
-   * media 全关不需要 uploadMedia。proactive 恒必备。
+   * 传输原语解析；未装配=发送面关闭，硬拒绝。原语必备性按 caps 判定：
+   * caps 未装配时按严格集合校验；passiveWindow=false 不需要 reply；
+   * recall=false 不需要 recall；media 全关不需要 uploadMedia；proactive 恒必备。
    */
   private transport(botId: string): {
     reply(wire: ReplyWire): Promise<{ providerMsgId: string }>;
@@ -181,10 +180,9 @@ export class Sender {
       );
     }
     return {
-      // 消灭 `net.reply!` 非空断言（曾让 passiveWindow=false 平台的 reply 直呼
-      // 变成 TypeError "reply is not a function"——2026-11-24 微信真机爆雷）：
-      // 未实现原语 → 可操作错误。正常路由不会触达（resolveChannel 的 caps 收口
-      // 使 passiveWindow=false 平台恒走 proactive）；此兜底防未来新的直呼入口。
+      // 未实现 reply 原语时提供可操作错误，而不是留下非空断言：
+      // 正常路由不会触达（resolveChannel 依据 caps 让 passiveWindow=false 平台
+      // 恒走 proactive），此兜底防止新增直呼入口重新引入 TypeError。
       reply:
         net.reply ??
         (async (): Promise<{ providerMsgId: string }> => {
@@ -196,7 +194,7 @@ export class Sender {
     };
   }
 
-  /** 双重门禁（M8 读库版）：发送总开关（kv settings）+ 会话级发送条件——
+  /** 双重门禁：发送总开关（kv settings）+ 会话级发送条件——
    * 群=该 bot 白名单（bots 表）；私聊=用户未拒绝（C2C_MSG_REJECT 置 false 即硬拒），
    * 主动消息另需用户已同意（C2C_MSG_RECEIVE，requireOptIn=true 时校验）。硬拒绝不发任何请求。 */
   private gate(
@@ -318,6 +316,10 @@ export class Sender {
       asMarkdown: boolean,
       seq: number,
     ): Promise<SendResult> => {
+      // 幂等账本不变量（防回归，勿简化）：先 INSERT reserved 占位（reply_msg_id+msg_seq
+      // 唯一），发送成功后置 sent/pending_audit；重放只认这两态（repo.findSendReplay）。
+      // reserved 遗留 = 占位未确认送达，不视为已发；msg_seq 取账本 MAX+1（含 failed），
+      // 保证官方可能已受理的序号绝不复用。
       const reservation = this.deps.repo.insertSend({
         bot_id: botId,
         target_openid: targetId,
@@ -537,7 +539,7 @@ export class Sender {
    * `<qqbot-at-user id="…"/>` / `<qqbot-at-everyone/>` 仅 markdown 消息渲染 */
   static #OUTBOUND_AT_RE = /<qqbot-at-(?:user|everyone)\b/;
 
-  /** 入站旧格式 AT 表示候选（官方事件 content 的 `<@openid>` 形态，agent 照抄即自然意图）。
+  /** 入站 `<@openid>` AT 表示候选；agent 照抄该形态即表达自然意图。
    * everyone 不在翻译范围：新格式 @everyone 需管理员身份+每群每日 1 次，自动升级风险大。 */
   static #LEGACY_AT_RE = /<@([A-Za-z0-9]+)>/g;
 
@@ -715,8 +717,8 @@ export class Sender {
 
   /** 通道判定（sendAuto/sendMediaAuto 共用）：引用目标窗内→绑=引（形态A）；
    * 无引用→绑最新可绑消息（白嫖被动）；否则主动兜底。
-   * P3.5：passiveWindow=false 平台（Telegram）无官方窗口/次数语义——绑定与
-   * 窗口查表不适用，恒走主动通道（引用照传，平台侧渲染 reply 样式）。 */
+   * passiveWindow=false 的平台（如 Telegram）没有官方被动窗口/次数语义，绑定与
+   * 窗口查表不适用，恒走主动通道（引用照传，由平台侧渲染 reply 样式）。 */
   private resolveChannel(
     botId: string,
     kind: "group" | "chat",

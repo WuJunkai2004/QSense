@@ -1,8 +1,6 @@
-// core ingest 管线（P5 契约 v2 表驱动，2026-11-17）：connector 实例经 host.ingest
-// 上行的信封按 payload.platform 路由到对应插件 normalize（解读权在插件，决策 #8）
-// → 通用消息级去重 → repo 入库/效应落地。core 对平台零硬编码——第三方插件零
-// core 改动进场；历史上的 isTelegramPayload / unwrapQqPayload / 平台 handler
-// 分支已随 parser 下沉退役。
+// core ingest 管线：connector 实例经 host.ingest 上行的信封按 payload.platform
+// 路由到对应插件的 normalize（解读权在插件）→ 通用消息级去重 → repo 入库/效应落地。
+// core 对平台零硬编码，新平台插件无需修改本文件。
 //
 // 效应（InboundEffect）是平台语义到 core 中立词汇表的翻译：群注册表/开关/审核
 // 回执由 core 按 repo 语义落地；botId 以信封为权威盖章（防插件填错 bot 跨 bot 污染）。
@@ -42,11 +40,21 @@ function platformKeyOf(payload: RawEnvelope): string | null {
   return typeof p === "string" && p !== "" ? p : null;
 }
 
+/** 穷尽性守卫：判别联合新增成员而分发点未处理时，编译期即失败，
+ *  而不是运行时静默漏落地。 */
+function assertNever(x: never): never {
+  throw new Error(`unhandled inbound effect kind: ${String(x)}`);
+}
+
 /** 效应落地：平台中立词汇 → repo 状态变更（botId 以信封为权威） */
 function applyEffect(repo: Repo, botId: string, fx: InboundEffect): void {
   switch (fx.kind) {
     case "group-seen":
-      repo.ensureGroup(botId, fx.scopeId, fx.fullMsg === undefined ? null : fx.fullMsg ? 1 : 0);
+      repo.ensureGroup(
+        botId,
+        fx.scopeId,
+        fx.fullMsg === undefined ? null : fx.fullMsg ? 1 : 0,
+      );
       return;
     case "group-added":
       repo.addGroup(botId, fx.scopeId);
@@ -61,21 +69,28 @@ function applyEffect(repo: Repo, botId: string, fx: InboundEffect): void {
       repo.setC2cSwitch(botId, fx.scopeId, fx.allow);
       return;
     case "audit":
-      repo.applyAuditResult(botId, fx.target, fx.pass ? "audit_pass" : "audit_reject");
+      repo.applyAuditResult(
+        botId,
+        fx.target,
+        fx.pass ? "audit_pass" : "audit_reject",
+      );
       return;
+    default:
+      // 穷尽性守卫：InboundEffect 新增 kind 未在此落地时编译报错
+      return assertNever(fx);
   }
 }
 
 /**
  * ingest 管线工厂：返回宿主 ingest 实现（泛型直通——插件/测试的完整信封字面量
- * 不触发多余属性检查，core 视角只见 RawEnvelope.platform）。每条消息路径绝不抛错
- * 由调用方兜底（与旧 onEvent 纪律一致）。消息级去重键平台中立：
+ * 不触发多余属性检查，core 视角只见 RawEnvelope.platform）。消息处理路径不向
+ * 连接器上抛错误，避免把入库问题误当成网络故障。消息级去重键平台中立：
  * (botId, scope, scopeId, msgId)——即 saveMessage 的幂等主键；Telegram 无事件级
  * 去重键（update_id 至少一次），同键重投在此挡下。
  */
-export function createIngestPipeline(deps: IngestDeps): <P extends RawEnvelope>(
-  raw: RawInbound<P>,
-) => void {
+export function createIngestPipeline(
+  deps: IngestDeps,
+): <P extends RawEnvelope>(raw: RawInbound<P>) => void {
   const dedup = new BoundedDedup(4096);
   return (raw) => {
     const platform = platformKeyOf(raw.payload);
@@ -90,22 +105,27 @@ export function createIngestPipeline(deps: IngestDeps): <P extends RawEnvelope>(
       );
       return;
     }
-    let inbound: { messages: NormalizedMessage[]; effects: InboundEffect[] } | null;
+    let inbound: {
+      messages: NormalizedMessage[];
+      effects: InboundEffect[];
+    } | null;
     try {
       inbound = plugin.normalize(raw.botId, raw.payload);
     } catch (e) {
       // parser 抛错不炸管线（每条消息路径绝不抛错纪律）
-      deps.log.warn(t("ingest_parse_fail", {
-        platform,
-        reason: e instanceof Error ? e.message : String(e),
-      }));
+      deps.log.warn(
+        t("ingest_parse_fail", {
+          platform,
+          reason: e instanceof Error ? e.message : String(e),
+        }),
+      );
       return;
     }
     if (inbound === null) return;
 
     // botId 以信封为权威（成品消息逐条盖章）。次序纪律（T1 加固）：去重只检查、
-    // 入库成功才标记——旧的「检查即标记」与单条入库失败组合，曾造成连接器重拉
-    // 同批时全部命中去重被滤、游标照样推进，进程生命周期内静默丢整批。
+    // 入库成功后才标记：若检查时即标记，单条入库失败会让连接器重拉的同批消息全部
+    // 命中去重而被过滤，游标仍会推进，最终在进程生命周期内静默丢整批。
     // 每条消息/效应各自 try/catch：单条失败不炸整批、不上抛（绝不抛错纪律），
     // 连接器轮询循环不会把入库问题误当轮询错误触发退避与状态抖动。
     // T2 zod 网关：normalize 产物逐条过 UnifiedMessageSchema / InboundEffectSchema
@@ -115,11 +135,13 @@ export function createIngestPipeline(deps: IngestDeps): <P extends RawEnvelope>(
       m0.botId = raw.botId;
       const parsed = UnifiedMessageSchema.safeParse(m0);
       if (!parsed.success) {
-        deps.log.warn(t("ingest_shape_fail", {
-          platform,
-          id: typeof m0.msgId === "string" ? m0.msgId : "?",
-          reason: formatZodIssues(parsed.error, "message"),
-        }));
+        deps.log.warn(
+          t("ingest_shape_fail", {
+            platform,
+            id: typeof m0.msgId === "string" ? m0.msgId : "?",
+            reason: formatZodIssues(parsed.error, "message"),
+          }),
+        );
         continue; // 违规隔离：不入库、不去重标记，重拉同批时再次可观测
       }
       const m = parsed.data;
@@ -134,10 +156,12 @@ export function createIngestPipeline(deps: IngestDeps): <P extends RawEnvelope>(
     for (const fx0 of inbound.effects) {
       const parsed = InboundEffectSchema.safeParse(fx0);
       if (!parsed.success) {
-        deps.log.warn(t("ingest_effect_shape_fail", {
-          platform,
-          reason: formatZodIssues(parsed.error, "effect"),
-        }));
+        deps.log.warn(
+          t("ingest_effect_shape_fail", {
+            platform,
+            reason: formatZodIssues(parsed.error, "effect"),
+          }),
+        );
         continue;
       }
       effects.push(parsed.data);
@@ -150,11 +174,13 @@ export function createIngestPipeline(deps: IngestDeps): <P extends RawEnvelope>(
       try {
         deps.repo.saveMessage(m);
       } catch (e) {
-        deps.log.warn(t("ingest_save_fail", {
-          platform,
-          id: m.msgId,
-          reason: shortReason(e instanceof Error ? e : new Error(String(e))),
-        }));
+        deps.log.warn(
+          t("ingest_save_fail", {
+            platform,
+            id: m.msgId,
+            reason: shortReason(e instanceof Error ? e : new Error(String(e))),
+          }),
+        );
         continue; // 未标记去重：重拉同批时本条仍有机会重新入库
       }
       dedup.mark(key);
@@ -163,11 +189,13 @@ export function createIngestPipeline(deps: IngestDeps): <P extends RawEnvelope>(
       try {
         applyEffect(deps.repo, raw.botId, fx);
       } catch (e) {
-        deps.log.warn(t("ingest_effect_fail", {
-          platform,
-          kind: fx.kind,
-          reason: shortReason(e instanceof Error ? e : new Error(String(e))),
-        }));
+        deps.log.warn(
+          t("ingest_effect_fail", {
+            platform,
+            kind: fx.kind,
+            reason: shortReason(e instanceof Error ? e : new Error(String(e))),
+          }),
+        );
       }
     }
   };
