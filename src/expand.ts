@@ -3,8 +3,8 @@
 // 职责=把官方元素树**分解为语义件**，而非渲染成一坨文本（老病根：被引原文与记录转写混进正文，
 // 智能体把引用当本条正文）。产出四件：本条文本行 / 渲染行（媒体占位+结构标记）/ 顶层引用 /
 // 记录拍平子消息——分别落 text / content / quote_json / message_records。
-// 官方对元素内字段命名未给全样例，容错提取（message_type/type 双名、content/text 双名、
-// children/elements/messages 全试），保证未知形状不炸、已知形状都能抽出文本。
+// B⁺ T5：防御性 typeof 分支退役——输入一律为 wire schema 解析产物（QqElement，见 ./wire），
+// 元素类型经 elementTypeOf 归一为判别联合（0/3/101/102/103 + 未知宽容），walk 用穷尽 switch。
 // 媒体仍以 `![附件n]` 占位符原位内联进渲染行（编号=attachments 下标+1，真机 2026-10-26 核实：
 // 103 引用元素自带 attachments 携带被引图片——占位符保留，被引**文字**不再内联）。
 
@@ -14,53 +14,18 @@ import type {
   NormalizedQuote,
   NormalizedRecord,
 } from "@qsense/connector-sdk";
-
-const TYPE_TEXT = 0;
-const TYPE_ARK = 3;
-const TYPE_PARALLEL = 101;
-const TYPE_FORWARD = 102;
-const TYPE_QUOTE = 103;
-
-interface ElementLike {
-  message_type?: number;
-  type?: number;
-  content?: string;
-  text?: string;
-  msg_idx?: string;
-  title?: string;
-  desc?: string;
-  timestamp?: string;
-  author?: unknown;
-  children?: unknown[];
-  elements?: unknown[];
-  messages?: unknown[];
-  paragraphs?: unknown[];
-  [k: string]: unknown;
-}
-
-const asElements = (v: unknown): ElementLike[] =>
-  Array.isArray(v) ? (v as ElementLike[]) : [];
-
-function childrenOf(el: ElementLike): ElementLike[] {
-  for (const key of ["children", "elements", "messages", "paragraphs"]) {
-    const v = el[key];
-    if (Array.isArray(v)) return v as ElementLike[];
-  }
-  return [];
-}
-
-function textOf(el: ElementLike): string {
-  if (typeof el.content === "string") return el.content;
-  if (typeof el.text === "string") return el.text;
-  return "";
-}
+import type { QqAttachment, QqElement, QqAuthor } from "./wire";
+import {
+  QQ_EL_ARK,
+  QQ_EL_FORWARD,
+  QQ_EL_PARALLEL,
+  QQ_EL_QUOTE,
+  QQ_EL_TEXT,
+  elementTypeOf,
+} from "./wire";
 
 /** content_type → 归一 kind；语音可由 wav 转写地址/ASR 文本旁证；未知兜底 file */
-function kindOf(att: {
-  content_type?: string;
-  voice_wav_url?: string;
-  asr_refer_text?: string;
-}): AttachmentKind {
+function kindOf(att: QqAttachment): AttachmentKind {
   const ct = att.content_type ?? "";
   if (ct === "voice" || ct.startsWith("voice/")) return "voice";
   if (att.voice_wav_url !== undefined || att.asr_refer_text !== undefined) {
@@ -71,27 +36,22 @@ function kindOf(att: {
   return "file";
 }
 
-/** 官方 attachments 数组单项 / 元素自身媒体的容错解析；无 url 视为非媒体返回 null */
-export function parseAttachmentLike(a: unknown): NormalizedAttachment | null {
-  if (a === null || typeof a !== "object") return null;
-  const x = a as Record<string, unknown>;
-  if (typeof x.url !== "string" || x.url === "") return null;
+/** 官方 attachments 单项 / 元素自身媒体的解析；无 url 视为非媒体返回 null */
+export function parseAttachmentLike(x: QqAttachment): NormalizedAttachment | null {
+  if (x.url === undefined || x.url === "") return null;
   const att: NormalizedAttachment = {
     kind: "file",
     url: x.url,
-    filename: typeof x.filename === "string" ? x.filename : undefined,
-    width: typeof x.width === "number" ? x.width : undefined,
-    height: typeof x.height === "number" ? x.height : undefined,
-    size: typeof x.size === "number" ? x.size : undefined,
-    duration: typeof x.duration === "number" ? x.duration : undefined,
-    content_type:
-      typeof x.content_type === "string" ? x.content_type : undefined,
-    voice_wav_url:
-      typeof x.voice_wav_url === "string" ? x.voice_wav_url : undefined,
-    asr_refer_text:
-      typeof x.asr_refer_text === "string" ? x.asr_refer_text : undefined,
+    filename: x.filename,
+    width: x.width,
+    height: x.height,
+    size: x.size,
+    duration: x.duration,
+    content_type: x.content_type,
+    voice_wav_url: x.voice_wav_url,
+    asr_refer_text: x.asr_refer_text,
   };
-  att.kind = kindOf(att);
+  att.kind = kindOf(x);
   return att;
 }
 
@@ -136,15 +96,13 @@ function humanSize(n: number): string {
 }
 
 /** 元素携带的媒体：el.attachments 数组（真机 103 引用形状）或元素自身即媒体（带 url 字段，容错） */
-function elementAttachments(el: ElementLike): NormalizedAttachment[] {
+function elementAttachments(el: QqElement): NormalizedAttachment[] {
   const out: NormalizedAttachment[] = [];
-  if (Array.isArray(el.attachments)) {
-    for (const a of el.attachments) {
-      const att = parseAttachmentLike(a);
-      if (att !== null) out.push(att);
-    }
+  for (const a of el.attachments ?? []) {
+    const att = parseAttachmentLike(a);
+    if (att !== null) out.push(att);
   }
-  if (out.length === 0 && typeof el.url === "string" && el.url !== "") {
+  if (out.length === 0 && el.url !== undefined && el.url !== "") {
     const self = parseAttachmentLike(el);
     if (self !== null) out.push(self);
   }
@@ -165,45 +123,48 @@ function quoteMediaLabel(atts: NormalizedAttachment[]): string {
   return [...new Set(labels)].join("");
 }
 
-// —— 记录子消息字段容错提取（官方对 102 子消息的字段命名未给全样例，真机样本核验后收紧） ——
+// —— 记录子消息字段提取（官方对 102 子消息的字段命名未给全样例，真机样本核验后收紧；
+//    wire schema 已声明全部消费点，双名/多名容错保留） ——
 
-function recordAuthorId(el: ElementLike): string {
-  const a = el.author;
-  if (a !== null && typeof a === "object") {
-    const x = a as Record<string, unknown>;
-    for (const k of ["member_openid", "user_openid", "id"]) {
-      if (typeof x[k] === "string" && (x[k] as string) !== "") {
-        return x[k] as string;
-      }
-    }
+function childrenOf(el: QqElement): QqElement[] {
+  return el.children ?? el.elements ?? el.messages ?? el.paragraphs ?? [];
+}
+
+function textOf(el: QqElement): string {
+  return el.content ?? el.text ?? "";
+}
+
+/** 作者字段多名容错：author 对象优先，元素顶层字段兜底（首个非空串胜出） */
+function recordAuthorId(el: QqElement): string {
+  const a: QqAuthor | undefined = el.author;
+  for (const k of ["member_openid", "user_openid", "id"] as const) {
+    const v = a?.[k];
+    if (v !== undefined && v !== "") return v;
   }
-  for (const k of ["author_openid", "member_openid", "user_openid"]) {
+  for (const k of ["author_openid", "member_openid", "user_openid"] as const) {
     const v = el[k];
-    if (typeof v === "string" && v !== "") return v;
+    if (v !== undefined && v !== "") return v;
   }
   return "";
 }
 
-function recordAuthorName(el: ElementLike): string {
-  const a = el.author;
-  if (a !== null && typeof a === "object") {
-    const x = a as Record<string, unknown>;
-    for (const k of ["username", "nickname", "author_name"]) {
-      if (typeof x[k] === "string" && (x[k] as string) !== "") {
-        return x[k] as string;
-      }
-    }
+function recordAuthorName(el: QqElement): string {
+  const a: QqAuthor | undefined = el.author;
+  for (const k of ["username", "nickname", "author_name"] as const) {
+    const v = a?.[k];
+    if (v !== undefined && v !== "") return v;
   }
-  for (const k of ["username", "nickname", "author_name"]) {
+  for (const k of ["username", "nickname", "author_name"] as const) {
     const v = el[k];
-    if (typeof v === "string" && v !== "") return v;
+    if (v !== undefined && v !== "") return v;
   }
   return "";
 }
 
-function recordTs(el: ElementLike): number | null {
-  if (typeof el.timestamp !== "string" || el.timestamp === "") return null;
-  const ms = Date.parse(el.timestamp);
+function recordTs(el: QqElement): number | null {
+  const raw = el.timestamp;
+  if (raw === undefined || raw === "") return null;
+  const ms = Date.parse(raw);
   return Number.isNaN(ms) ? null : ms;
 }
 
@@ -279,7 +240,8 @@ export interface Decomposed {
 }
 
 /**
- * 元素树分解（唯一入口）：
+ * 元素树分解（唯一入口）：输入 = wire schema 解析产物（normalize 传 r.msg_elements；
+ * 测试可传同形状字面量）。元素类型经 elementTypeOf 归一为判别联合，穷尽 switch：
  * - 0 文本：进 textLines + renderLines
  * - 3 卡片：renderLines `[卡片] title`（结构信息，不进 textLines）
  * - 101 并行：`[并行消息]` 标记 + 子元素透传下钻
@@ -291,7 +253,7 @@ export interface Decomposed {
  * - 未知类型：有文本抽文本，保证不静默丢内容
  */
 export function decomposeElements(
-  elements: unknown,
+  elements: readonly QqElement[],
   media?: AttachmentCollector,
 ): Decomposed {
   const out: Decomposed = {
@@ -301,17 +263,17 @@ export function decomposeElements(
     records: [],
   };
 
-  const pushMedia = (el: ElementLike): void => {
+  const pushMedia = (el: QqElement): void => {
     if (media === undefined) return;
     for (const att of elementAttachments(el)) {
       out.renderLines.push(media.place(att));
     }
   };
 
-  const flattenRecords = (els: ElementLike[], depth: number): void => {
+  const flattenRecords = (els: QqElement[], depth: number): void => {
     for (const el of els) {
-      const type = el.message_type ?? el.type;
-      if (type === TYPE_FORWARD) {
+      const type = elementTypeOf(el);
+      if (type === QQ_EL_FORWARD) {
         // 嵌套记录：不产生行，直接下钻（depth 表达层级）
         flattenRecords(childrenOf(el), depth + 1);
         continue;
@@ -323,7 +285,7 @@ export function decomposeElements(
           childMedia.push(att);
         }
       }
-      const text = type === TYPE_ARK ? "" : textOf(el).trim();
+      const text = type === QQ_EL_ARK ? "" : textOf(el).trim();
       const authorId = recordAuthorId(el);
       const authorName = recordAuthorName(el);
       out.records.push({
@@ -334,91 +296,96 @@ export function decomposeElements(
         ts: recordTs(el),
         text,
         quote:
-          typeof el.msg_idx === "string" && el.msg_idx !== ""
+          el.msg_idx !== undefined && el.msg_idx !== ""
             ? { msgIdx: el.msg_idx, body: text }
             : null,
         attachments: childMedia,
       });
       // 子行内嵌并行容器：透传下钻（同行级）
-      if (type === TYPE_PARALLEL) flattenRecords(childrenOf(el), depth);
+      if (type === QQ_EL_PARALLEL) flattenRecords(childrenOf(el), depth);
     }
   };
 
-  const walk = (els: ElementLike[], depth: number): void => {
+  const walk = (els: QqElement[], depth: number): void => {
     for (const el of els) {
-      const type = el.message_type ?? el.type;
-      if (type === TYPE_TEXT) {
-        const text = textOf(el).trim();
-        if (text !== "") {
-          out.textLines.push(text);
-          out.renderLines.push(text);
-        }
-        pushMedia(el);
-      } else if (type === TYPE_ARK) {
-        const label = el.title ?? el.desc ?? "";
-        out.renderLines.push(`[卡片]${label !== "" ? ` ${label}` : ""}`);
-        pushMedia(el);
-      } else if (type === TYPE_PARALLEL) {
-        out.renderLines.push("[并行消息]");
-        pushMedia(el);
-        walk(childrenOf(el), depth + 1);
-      } else if (type === TYPE_FORWARD) {
-        const before = out.records.length;
-        flattenRecords(childrenOf(el), depth + 1);
-        const n = out.records.length - before;
-        const title =
-          typeof el.title === "string" && el.title !== ""
-            ? el.title
-            : "聊天记录";
-        out.renderLines.push(`[${title}·${n}条]`);
-        pushMedia(el);
-        // 官方 102：content 可能带摘要文本（title 之外的正文补充）→ 属本条文本
-        const fwdText = textOf(el).trim();
-        if (fwdText !== "" && fwdText !== title) {
-          out.textLines.push(fwdText);
-          out.renderLines.push(fwdText);
-        }
-      } else if (type === TYPE_QUOTE) {
-        // 被引媒体（真机核实 103 自带被引图片）归引用结构，不混入本条正文/附件——
-        // 混入会让 agent 把被引图误当本条自己的图（2026-11-24 真机 bug）。
-        // 被引正文为纯媒体时 body 用文字占位（官方 parallel_message 同款「[图片]」词汇）。
-        const atts = elementAttachments(el);
-        if (out.quote === null) {
-          // 被引锚点取元素自带 msg_idx（=目标消息的锚）；scene.ext 的 msg_idx 是
-          // 本条消息自己的锚（供别人引用），二者不可混用
+      switch (elementTypeOf(el)) {
+        case QQ_EL_TEXT: {
           const text = textOf(el).trim();
-          out.quote = {
-            msgIdx:
-              typeof el.msg_idx === "string" && el.msg_idx !== ""
-                ? el.msg_idx
-                : undefined,
-            body: text !== "" ? text : quoteMediaLabel(atts),
-            ...(atts.length > 0 ? { attachments: atts } : {}),
-          };
-        } else if (atts.length > 0) {
-          // 罕见多引用元素：媒体并入同一引用（QQ 线上恒单条 103，此为容错）
-          out.quote.attachments = [...(out.quote.attachments ?? []), ...atts];
+          if (text !== "") {
+            out.textLines.push(text);
+            out.renderLines.push(text);
+          }
+          pushMedia(el);
+          break;
         }
-        // children 通常为空（真机核实）；有则透传兜底
-        walk(childrenOf(el), depth + 1);
-      } else {
-        const text = textOf(el).trim();
-        if (text !== "") {
-          out.textLines.push(text);
-          out.renderLines.push(text);
+        case QQ_EL_ARK: {
+          const label = el.title ?? el.desc ?? "";
+          out.renderLines.push(`[卡片]${label !== "" ? ` ${label}` : ""}`);
+          pushMedia(el);
+          break;
         }
-        pushMedia(el);
+        case QQ_EL_PARALLEL: {
+          out.renderLines.push("[并行消息]");
+          pushMedia(el);
+          walk(childrenOf(el), depth + 1);
+          break;
+        }
+        case QQ_EL_FORWARD: {
+          const before = out.records.length;
+          flattenRecords(childrenOf(el), depth + 1);
+          const n = out.records.length - before;
+          const title =
+            el.title !== undefined && el.title !== "" ? el.title : "聊天记录";
+          out.renderLines.push(`[${title}·${n}条]`);
+          pushMedia(el);
+          // 官方 102：content 可能带摘要文本（title 之外的正文补充）→ 属本条文本
+          const fwdText = textOf(el).trim();
+          if (fwdText !== "" && fwdText !== title) {
+            out.textLines.push(fwdText);
+            out.renderLines.push(fwdText);
+          }
+          break;
+        }
+        case QQ_EL_QUOTE: {
+          // 被引媒体（真机核实 103 自带被引图片）归引用结构，不混入本条正文/附件——
+          // 混入会让 agent 把被引图误当本条自己的图（2026-11-24 真机 bug）。
+          // 被引正文为纯媒体时 body 用文字占位（官方 parallel_message 同款「[图片]」词汇）。
+          const atts = elementAttachments(el);
+          if (out.quote === null) {
+            // 被引锚点取元素自带 msg_idx（=目标消息的锚）；scene.ext 的 msg_idx 是
+            // 本条消息自己的锚（供别人引用），二者不可混用
+            const text = textOf(el).trim();
+            out.quote = {
+              msgIdx:
+                el.msg_idx !== undefined && el.msg_idx !== ""
+                  ? el.msg_idx
+                  : undefined,
+              body: text !== "" ? text : quoteMediaLabel(atts),
+              ...(atts.length > 0 ? { attachments: atts } : {}),
+            };
+          } else if (atts.length > 0) {
+            // 罕见多引用元素：媒体并入同一引用（QQ 线上恒单条 103，此为容错）
+            out.quote.attachments = [...(out.quote.attachments ?? []), ...atts];
+          }
+          // children 通常为空（真机核实）；有则透传兜底
+          walk(childrenOf(el), depth + 1);
+          break;
+        }
+        default: {
+          // 未知类型（协议漂移宽容）：有文本抽文本
+          const text = textOf(el).trim();
+          if (text !== "") {
+            out.textLines.push(text);
+            out.renderLines.push(text);
+          }
+          pushMedia(el);
+        }
       }
     }
   };
 
-  walk(asElements(elements), 0);
+  walk([...elements], 0);
   // 注意：scene.ext 的 msg_idx 是本条消息自己的锚（落 msg_idx 列，供他人引用），
   // 不构成「本条引用了谁」的证据——quote_json 只来自顶层 103 元素。
   return out;
-}
-
-/** 从事件体容错提取 ARK 卡片对象（ark / ark_data 字段名都试） */
-export function extractArk(raw: Record<string, unknown>): unknown {
-  return raw.ark_data ?? raw.ark ?? undefined;
 }

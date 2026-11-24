@@ -6,6 +6,8 @@
 // 身份全程 open_id（bot 维度隔离），禁止解析真实QQ号。
 // 2026-11-08 存储重构：text（本条纯文本）/ content（渲染 markdown）分列；顶层引用结构化
 //（quote，落 quote_json）；聊天记录拍平（records，落 message_records）；scope 统一 group|chat。
+// B⁺ T5：事件体过 wire schema（./wire）——防御性 typeof 分支退役，解析失败（data 非对象）
+// 返回 null（容错丢弃语义不变）。
 
 import type {
   NormalizedAttachment,
@@ -13,57 +15,56 @@ import type {
   NormalizedMessage,
   NormalizedMention,
 } from "@qsense/connector-sdk";
+import type { QqAttachment, QqAuthor, QqMention } from "./wire";
+import { QQ_EL_FORWARD } from "./wire";
+import {
+  QqEnvelopeSchema,
+  QqGroupEventDataSchema,
+  QqMessageEventDataSchema,
+  QqUserDataSchema,
+  type QqMessageEventData,
+} from "./wire";
 import {
   AttachmentCollector,
   decomposeElements,
-  extractArk,
   parseAttachmentLike,
   parseRecordTranscript,
 } from "./expand";
 
-/** QQ 官方事件信封（{type, data}）；core ingest 的 QQ 分支唯一输入形状 */
+/** QQ 官方事件信封（{type, data}）；core ingest 的 QQ 分支唯一输入形状。
+ * data 是平台原始载荷边界（wire schema 在 normalizeQqMessage 内解析）。 */
 export interface QqEvent {
   botId: string;
   type: string;
   data: unknown;
 }
 
-/** 解析 RFC3339 官方 timestamp → 毫秒；失败返回 null */
-export function parseTimestamp(raw: unknown): number | null {
-  if (typeof raw !== "string" || raw === "") return null;
+/** 解析 RFC3339 官方 timestamp → 毫秒；失败/缺失返回 null */
+export function parseTimestamp(raw: string | undefined): number | null {
+  if (raw === undefined || raw === "") return null;
   const ms = Date.parse(raw);
   return Number.isNaN(ms) ? null : ms;
 }
 
-function parseMentions(raw: Record<string, unknown>): NormalizedMention[] {
-  const list = raw.mentions;
-  if (!Array.isArray(list)) return [];
+/** mentions → 归一提及：id/user_openid/member_openid 三名容错（id 非空优先，
+ * 其余按名取值——空串也算命中，随后整体跳过，与旧实现逐条等价） */
+function parseMentions(list: QqMention[]): NormalizedMention[] {
   const out: NormalizedMention[] = [];
-  for (const item of list) {
-    if (item === null || typeof item !== "object") continue;
-    const u = item as Record<string, unknown>;
+  for (const u of list) {
     const id =
-      typeof u.id === "string" && u.id !== ""
+      u.id !== undefined && u.id !== ""
         ? u.id
-        : typeof u.user_openid === "string"
-          ? u.user_openid
-          : typeof u.member_openid === "string"
-            ? u.member_openid
-            : "";
+        : (u.user_openid ?? u.member_openid ?? "");
     if (id === "") continue;
     out.push({
       id,
-      name: typeof u.username === "string" ? u.username : undefined,
+      name: u.username,
     });
   }
   return out;
 }
 
-function parseAttachments(
-  raw: Record<string, unknown>,
-): NormalizedAttachment[] {
-  const list = raw.attachments;
-  if (!Array.isArray(list)) return [];
+function parseAttachments(list: QqAttachment[]): NormalizedAttachment[] {
   const out: NormalizedAttachment[] = [];
   for (const item of list) {
     const att = parseAttachmentLike(item);
@@ -82,32 +83,20 @@ function parseAttachments(
  * atMe=undefined，误触发从宽兜底（真机三情形实证：bot:true/is_you:true、
  * bot:true/is_you:false、bot:false/is_you:false）。
  */
-function atMeOf(raw: Record<string, unknown>): boolean | undefined {
-  const list = raw.mentions;
-  if (!Array.isArray(list) || list.length === 0) return undefined;
-  for (const item of list) {
-    if (
-      item !== null &&
-      typeof item === "object" &&
-      (item as Record<string, unknown>).is_you === true
-    ) {
-      return true;
-    }
-  }
-  return false;
+function atMeOf(list: QqMention[] | undefined): boolean | undefined {
+  if (list === undefined || list.length === 0) return undefined;
+  return list.some((m) => m.is_you === true);
 }
 
 /**
- * 官方 msg_idx 令牌提取：raw.message_scene.ext 形如 ["msg_idx=REFIDX_…", "auth_token=…"]。
+ * 官方 msg_idx 令牌提取：r.message_scene.ext 形如 ["msg_idx=REFIDX_…", "auth_token=…"]。
  * 引用元素（103）以该令牌为锚指向被引消息——入库存列，quote_json 的锚与读取端懒补都用它。
  */
-function extractMsgIdx(r: Record<string, unknown>): string | undefined {
-  const scene = r.message_scene;
-  if (scene === null || typeof scene !== "object") return undefined;
-  const ext = (scene as Record<string, unknown>).ext;
-  if (!Array.isArray(ext)) return undefined;
+function extractMsgIdx(r: QqMessageEventData): string | undefined {
+  const ext = r.message_scene?.ext;
+  if (ext === undefined) return undefined;
   for (const item of ext) {
-    if (typeof item === "string" && item.startsWith("msg_idx=")) {
+    if (item !== undefined && item.startsWith("msg_idx=")) {
       const v = item.slice("msg_idx=".length);
       if (v !== "") return v;
     }
@@ -115,21 +104,26 @@ function extractMsgIdx(r: Record<string, unknown>): string | undefined {
   return undefined;
 }
 
-function authorField(raw: Record<string, unknown>, keys: string[]): string {
-  const author = raw.author;
-  if (author === null || typeof author !== "object") return "";
-  const a = author as Record<string, unknown>;
+/** author 字段多名容错：按 keys 顺序取首个非空串（空串跳过继续找） */
+type AuthorTextField = "user_openid" | "id" | "member_openid" | "username" | "member_role";
+function authorField(author: QqAuthor | undefined, keys: readonly AuthorTextField[]): string {
   for (const k of keys) {
-    if (typeof a[k] === "string" && (a[k] as string) !== "") return a[k];
+    const v = author?.[k];
+    if (v !== undefined && v !== "") return v;
   }
   return "";
 }
 
-/** 消息类事件 → NormalizedMessage（元素树分解为语义件）；非消息事件返回 null */
+/** ARK 卡片原始对象提取（ark / ark_data 字段名都试；合法不透明边界，契约 ark?: unknown） */
+function extractArk(r: QqMessageEventData): unknown {
+  return r.ark_data ?? r.ark;
+}
+
+/** 消息类事件 → NormalizedMessage（元素树分解为语义件）；非消息事件/形状不符返回 null */
 export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
-  const raw = event.data;
-  if (raw === null || typeof raw !== "object") return null;
-  const r = raw as Record<string, unknown>;
+  const parsed = QqMessageEventDataSchema.safeParse(event.data);
+  if (!parsed.success) return null;
+  const r = parsed.data;
 
   let scope: "group" | "chat";
   let scopeId: string;
@@ -138,26 +132,25 @@ export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
     event.type === "GROUP_AT_MESSAGE_CREATE"
   ) {
     scope = "group";
-    scopeId = typeof r.group_openid === "string" ? r.group_openid : "";
+    scopeId = r.group_openid ?? "";
   } else if (event.type === "C2C_MESSAGE_CREATE") {
     scope = "chat";
     // 官方单聊事件体无顶层 user_openid：作者标识在 author 内（author.user_openid，兜底 author.id）
-    scopeId = authorField(r, ["user_openid", "id"]);
+    scopeId = authorField(r.author, ["user_openid", "id"]);
   } else {
     return null;
   }
   if (scopeId === "") return null;
 
-  const msgId = typeof r.id === "string" ? r.id : "";
+  const msgId = r.id ?? "";
   if (msgId === "") return null;
 
-  const baseContent = typeof r.content === "string" ? r.content : "";
-  const rawType =
-    typeof r.message_type === "number" ? r.message_type : undefined;
-  const elements = r.msg_elements ?? undefined;
+  const baseContent = r.content ?? "";
+  const rawType = r.message_type;
+  const elements = r.msg_elements;
   const extMsgIdx = extractMsgIdx(r);
   const collector = new AttachmentCollector();
-  const topAtts = parseAttachments(r);
+  const topAtts = parseAttachments(r.attachments ?? []);
   // text = 官方 content + 元素树文本行（无标记无占位无外来内容）；content = 渲染 markdown
   //（媒体占位原位 + 结构标记）；引用与聊天记录出列结构化，不再糅进任何文本列。
   let textLines: string[];
@@ -168,7 +161,7 @@ export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
   // 「=== 消息 N ===」转写）：解析进 records，宿主只留条数标记——外来转写不进任何文本列。
   // 元素树若有 102 则走 decompose 拍平（带 openid，信息更全），树优先。
   const transcript =
-    elements === undefined && rawType === 102
+    elements === undefined && rawType === QQ_EL_FORWARD
       ? parseRecordTranscript(baseContent)
       : null;
   if (transcript !== null) {
@@ -202,34 +195,31 @@ export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
     records = [];
   }
   // 文件名属本条内容（用户主动发的文件）：进 text 供检索（渲染占位符已带名字）
-  const fileNames = [
-    ...new Set(
-      topAtts
-        .filter((a) => a.kind === "file" && a.filename !== undefined)
-        .map((a) => a.filename as string),
-    ),
-  ];
+  const fileNames = new Set<string>();
+  for (const a of topAtts) {
+    if (a.kind === "file" && a.filename !== undefined) fileNames.add(a.filename);
+  }
   textLines.push(...fileNames);
   const text = textLines.filter((s) => s !== "").join("\n");
   const content = renderLines.filter((s) => s !== "").join("\n");
   // @本bot 权威判定：官方 mentions[].is_you（AT 事件与全量事件一致，见 atMeOf）；
   // 群消息盖章，单聊省略（mention 谓词里私聊天然命中）。
-  const atMe = scope === "group" ? atMeOf(r) : undefined;
+  const atMe = scope === "group" ? atMeOf(r.mentions) : undefined;
 
   return {
     botId: event.botId,
     scope,
     scopeId,
     msgId,
-    authorOpenid: authorField(r, ["member_openid", "user_openid", "id"]),
-    authorName: authorField(r, ["username"]) || undefined,
-    authorRole: authorField(r, ["member_role"]) || undefined,
+    authorOpenid: authorField(r.author, ["member_openid", "user_openid", "id"]),
+    authorName: authorField(r.author, ["username"]) || undefined,
+    authorRole: authorField(r.author, ["member_role"]) || undefined,
     ts: parseTimestamp(r.timestamp),
     text,
     content,
     quote,
     records,
-    mentions: parseMentions(r),
+    mentions: parseMentions(r.mentions ?? []),
     attachments: collector.list,
     ark: extractArk(r),
     msgIdx: extMsgIdx,
@@ -238,10 +228,16 @@ export function normalizeQqMessage(event: QqEvent): NormalizedMessage | null {
   };
 }
 
-function fieldOf(data: unknown, key: string): string {
-  if (data === null || typeof data !== "object") return "";
-  const v = (data as Record<string, unknown>)[key];
-  return typeof v === "string" ? v : "";
+/** 效应事件的宽松定位：群标识（缺字段/类型不符 → ""） */
+function groupOpenidOf(data: unknown): string {
+  const r = QqGroupEventDataSchema.safeParse(data);
+  return r.success ? (r.data.group_openid ?? "") : "";
+}
+
+/** 效应事件的宽松定位：用户标识 */
+function userOpenidOf(data: unknown): string {
+  const r = QqUserDataSchema.safeParse(data);
+  return r.success ? (r.data.user_openid ?? "") : "";
 }
 
 /**
@@ -258,9 +254,10 @@ export function normalizeQqEnvelope(
   botId: string,
   payload: unknown,
 ): NormalizedInbound | null {
-  if (payload === null || typeof payload !== "object") return null;
-  const { type, data } = payload as { type?: unknown; data?: unknown };
-  if (typeof type !== "string" || type === "") return null;
+  const env = QqEnvelopeSchema.safeParse(payload);
+  if (!env.success) return null;
+  const { type, data } = env.data;
+  if (type === "") return null;
   const event: QqEvent = { botId, type, data };
 
   switch (type) {
@@ -285,16 +282,16 @@ export function normalizeQqEnvelope(
       return { messages: [m], effects: [] };
     }
     case "GROUP_ADD_ROBOT": {
-      const g = fieldOf(data, "group_openid");
+      const g = groupOpenidOf(data);
       return g === "" ? null : { messages: [], effects: [{ kind: "group-added", scopeId: g }] };
     }
     case "GROUP_DEL_ROBOT": {
-      const g = fieldOf(data, "group_openid");
+      const g = groupOpenidOf(data);
       return g === "" ? null : { messages: [], effects: [{ kind: "group-removed", scopeId: g }] };
     }
     case "GROUP_MSG_RECEIVE":
     case "GROUP_MSG_REJECT": {
-      const g = fieldOf(data, "group_openid");
+      const g = groupOpenidOf(data);
       return g === ""
         ? null
         : {
@@ -306,7 +303,7 @@ export function normalizeQqEnvelope(
     }
     case "C2C_MSG_RECEIVE":
     case "C2C_MSG_REJECT": {
-      const u = fieldOf(data, "user_openid");
+      const u = userOpenidOf(data);
       return u === ""
         ? null
         : {
@@ -320,8 +317,7 @@ export function normalizeQqEnvelope(
     case "MESSAGE_AUDIT_REJECT": {
       // 主动消息人工审核结果（304023/304024 的异步回执）：回填 sends 账本 earliest pending 行。
       // 官方事件体字段未完全核实（M5 真机观察），容错取 group_openid/user_openid 定位。
-      const target =
-        fieldOf(data, "group_openid") || fieldOf(data, "user_openid");
+      const target = groupOpenidOf(data) || userOpenidOf(data);
       return target === ""
         ? null
         : {
