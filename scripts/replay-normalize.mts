@@ -23,6 +23,16 @@ import { createQqConnector } from "@qsense/connector-qq";
 import { createTelegramConnector } from "@qsense/connector-telegram";
 import { createWeixinConnector } from "@qsense/connector-weixin";
 
+/** JSON 文本解析（语法坏 → null）；值类型自库签名提取（JSON.parse），
+ *  形状由平台 wire schema 在 normalize 内把关（不裸消费） */
+function parseRawOrNull(text: string): ReturnType<typeof JSON.parse> | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 function main(): void {
   const dbPath = process.argv[2] ?? "data/qqbot.db";
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
@@ -35,9 +45,9 @@ function main(): void {
 
   // 各平台插件（normalize 走声明面入口，与生产 ingest 同路径）
   const plugins = new Map<string, ConnectorPlugin>();
-  plugins.set("qq", createQqConnector() as unknown as ConnectorPlugin);
-  plugins.set("telegram", createTelegramConnector() as unknown as ConnectorPlugin);
-  plugins.set("weixin", createWeixinConnector() as unknown as ConnectorPlugin);
+  plugins.set("qq", createQqConnector());
+  plugins.set("telegram", createTelegramConnector());
+  plugins.set("weixin", createWeixinConnector());
 
   interface Row {
     bot_id: string;
@@ -73,10 +83,10 @@ function main(): void {
     }
     total++;
     stat.rows++;
-    let raw: unknown;
-    try {
-      raw = JSON.parse(row.raw_json) as unknown;
-    } catch {
+    // JSON 文本解析（语法坏 → null）；值 = JSON.parse 的库签名类型，形状由平台
+    // wire schema 在 normalize 内把关（不裸消费）
+    const raw = parseRawOrNull(row.raw_json);
+    if (raw === null) {
       violations.push(`[${platform}] ${row.bot_id}/${row.msg_id}: raw_json 非 JSON`);
       continue;
     }
@@ -93,10 +103,10 @@ function main(): void {
           : { platform: "weixin", message: raw };
     let inbound: NormalizedInbound | null;
     try {
-      inbound = plugin.normalize(row.bot_id, envelope) as NormalizedInbound | null;
+      inbound = plugin.normalize(row.bot_id, envelope);
     } catch (e) {
       violations.push(
-        `[${platform}] ${row.bot_id}/${row.msg_id}: normalize 抛错 ${(e as Error).message.slice(0, 120)}`,
+        `[${platform}] ${row.bot_id}/${row.msg_id}: normalize 抛错 ${(e instanceof Error ? e.message : String(e)).slice(0, 120)}`,
       );
       continue;
     }

@@ -7,10 +7,15 @@ import Database from "better-sqlite3";
 
 const db = new Database(process.env.DATA_DB ?? "./data/qqbot.db");
 
+/** raw_json 的消息场景消费面（官方 message_scene.ext = ["msg_idx=…", "auth_token=…"]） */
+interface BackfillRaw {
+  message_scene?: { ext?: string[] };
+}
+
 function extractMsgIdx(raw: string): string | null {
   try {
-    const scene = (JSON.parse(raw) as Record<string, unknown>).message_scene as
-      { ext?: unknown } | undefined;
+    // JSON.parse 返回 any（库签名）：直接读取消息场景字段（未知键忽略）
+    const scene = (JSON.parse(raw) as BackfillRaw).message_scene;
     const ext = scene?.ext;
     if (!Array.isArray(ext)) return null;
     for (const item of ext) {

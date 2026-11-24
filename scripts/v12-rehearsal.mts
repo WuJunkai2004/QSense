@@ -90,8 +90,9 @@ if (version2 !== 12) fail.push("版本未到 12");
 if (oldLeft.n !== 0) fail.push("gw:session 旧键残留");
 if (newKeys.n !== oldKeys.n) fail.push("gw:session 平移数量不符");
 for (const b of bots) {
-  const creds = JSON.parse(b.credentials_json) as Record<string, unknown>;
-  if ((creds["appid"] ?? "") !== b.appid) fail.push(`bot ${b.appid} 凭据回填 appid 不符`);
+  // JSON.parse 返回 any（库签名）：只读 appid 一列做回填核对
+  const creds = JSON.parse(b.credentials_json) as { appid?: string };
+  if ((creds.appid ?? "") !== b.appid) fail.push(`bot ${b.appid} 凭据回填 appid 不符`);
 }
 if (sessionsN.n < conv.n) fail.push("sessions 登记数量少于消息会话数");
 if (fail.length > 0) {
