@@ -192,7 +192,13 @@ export function createMcpHandler(
                   text: `未知工具：${name}。可用：${router.names().join(", ")}`,
                 };
         } else if (route.source === "base") {
-          result = await runTool(name, args, createContext(session));
+          // 基座工具经 runTool：JSON 文本跨界（schema 解析在 defineTool 闭包内，
+          // 与插件工具 callPluginTool 同型控制反转）
+          result = await runTool(
+            name,
+            JSON.stringify(args),
+            createContext(session),
+          );
         } else {
           const pctx = deps.pluginContext?.(session.botId);
           if (pctx === undefined || route.plugin === undefined) {

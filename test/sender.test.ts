@@ -697,7 +697,7 @@ test("runTool 未知工具名 → isError 快速失败（并发闸集成测试�
     // runTool 是工具分发层：未知工具名不走任何实现，直接 isError。
     // mcp.ts CallToolRequestSchema 包装层的并发闸（active >= maxConcurrent → 服务繁忙）
     // 由 mcp.test.ts M6-14 以 maxConcurrent=1 + 挂起发送器做真实覆盖。
-    const bad = await runTool("no_such_tool", {}, { repo: fx.repo });
+    const bad = await runTool("no_such_tool", "{}", { repo: fx.repo });
     assert.equal(bad.isError, true);
   } finally {
     fx.close();
@@ -717,10 +717,18 @@ test("M4-12 经 runTool/插件路由：额度耗尽报配额不足、快照进 q
       transportFor: () => mock.mock,
     });
     const ctx = { repo: fx.repo, botId: BOT, sender, bots: fx.registry };
-    const ok = await runTool("send", { id: GROUP, text: "首条" }, ctx);
+    const ok = await runTool(
+      "send",
+      JSON.stringify({ id: GROUP, text: "首条" }),
+      ctx,
+    );
     assert.ok(!ok.isError);
 
-    const exceeded = await runTool("send", { id: GROUP, text: "第二条" }, ctx);
+    const exceeded = await runTool(
+      "send",
+      JSON.stringify({ id: GROUP, text: "第二条" }),
+      ctx,
+    );
     assert.equal(exceeded.isError, true);
     assert.ok(exceeded.text.includes("日额度不足"));
 

@@ -274,13 +274,17 @@ test("M8-B9 token 绑定：bot 参数已退役（传了也被忽略）；未绑�
     const reg = newRegistry(fx.db);
     const ctx = await ctxOf(fx.db, reg);
     // bot 绑定在 HTTP 层 Bearer→bot 完成，工具层不再校验 bot 参数（多余参数忽略）
-    const ignored = await runTool("list_all", { bot: "20002" }, ctx);
+    const ignored = await runTool(
+      "list_all",
+      JSON.stringify({ bot: "20002" }),
+      ctx,
+    );
     assert.equal(ignored.isError, undefined);
     // 无 botId 的 ctx（鉴权缺失）仍硬拒绝
-    const unbound = await runTool("list_all", {}, { repo: new Repo(fx.db) });
+    const unbound = await runTool("list_all", "{}", { repo: new Repo(fx.db) });
     assert.equal(unbound.isError, true);
     assert.match(unbound.text, /未绑定/);
-    const gone = await runTool("list_bots", {}, ctx);
+    const gone = await runTool("list_bots", "{}", ctx);
     assert.equal(gone.isError, true);
     assert.match(gone.text, /未知工具/);
   } finally {

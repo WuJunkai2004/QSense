@@ -504,7 +504,7 @@ test("tts 工具层：send_media tts: 全链路（合成→语音条上传→发
     };
     const r = await runTool(
       "send_media",
-      { id: GROUP, media: "tts:今天天气不错", text: "语音播报" },
+      JSON.stringify({ id: GROUP, media: "tts:今天天气不错", text: "语音播报" }),
       ctx,
     );
     assert.ok(!r.isError, r.text);
@@ -531,7 +531,7 @@ test("tts 工具层：双闸门可操作拒绝（未配置 / 未启用）", asyn
     // 未配置全局 TTS
     const r1 = await runTool(
       "send_media",
-      { id: GROUP, media: "tts:你好" },
+      JSON.stringify({ id: GROUP, media: "tts:你好" }),
       ctx,
     );
     assert.equal(r1.isError, true);
@@ -547,7 +547,7 @@ test("tts 工具层：双闸门可操作拒绝（未配置 / 未启用）", asyn
     });
     const r2 = await runTool(
       "send_media",
-      { id: GROUP, media: "tts:你好" },
+      JSON.stringify({ id: GROUP, media: "tts:你好" }),
       ctx,
     );
     assert.equal(r2.isError, true);
@@ -559,7 +559,7 @@ test("tts 工具层：双闸门可操作拒绝（未配置 / 未启用）", asyn
     const badFetch = fakeTts(() => new Response("boom", { status: 500 }));
     const r3 = await runTool(
       "send_media",
-      { id: GROUP, media: "tts:你好" },
+      JSON.stringify({ id: GROUP, media: "tts:你好" }),
       { ...ctx, ttsDeps: { fetchImpl: badFetch } },
     );
     assert.equal(r3.isError, true);
