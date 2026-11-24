@@ -1,10 +1,16 @@
 // 微信媒体与线格式层测试（P4）：AES-128-ECB 原语与两种 key 编码、CDN 上传/下载全流程
-// （假 fetch + 假 api，零真实网络）、重试分档、出站素材嗅探与 item 组装、无状态句柄编解码、
-// 入站图片富化策略（中图优先/缩略图回落/尺寸闸门/被引图归属）、引用摘要与局部引用。
+// （FakeNetKit 假端点 + 假 api，零真实网络）、重试分档、出站素材嗅探与 item 组装、
+// 无状态句柄编解码、入站图片富化策略（中图优先/缩略图回落/尺寸闸门/被引图归属）、
+// 引用摘要与局部引用。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import {
+  FakeNetKit,
+  type FakeReply,
+  type HttpClient,
+} from "@qsense/connector-sdk";
 import {
   MessageItemType,
   MessageState,
@@ -51,20 +57,16 @@ function jpegBytes(): Buffer {
   return Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(40, 7)]);
 }
 
-type FetchHandler = (url: string, init?: RequestInit) => Response | Promise<Response>;
+type FetchHandler = (url: string, req: { method: string; headers: Record<string, string>; body?: string | Uint8Array | FormData }) => FakeReply | Error;
 
-/** 假 fetch：记录调用，按处理器应答 */
-function fakeFetch(handler: FetchHandler): typeof fetch & {
-  calls: Array<{ url: string; init?: RequestInit }>;
-} {
-  const calls: Array<{ url: string; init?: RequestInit }> = [];
-  const fn = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url =
-      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    calls.push({ url, init });
-    return handler(url, init);
-  }) as typeof fetch;
-  return Object.assign(fn, { calls });
+/** 假 CDN 传输（FakeNetKit 全路由捕获）：记录调用，按处理器应答 */
+function fakeHttp(handler: FetchHandler): { http: HttpClient; kit: FakeNetKit } {
+  const kit = new FakeNetKit();
+  kit.onMatch(
+    () => true,
+    (req) => handler(req.url, { method: req.method, headers: req.headers, ...(req.body !== undefined ? { body: req.body } : {}) }),
+  );
+  return { http: kit.http(), kit };
 }
 
 interface FakeApi extends WeixinApi {
@@ -148,17 +150,16 @@ test("parseAesKey 两种线上编码；出站 aes_key = base64(hex 文本) 与�
 test("CDN 上传：getuploadurl 入参 → 密文直传 full_url → 回执下载参数", async () => {
   const plain = pngBytes(300, 1);
   const api = fakeApi();
-  const ff = fakeFetch((url, init) => {
+  const f = fakeHttp((url, req) => {
     assert.equal(url, "https://cdn.example/up?sig=1");
-    assert.equal(init?.method, "POST");
-    const headers = init?.headers as Record<string, string>;
-    assert.equal(headers["Content-Type"], "application/octet-stream");
-    const body = Buffer.from(init?.body as Uint8Array);
+    assert.equal(req.method, "POST");
+    assert.equal(req.headers["content-type"], "application/octet-stream");
+    const body = Buffer.from(req.body as Uint8Array);
     assert.equal(body.length, aesEcbPaddedSize(plain.length));
     // 密文用 getuploadurl 上送的那把随机 key 可解回明文
     const aesKey = Buffer.from(String(api.uploadReqs[0]!.aeskey), "hex");
     assert.deepEqual(decryptAesEcb(body, aesKey), plain);
-    return new Response(null, { status: 200, headers: { "x-encrypted-param": "DL-PARAM" } });
+    return { headers: { "x-encrypted-param": "DL-PARAM" } };
   });
   const r = await uploadMediaToCdn({
     api,
@@ -166,7 +167,7 @@ test("CDN 上传：getuploadurl 入参 → 密文直传 full_url → 回执下�
     toUserId: "u1@im.wechat",
     mediaType: UploadMediaType.IMAGE,
     cdnBaseUrl: CDN,
-    fetchImpl: ff,
+    http: f.http,
   });
   assert.equal(r.downloadParam, "DL-PARAM");
   assert.equal(r.rawSize, 308);
@@ -174,7 +175,7 @@ test("CDN 上传：getuploadurl 入参 → 密文直传 full_url → 回执下�
   assert.match(r.aesKeyHex, /^[0-9a-f]{32}$/); // 每次上传随机生成 16 字节 key
   assert.match(r.filekey, /^[0-9a-f]{32}$/);
   assert.equal(r.rawMd5, createHash("md5").update(plain).digest("hex"));
-  assert.equal(ff.calls.length, 1);
+  assert.equal(f.kit.requests.length, 1);
   // getuploadurl 入参与参照实现一致
   const req = api.uploadReqs[0]!;
   assert.deepEqual(req, {
@@ -192,13 +193,13 @@ test("CDN 上传：getuploadurl 入参 → 密文直传 full_url → 回执下�
 test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错；4xx 不重试；5xx 重试至多 3 次", async () => {
   const plain = Buffer.from("abc");
   // 回退拼接
-  const ff = fakeFetch((_url, init) => {
+  const fb = fakeHttp((url, req) => {
     assert.equal(
-      _url.startsWith(`${CDN}/upload?encrypted_query_param=UP%20PARAM&filekey=`),
+      url.startsWith(`${CDN}/upload?encrypted_query_param=UP%20PARAM&filekey=`),
       true,
     );
-    assert.equal(init?.method, "POST");
-    return new Response(null, { status: 200, headers: { "x-encrypted-param": "DL" } });
+    assert.equal(req.method, "POST");
+    return { headers: { "x-encrypted-param": "DL" } };
   });
   const fallback = await uploadMediaToCdn({
     api: fakeApi(async () => ({ upload_param: "UP PARAM" })),
@@ -206,7 +207,7 @@ test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错�
     toUserId: "u",
     mediaType: UploadMediaType.FILE,
     cdnBaseUrl: CDN,
-    fetchImpl: ff,
+    http: fb.http,
   });
   assert.equal(fallback.downloadParam, "DL");
   // 无地址
@@ -218,14 +219,15 @@ test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错�
         toUserId: "u",
         mediaType: UploadMediaType.FILE,
         cdnBaseUrl: CDN,
-        fetchImpl: fakeFetch(() => new Response(null, { status: 200 })),
+        http: fakeHttp(() => ({ status: 200 })).http,
       }),
     /上传地址/,
   );
   // 4xx：立即失败，仅 1 次请求
-  const ff4 = fakeFetch(
-    () => new Response("nope", { status: 400, headers: { "x-error-message": "bad key" } }),
-  );
+  const f4 = fakeHttp(() => ({
+    status: 400,
+    headers: { "x-error-message": "bad key" },
+  }));
   await assert.rejects(
     () =>
       uploadMediaToCdn({
@@ -234,18 +236,18 @@ test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错�
         toUserId: "u",
         mediaType: 3,
         cdnBaseUrl: CDN,
-        fetchImpl: ff4,
+        http: f4.http,
       }),
     /400：bad key/,
   );
-  assert.equal(ff4.calls.length, 1);
+  assert.equal(f4.kit.requests.length, 1);
   // 5xx 两次后成功：3 次请求
   let n = 0;
-  const ff5 = fakeFetch(() => {
+  const f5 = fakeHttp(() => {
     n += 1;
     return n < 3
-      ? new Response(null, { status: 502 })
-      : new Response(null, { status: 200, headers: { "x-encrypted-param": "OK" } });
+      ? { status: 502 }
+      : { status: 200, headers: { "x-encrypted-param": "OK" } };
   });
   const ok = await uploadMediaToCdn({
     api: fakeApi(),
@@ -253,19 +255,17 @@ test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错�
     toUserId: "u",
     mediaType: 3,
     cdnBaseUrl: CDN,
-    fetchImpl: ff5,
+    http: f5.http,
   });
   assert.equal(ok.downloadParam, "OK");
-  assert.equal(ff5.calls.length, 3);
+  assert.equal(f5.kit.requests.length, 3);
   // 恒 5xx / 网络异常 / 缺回执头：3 次后失败
   for (const handler of [
-    () => new Response(null, { status: 500 }),
-    () => {
-      throw new TypeError("fetch failed");
-    },
-    () => new Response(null, { status: 200 }),
+    () => ({ status: 500 }),
+    () => new Error("network down"),
+    () => ({ status: 200 }),
   ] as FetchHandler[]) {
-    const ffx = fakeFetch(handler);
+    const fx = fakeHttp(handler);
     await assert.rejects(() =>
       uploadMediaToCdn({
         api: fakeApi(),
@@ -273,10 +273,10 @@ test("CDN 上传：只有 upload_param 时回退拼接地址；无地址报错�
         toUserId: "u",
         mediaType: 3,
         cdnBaseUrl: CDN,
-        fetchImpl: ffx,
+        http: fx.http,
       }),
     );
-    assert.equal(ffx.calls.length, 3);
+    assert.equal(fx.kit.requests.length, 3);
   }
 });
 
@@ -286,28 +286,28 @@ test("CDN 下载：full_url 优先 / 回退拼接 / 解密 / 错钥与 HTTP 错�
   const plain = jpegBytes();
   const enc = encryptAesEcb(plain, KEY);
   const keyB64 = KEY.toString("base64");
-  const ff = fakeFetch((url) => {
-    if (url === "https://cdn.example/full?x=1") return new Response(enc);
-    if (url === cdnDownloadUrl("P 1", CDN)) return new Response(enc);
-    return new Response("nope", { status: 500 });
+  const f = fakeHttp((url) => {
+    if (url === "https://cdn.example/full?x=1") return { body: enc };
+    if (url === cdnDownloadUrl("P 1", CDN)) return { body: enc };
+    return { status: 500 };
   });
   const full = await downloadAndDecrypt({
     media: { full_url: "https://cdn.example/full?x=1", encrypt_query_param: "P 1" },
     aesKeyBase64: keyB64,
     cdnBaseUrl: CDN,
-    fetchImpl: ff,
+    http: f.http,
   });
   assert.deepEqual(Buffer.from(full), plain);
-  assert.equal(ff.calls[0]!.url, "https://cdn.example/full?x=1");
+  assert.equal(f.kit.requests[0]!.url, "https://cdn.example/full?x=1");
   const fallback = await downloadAndDecrypt({
     media: { encrypt_query_param: "P 1" },
     aesKeyBase64: outboundAesKey(KEY_HEX), // 第二种编码同样可解
     cdnBaseUrl: CDN,
-    fetchImpl: ff,
+    http: f.http,
   });
   assert.deepEqual(Buffer.from(fallback), plain);
   assert.equal(
-    ff.calls[1]!.url,
+    f.kit.requests[1]!.url,
     `${CDN}/download?encrypted_query_param=P%201`,
   );
   await assert.rejects(() =>
@@ -315,7 +315,7 @@ test("CDN 下载：full_url 优先 / 回退拼接 / 解密 / 错钥与 HTTP 错�
       media: { encrypt_query_param: "P 1" },
       aesKeyBase64: Buffer.alloc(16, 9).toString("base64"),
       cdnBaseUrl: CDN,
-      fetchImpl: ff,
+      http: f.http,
     }),
   );
   await assert.rejects(() =>
@@ -323,7 +323,7 @@ test("CDN 下载：full_url 优先 / 回退拼接 / 解密 / 错钥与 HTTP 错�
       media: {},
       aesKeyBase64: keyB64,
       cdnBaseUrl: CDN,
-      fetchImpl: ff,
+      http: f.http,
     }),
   );
 });
@@ -476,20 +476,20 @@ function imageItem(param: string, keyHex = KEY_HEX, midSize?: number) {
   };
 }
 
-/** 假 CDN：按 param 回不同明文的密文 */
-function cdnFetch(plainOf: (param: string) => Buffer | null) {
-  return fakeFetch((url) => {
+/** 假 CDN：按 param 回不同明文的密文（FakeNetKit 二进制直传应答体） */
+function cdnKit(plainOf: (param: string) => Buffer | null): { http: HttpClient; kit: FakeNetKit } {
+  return fakeHttp((url) => {
     const param = new URL(url).searchParams.get("encrypted_query_param") ?? "";
     const plain = plainOf(param);
-    if (plain === null) return new Response("gone", { status: 500 });
-    return new Response(encryptAesEcb(plain, KEY));
+    if (plain === null) return { status: 500 };
+    return { body: new Uint8Array(encryptAesEcb(plain, KEY)) };
   });
 }
 
 test("enrichImages：中图优先；中图失败/声明超限回落缩略图；键=下标", async () => {
   const big = pngBytes(5000, 1);
   const small = pngBytes(200, 2);
-  const ff = cdnFetch((p) => (p === "MID" ? big : p === "THUMB" ? small : null));
+  const f = cdnKit((p) => (p === "MID" ? big : p === "THUMB" ? small : null));
   const mk = (midSize?: number) => ({
     message_id: "1",
     from_user_id: "u",
@@ -498,13 +498,13 @@ test("enrichImages：中图优先；中图失败/声明超限回落缩略图；�
       { type: MessageItemType.TEXT, text_item: { text: "hi" } },
     ],
   });
-  const deps = { fetchImpl: ff, cdnBaseUrl: CDN };
+  const deps = { http: f.http, cdnBaseUrl: CDN };
   // 中图可得
   const a = await enrichImages(mk(), deps);
   assert.equal(a["0"], `data:image/png;base64,${big.toString("base64")}`);
   assert.equal(Object.keys(a).length, 1);
   // 声明的中图密文尺寸明显超限 → 不下载中图，直接取缩略图（独立录制器，只看本用例的请求）
-  const ffB = cdnFetch((p) => (p === "MID" ? big : p === "THUMB" ? small : null));
+  const fb = cdnKit((p) => (p === "MID" ? big : p === "THUMB" ? small : null));
   const b = await enrichImages(
     {
       message_id: "1",
@@ -516,13 +516,16 @@ test("enrichImages：中图优先；中图失败/声明超限回落缩略图；�
         },
       ],
     },
-    { ...deps, fetchImpl: ffB },
+    { ...deps, http: fb.http },
   );
   assert.equal(b["0"], `data:image/png;base64,${small.toString("base64")}`);
-  assert.equal(ffB.calls.some((c) => c.url.includes("encrypted_query_param=MID")), false);
-  assert.equal(ffB.calls.length, 1);
+  assert.equal(
+    fb.kit.requests.some((r) => r.url.includes("encrypted_query_param=MID")),
+    false,
+  );
+  assert.equal(fb.kit.requests.length, 1);
   // 中图取不到 → 缩略图
-  const ff2 = cdnFetch((p) => (p === "THUMB" ? small : null));
+  const f2 = cdnKit((p) => (p === "THUMB" ? small : null));
   const c = await enrichImages(
     {
       message_id: "1",
@@ -537,31 +540,31 @@ test("enrichImages：中图优先；中图失败/声明超限回落缩略图；�
         },
       ],
     },
-    { fetchImpl: ff2, cdnBaseUrl: CDN, onError: () => undefined },
+    { http: f2.http, cdnBaseUrl: CDN, onError: () => undefined },
   );
   assert.equal(c["0"], `data:image/png;base64,${small.toString("base64")}`);
   // 内联上限：解密后字节超限 → 不内联（缩略图也超限则无键）
   const d = await enrichImages(mk(), { ...deps, maxBytes: 1000 });
   assert.equal(d["0"], undefined);
   // 无 key：不内联，也不发请求
-  const ff3 = cdnFetch(() => small);
+  const f3 = cdnKit(() => small);
   const e = await enrichImages(
     {
       message_id: "1",
       from_user_id: "u",
       item_list: [{ type: MessageItemType.IMAGE, image_item: { media: { encrypt_query_param: "MID" } } }],
     },
-    { fetchImpl: ff3, cdnBaseUrl: CDN },
+    { http: f3.http, cdnBaseUrl: CDN },
   );
   assert.deepEqual(e, {});
-  assert.equal(ff3.calls.length, 0);
+  assert.equal(f3.kit.requests.length, 0);
   assert.equal(sniffImageMime(jpegBytes()), "image/jpeg");
   assert.equal(sniffImageMime(Buffer.from("xxxx")), null);
 });
 
 test("enrichImages：被引图归 \"quote\" 键；单条消息内联图片数有上限", async () => {
   const small = pngBytes(64, 3);
-  const ff = cdnFetch((p) => (p.startsWith("I") ? small : null));
+  const f = cdnKit((p) => (p.startsWith("I") ? small : null));
   const imgs = Array.from({ length: 6 }, (_, i) => imageItem(`I${i}`));
   const blobs = await enrichImages(
     {
@@ -576,7 +579,7 @@ test("enrichImages：被引图归 \"quote\" 键；单条消息内联图片数有
         },
       ],
     },
-    { fetchImpl: ff, cdnBaseUrl: CDN },
+    { http: f.http, cdnBaseUrl: CDN },
   );
   assert.equal(Object.keys(blobs).length, 4); // 上限 4：正文前 4 张占满配额
   assert.equal(blobs["quote"], undefined);
@@ -588,7 +591,7 @@ test("enrichImages：被引图归 \"quote\" 键；单条消息内联图片数有
         { type: MessageItemType.TEXT, text_item: { text: "这是什么" }, ref_msg: { svr_id: "9", message_item: imageItem("IQ") } },
       ],
     },
-    { fetchImpl: ff, cdnBaseUrl: CDN },
+    { http: f.http, cdnBaseUrl: CDN },
   );
   assert.equal(onlyQuote["quote"], `data:image/png;base64,${small.toString("base64")}`);
   assert.equal(onlyQuote["0"], undefined);

@@ -1,9 +1,9 @@
-// 微信连接器单测（P4）：零真实网络——
+// 微信连接器单测（P4；B⁺ T4.2 起 FakeNetKit / policy 驱动）：零真实网络——
 // 轮询生命周期（游标后推进/续拉 resumed/超时=正常出口/-14 与 401 fatal/断线恢复/
-// 旧游标持续报错清空重拉/停服即时返回 + notifystop）、入站 context_token 与引用线索、
-// net 原语（sendmessage 线格式/配文+媒体两条同 run_id/上限/句柄/节流/recall 可操作错误）、
-// verifyCredential 分档、Sender caps 感知路由（passiveWindow=false 恒主动 + 私聊门禁）、
-// SDK conformance harness（声明闸门/生命周期/原语齐备/normalize 形状/探针）与工具面 13。
+// 旧游标持续报错清空重拉/停服即时返回 + notifystop）、入站 context_token 与引用线索
+// 与图片解密富化真链路、net 原语（sendmessage 线格式/配文+媒体两条同 run_id/上限/
+// 句柄/节流/recall 可操作错误）、verifyCredential 分档、Sender caps 感知路由、
+// SDK conformance harness 与工具面 13。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BASE_TOOL_NAMES,
+  FakeNetKit,
+  NetError,
   ToolRouter,
   runConformance,
   createNetKit,
@@ -31,6 +33,7 @@ import {
   createWeixinConnector,
   createWeixinInstance,
   decryptAesEcb,
+  encryptAesEcb,
   parseAesKey,
   type GetUpdatesResp,
   type WeixinApi,
@@ -44,6 +47,8 @@ import { migrations } from "../src/store/migrations";
 
 const BOT = "b0f5860fdecb-im-bot";
 const USER = "f2d8a1c4b7e9@im.wechat";
+const CDN_BASE = "https://novac2c.cdn.weixin.qq.com/c2c";
+const AES_KEY = Buffer.from("000102030405060708090a0b0c0d0e0f", "hex");
 
 // —— 假宿主（StatePort=Map；ingest/statuses 记录） ——
 
@@ -179,19 +184,6 @@ const PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const PNG = Buffer.from(PNG_B64, "base64");
 
-/** 假 CDN fetch：记录直传的密文体，回下载参数回执 */
-function recordingCdn(): { fetch: typeof fetch; bodies: Buffer[] } {
-  const bodies: Buffer[] = [];
-  const f = (async (_input: unknown, init?: RequestInit) => {
-    bodies.push(Buffer.from(init?.body as Uint8Array));
-    return new Response(null, {
-      status: 200,
-      headers: { "x-encrypted-param": "DL-PARAM" },
-    });
-  }) as typeof fetch;
-  return { fetch: f, bodies };
-}
-
 /** 跑一轮：入队批次 → start → 等摄取完成 → stop */
 async function feed(
   inst: ConnectorInstance,
@@ -209,26 +201,29 @@ async function feed(
 
 // —— 轮询生命周期 ——
 
-test("轮询：notifystart → 批次摄取（context_token/引用线索/富化）→ 游标后推进 → 二轮带游标；停服 notifystop", async () => {
+test("轮询：notifystart → 批次摄取（context_token/引用线索/图片解密富化真链路）→ 游标后推进 → 二轮带游标；停服 notifystop", async () => {
   const fx = fakeHost();
   const fake = fakeApi();
+  // 入站图片解密富化走真链路：CDN 密文（AES-128-ECB）经 FakeNetKit 二进制应答
+  const kit = new FakeNetKit();
+  kit.on(`${CDN_BASE}/download`, () => ({
+    body: new Uint8Array(encryptAesEcb(PNG, AES_KEY)),
+  }));
   const inst = createWeixinInstance({
-    host: fx.host,
+    ctx: { ...fx.host, net: kit },
     botId: BOT,
     api: fake.api,
-    overrides: {
-      sendMinIntervalMs: 0,
-      // 富化替身：只给含图片的消息回图（解密键 = 图片 item 下标，与真实富化同约定）
-      enrich: async (m): Promise<Record<string, string>> =>
-        (m.item_list ?? []).some((i) => i.type === MessageItemType.IMAGE)
-          ? { "1": "data:image/png;base64,QUJD" }
-          : {},
-    },
+    sendMinIntervalMs: 0,
   });
   const second = msg("2", "第二条", "CTX-B", {
     item_list: [
       { type: MessageItemType.TEXT, text_item: { text: "第二条" }, ref_msg: { svr_id: "1" } },
-      { type: MessageItemType.IMAGE, image_item: { media: { encrypt_query_param: "M" } } },
+      {
+        type: MessageItemType.IMAGE,
+        image_item: {
+          media: { encrypt_query_param: "M", aes_key: AES_KEY.toString("base64") },
+        },
+      },
     ],
   });
   await feed(inst, fx, fake, [msg("1", "第一条", "CTX-A"), second], "BUF1");
@@ -238,7 +233,7 @@ test("轮询：notifystart → 批次摄取（context_token/引用线索/富化�
   assert.equal(fx.state.get("poll:buf"), "BUF1");
   // 前两次轮询：空游标 → 回带新游标（其后脚本耗尽、循环挂起等待停服）
   assert.deepEqual(pollsOf(fake).slice(0, 2), ["", "BUF1"]);
-  // 入站载荷：platform 章 + 原始消息；第二条带引用线索（第一条摘要）与富化图
+  // 入站载荷：platform 章 + 原始消息；第二条带引用线索与解密图（键 = item 下标）
   assert.equal(fx.ingested[0]!.botId, BOT);
   const p1 = fx.ingested[0]!.payload as Record<string, unknown>;
   assert.equal(p1.platform, "weixin");
@@ -246,7 +241,9 @@ test("轮询：notifystart → 批次摄取（context_token/引用线索/富化�
   assert.equal(p1.mediaBlobs, undefined);
   const p2 = fx.ingested[1]!.payload as Record<string, unknown>;
   assert.equal(p2.quoteText, "第一条");
-  assert.deepEqual(p2.mediaBlobs, { "1": "data:image/png;base64,QUJD" });
+  assert.deepEqual(p2.mediaBlobs, {
+    "1": `data:image/png;base64,${PNG.toString("base64")}`,
+  });
   // context_token 按对端缓存并持久化（最新者胜）
   assert.deepEqual(fx.state.get("ctx-tokens"), { [USER]: "CTX-B" });
   // 引用缓存：两条消息摘要入库（供后续 ID-only 引用解析）
@@ -264,10 +261,10 @@ test("续拉：持久化游标与 context_token 存活 → 首轮带游标，状
   fx.state.set("ctx-tokens", { [USER]: "CTX-SAVED" });
   const fake = fakeApi();
   const inst = createWeixinInstance({
-    host: fx.host,
+    ctx: fx.host,
     botId: BOT,
     api: fake.api,
-    overrides: { sendMinIntervalMs: 0 },
+    sendMinIntervalMs: 0,
   });
   fake.queue([{}]);
   const start = inst.start();
@@ -284,7 +281,7 @@ test("长轮询超时 = 正常出口：不报 disconnected，首轮即 ready", a
   const fx = fakeHost();
   const fake = fakeApi();
   fake.queue([new WeixinApiError("请求超时", "timeout")]);
-  const inst = createWeixinInstance({ host: fx.host, botId: BOT, api: fake.api });
+  const inst = createWeixinInstance({ ctx: fx.host, botId: BOT, api: fake.api });
   const start = inst.start();
   await waitFor(() => fx.statuses.some((s) => s.state === "ready"), "ready after timeout");
   assert.equal(fx.statuses.some((s) => s.state === "disconnected"), false);
@@ -297,7 +294,7 @@ test("token 失效（errcode -14）→ fatal 退出不重试；HTTP 401 同样 f
     const fx = fakeHost();
     const fake = fakeApi();
     fake.queue([{ ret: 0, errcode: STALE_TOKEN_ERRCODE, errmsg: "stale" }]);
-    const inst = createWeixinInstance({ host: fx.host, botId: BOT, api: fake.api });
+    const inst = createWeixinInstance({ ctx: fx.host, botId: BOT, api: fake.api });
     await Promise.race([
       inst.start(),
       new Promise((_, rej) => setTimeout(() => rej(new Error("fatal 后未退出")), 2000)),
@@ -306,15 +303,16 @@ test("token 失效（errcode -14）→ fatal 退出不重试；HTTP 401 同样 f
     assert.match(fx.statuses.at(-1)?.detail ?? "", /-14/);
     assert.equal(pollsOf(fake).length, 1);
   }
-  // 401：走真 request 路径（假 fetch 回 401）
+  // 401：网关层拒绝（FakeNetKit 假端点回 401）
   const fx = fakeHost();
-  const plugin = createWeixinConnector({
-    api: {
-      fetch: (() => Promise.resolve(new Response("no", { status: 401 }))) as typeof fetch,
-    },
-    instance: { pollTimeoutMs: 50 },
+  const kit = new FakeNetKit();
+  kit.onMatch((u) => u.includes("/ilink/bot/"), (req) => {
+    const path = new URL(req.url).pathname;
+    if (path.endsWith("/getupdates")) return { status: 401, body: "no" };
+    return { body: { ret: 0 } }; // notifystart / notifystop
   });
-  const inst = plugin.create(fx.host, {
+  const plugin = createWeixinConnector({ net: kit });
+  const inst = plugin.create({ ...fx.host, net: kit }, {
     botId: BOT,
     platform: "weixin",
     credential: { appid: BOT, token: "t" },
@@ -333,10 +331,10 @@ test("网络失败 → disconnected → 退避后恢复 ready；旧游标持续�
     const fake = fakeApi();
     fake.queue([new WeixinApiError("网络请求失败", "network"), {}]);
     const inst = createWeixinInstance({
-      host: fx.host,
+      ctx: fx.host,
       botId: BOT,
       api: fake.api,
-      overrides: { retryDelayMs: 5 },
+      policy: { retryMs: 5 },
     });
     const start = inst.start();
     await waitFor(() => fx.statuses.at(-1)?.state === "ready", "ready after network error");
@@ -350,16 +348,16 @@ test("网络失败 → disconnected → 退避后恢复 ready；旧游标持续�
     const fake = fakeApi();
     fake.queue([{ ret: 1 }, { ret: 1 }, {}]);
     const inst = createWeixinInstance({
-      host: fx.host,
+      ctx: fx.host,
       botId: BOT,
       api: fake.api,
-      overrides: { retryDelayMs: 5 },
+      policy: { retryMs: 5 },
     });
     const start = inst.start();
     await waitFor(() => pollsOf(fake).length >= 3, "third poll");
     inst.stop();
     await start;
-    // 旧游标连报两次 → 第 3 次起空游标重拉
+    // 旧游标连报两次 → 第 3 次起空游标重拉（驱动 resetCursor，maxFailures=2）
     assert.deepEqual(pollsOf(fake).slice(0, 3), ["OLD", "OLD", ""]);
     assert.equal(fx.state.has("poll:buf"), false);
   }
@@ -371,10 +369,10 @@ test("net.proactive 文本：sendmessage 线格式（BOT/FINISH/单 item/context
   const fx = fakeHost();
   const fake = fakeApi();
   const inst = createWeixinInstance({
-    host: fx.host,
+    ctx: fx.host,
     botId: BOT,
     api: fake.api,
-    overrides: { sendMinIntervalMs: 0 },
+    sendMinIntervalMs: 0,
   });
   await feed(inst, fx, fake, [msg("1", "你好", "CTX-1")]);
   const receipt = await inst.net.proactive!({
@@ -404,12 +402,18 @@ test("net.proactive 文本：sendmessage 线格式（BOT/FINISH/单 item/context
 test("net 媒体：uploadMedia 加密直传 → 无状态句柄 → 配文与图片分两条（同 run_id），图片 item 形状", async () => {
   const fx = fakeHost();
   const fake = fakeApi();
-  const cdn = recordingCdn();
+  // CDN 直传走 ctx.net（FakeNetKit）：记录密文体，回下载参数回执
+  const kit = new FakeNetKit();
+  const bodies: Uint8Array[] = [];
+  kit.on("https://cdn.example/up", (req) => {
+    bodies.push(req.body as Uint8Array);
+    return { headers: { "x-encrypted-param": "DL-PARAM" } };
+  });
   const inst = createWeixinInstance({
-    host: fx.host,
+    ctx: { ...fx.host, net: kit },
     botId: BOT,
     api: fake.api,
-    overrides: { fetch: cdn.fetch, sendMinIntervalMs: 0 },
+    sendMinIntervalMs: 0,
   });
   const up = await inst.net.uploadMedia!({
     botId: BOT,
@@ -434,8 +438,8 @@ test("net 媒体：uploadMedia 加密直传 → 无状态句柄 → 配文与图
   assert.equal(req.filesize, aesEcbPaddedSize(PNG.length));
   assert.equal(req.no_need_thumb, true);
   // CDN 直传的是密文：可按请求里的 aeskey 解回明文
-  assert.equal(cdn.bodies.length, 1);
-  assert.deepEqual(decryptAesEcb(cdn.bodies[0]!, Buffer.from(req.aeskey, "hex")), PNG);
+  assert.equal(bodies.length, 1);
+  assert.deepEqual(decryptAesEcb(Buffer.from(bodies[0]!), Buffer.from(req.aeskey, "hex")), PNG);
 
   const receipt = await inst.net.proactive!({
     botId: BOT,
@@ -473,15 +477,12 @@ test("net 媒体：uploadMedia 加密直传 → 无状态句柄 → 配文与图
 test("net 限制与错误：4000 字上限 / 空内容 / 空 target / recall 可操作错误 / 媒体来源失败", async () => {
   const fx = fakeHost();
   const fake = fakeApi();
-  const cdn = recordingCdn();
+  const kit = new FakeNetKit();
   const inst = createWeixinInstance({
-    host: fx.host,
+    ctx: { ...fx.host, net: kit },
     botId: BOT,
     api: fake.api,
-    overrides: {
-      sendMinIntervalMs: 0,
-      fetch: (async () => new Response("nope", { status: 404 })) as typeof fetch,
-    },
+    sendMinIntervalMs: 0,
   });
   await assert.rejects(
     () =>
@@ -517,7 +518,7 @@ test("net 限制与错误：4000 字上限 / 空内容 / 空 target / recall 可
       providerMsgId: "9001",
     }),
   );
-  // 媒体来源读不到：可操作错误，且不触达 CDN
+  // 媒体来源读不到：可操作错误，且不触达 CDN（FakeNetKit 无 materialize 脚本）
   await assert.rejects(
     () =>
       inst.net.uploadMedia!({
@@ -529,7 +530,6 @@ test("net 限制与错误：4000 字上限 / 空内容 / 空 target / recall 可
       }),
     /来源读取失败/,
   );
-  assert.equal(cdn.bodies.length, 0);
   await assert.rejects(
     () =>
       inst.net.uploadMedia!({
@@ -546,7 +546,7 @@ test("net 限制与错误：4000 字上限 / 空内容 / 空 target / recall 可
 test("net 错误翻译：平台错误 → 可操作文案（-14 失效 / 网络不可达 / 其它）", async () => {
   const mk = (error: Error) =>
     createWeixinInstance({
-      host: fakeHost().host,
+      ctx: fakeHost().host,
       botId: BOT,
       api: {
         ...fakeApi().api,
@@ -554,7 +554,7 @@ test("net 错误翻译：平台错误 → 可操作文案（-14 失效 / 网络�
           throw error;
         },
       },
-      overrides: { sendMinIntervalMs: 0 },
+      sendMinIntervalMs: 0,
     });
   const wire = { botId: BOT, target: USER, scope: "chat" as const, content: "x" };
   await assert.rejects(
@@ -583,10 +583,10 @@ test("发送节流：同一对端两次发送间隔 ≥ sendMinIntervalMs", asyn
   const fx = fakeHost();
   const fake = fakeApi();
   const inst = createWeixinInstance({
-    host: fx.host,
+    ctx: fx.host,
     botId: BOT,
     api: fake.api,
-    overrides: { sendMinIntervalMs: 120 },
+    sendMinIntervalMs: 120,
   });
   const t0 = Date.now();
   await inst.net.proactive!({ botId: BOT, target: USER, scope: "chat", content: "a" });
@@ -598,10 +598,10 @@ test("无 context_token 的对端：照发不带 context_token 键", async () =>
   const fx = fakeHost();
   const fake = fakeApi();
   const inst = createWeixinInstance({
-    host: fx.host,
+    ctx: fx.host,
     botId: BOT,
     api: fake.api,
-    overrides: { sendMinIntervalMs: 0 },
+    sendMinIntervalMs: 0,
   });
   await inst.net.proactive!({ botId: BOT, target: USER, scope: "chat", content: "hi" });
   assert.equal("context_token" in sendsOf(fake)[0]!, false);
@@ -609,28 +609,29 @@ test("无 context_token 的对端：照发不带 context_token 键", async () =>
 
 // —— verifyCredential ——
 
-test("verifyCredential：缺凭据 / appid 形制 / 不可达 / 401 / -14 / 通过", async () => {
+test("verifyCredential：缺凭据 / appid 形制 / 不可达 / 401 / -14 / 通过（FakeNetKit 假端点）", async () => {
   const seen: Array<{ url: string; auth: string | undefined; type: string | undefined }> = [];
-  const respond = (status: number, body: string) =>
-    createWeixinConnector({
-      api: {
-        fetch: (async (input: unknown, init?: RequestInit) => {
-          const headers = init?.headers as Record<string, string>;
-          seen.push({
-            url: String(input),
-            auth: headers["Authorization"],
-            type: headers["AuthorizationType"],
-          });
-          return new Response(body, { status });
-        }) as typeof fetch,
-      },
-    }).hooks!.verifyCredential!;
-  const verify = respond(200, '{"ret":0}');
+  const respond = (status: number, body: unknown) => {
+    const kit = new FakeNetKit();
+    kit.onMatch(() => true, (req) => {
+      seen.push({
+        url: req.url,
+        auth: req.headers["authorization"],
+        type: req.headers["authorizationtype"],
+      });
+      return { status, body };
+    });
+    return createWeixinConnector({ net: kit }).hooks!.verifyCredential!;
+  };
+  const verify = respond(200, { ret: 0 });
   await assert.rejects(() => verify({ appid: BOT, token: "" }), /凭据缺失/);
   await assert.rejects(() => verify({ appid: "abc@im.bot", token: "tok" }), /形制/);
+  // 不可达（网络档）：假端点抛 NetError network
+  const deadKit = new FakeNetKit();
+  deadKit.onMatch(() => true, () => new NetError("network", "connection refused"));
   await assert.rejects(
     () =>
-      createWeixinConnector({ api: { baseUrl: "http://127.0.0.1:9/dead" } }).hooks!.verifyCredential!({
+      createWeixinConnector({ net: deadKit }).hooks!.verifyCredential!({
         appid: BOT,
         token: "tok",
       }),
@@ -638,7 +639,7 @@ test("verifyCredential：缺凭据 / appid 形制 / 不可达 / 401 / -14 / 通�
   );
   await assert.rejects(() => respond(401, "no")({ appid: BOT, token: "tok" }), /token 无效/);
   await assert.rejects(
-    () => respond(200, '{"errcode":-14,"errmsg":"stale"}')({ appid: BOT, token: "tok" }),
+    () => respond(200, { errcode: -14, errmsg: "stale" })({ appid: BOT, token: "tok" }),
     /token 无效/,
   );
   await verify({ appid: BOT, token: "tok" });
@@ -650,15 +651,12 @@ test("verifyCredential：缺凭据 / appid 形制 / 不可达 / 401 / -14 / 通�
 
 test("verifyCredential：凭据 base_url 校验（仅 https；非法回退缺省入口）", async () => {
   const seen: string[] = [];
-  const plugin = createWeixinConnector({
-    api: {
-      fetch: (async (input: unknown) => {
-        seen.push(String(input));
-        return new Response('{"ret":0}');
-      }) as typeof fetch,
-    },
+  const kit = new FakeNetKit();
+  kit.onMatch(() => true, (req) => {
+    seen.push(req.url);
+    return { body: { ret: 0 } };
   });
-  const verify = plugin.hooks!.verifyCredential!;
+  const verify = createWeixinConnector({ net: kit }).hooks!.verifyCredential!;
   await verify({ appid: BOT, token: "tok", base_url: "http://evil.example" });
   assert.equal(seen.at(-1)!.startsWith("https://ilinkai.weixin.qq.com/"), true);
   await verify({ appid: BOT, token: "tok", base_url: "https://ilink-sh.example.qq.com/sub/" });
@@ -736,10 +734,10 @@ test("Sender caps 路由：passiveWindow=false 恒主动通道（新鲜入站消
     const fxh = fakeHost();
     const fake = fakeApi();
     const inst = createWeixinInstance({
-      host: fxh.host,
+      ctx: fxh.host,
       botId: BOT,
       api: fake.api,
-      overrides: { sendMinIntervalMs: 0 },
+      sendMinIntervalMs: 0,
     });
     const plugin = createWeixinConnector({});
     const sender = new Sender({
@@ -772,22 +770,23 @@ test("Sender caps 路由：passiveWindow=false 恒主动通道（新鲜入站消
 
 // —— SDK conformance harness ——
 
-test("conformance harness：声明闸门 / 生命周期 / 原语齐备 / normalize 形状 / 探针", async () => {
+test("conformance harness：声明闸门 / 生命周期 / 原语齐备 / normalize 形状 / 探针（FakeNetKit）", async () => {
   const calls: string[] = [];
-  const fetchImpl = (async (input: unknown) => {
-    const url = new URL(String(input));
-    calls.push(url.pathname);
-    if (url.pathname.endsWith("/getupdates")) {
-      // 每次长轮询 20ms 后回空批次（循环持续运转直到 stop）
+  const kit = new FakeNetKit();
+  kit.onMatch((u) => u.includes("/ilink/bot/"), async (req) => {
+    const path = new URL(req.url).pathname;
+    calls.push(path);
+    if (path.endsWith("/getupdates")) {
+      // 每次长轮询 20ms 后回空批次（真定时器：既模拟服务端挂起，又让出事件循环）
       await new Promise((r) => setTimeout(r, 20));
-      return new Response('{"ret":0,"msgs":[]}');
+      return { body: { ret: 0, msgs: [] } };
     }
-    return new Response('{"ret":0,"message_id":777}');
-  }) as unknown as typeof fetch;
-  const plugin = createWeixinConnector({
-    api: { fetch: fetchImpl },
-    instance: { pollTimeoutMs: 40, retryDelayMs: 5, enrich: async () => ({}) },
+    if (path.endsWith("/sendmessage")) {
+      return { body: { ret: 0, message_id: 777 } };
+    }
+    return { body: { ret: 0 } }; // notifystart / notifystop
   });
+  const plugin = createWeixinConnector({ net: kit, qr: { pollTimeoutMs: 40 } });
   // 生命周期适配：实例 start() 按宿主纪律阻塞到停服，而 harness 的 `await start()`
   // 需要「就绪即返回」——包一层：首轮 ready 后返回，轮询循环继续后台跑直到 stop()
   const adapted: ConnectorPlugin = {
@@ -813,6 +812,7 @@ test("conformance harness：声明闸门 / 生命周期 / 原语齐备 / normali
     },
   };
   const report = await runConformance(adapted, {
+    net: kit,
     creds: {
       botId: "bot-wx",
       platform: "weixin",

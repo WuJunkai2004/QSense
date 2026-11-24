@@ -36,7 +36,8 @@ export interface FakeRequestLog {
   at: number;
 }
 
-/** 假应答：status 缺省 200；body 作 JSON 体（http.json 会过 wire schema） */
+/** 假应答：status 缺省 200；body 作 JSON 体（http.json 会过 wire schema）；
+ * Uint8Array/Buffer 视为二进制直传（不经 JSON 序列化——CDN 密文等字节应答） */
 export interface FakeReply {
   status?: number;
   body?: unknown;
@@ -144,10 +145,14 @@ export class FakeNetKit implements NetKit {
     const out = await route.handle(log);
     if (out instanceof Error) throw out;
     const status = out.status ?? 200;
-    const res = new Response(
-      out.body === undefined ? null : JSON.stringify(out.body),
-      { status, headers: out.headers },
-    );
+    const payload = out.body;
+    const res =
+      payload instanceof Uint8Array
+        ? new Response(payload, { status, headers: out.headers })
+        : new Response(
+            payload === undefined ? null : JSON.stringify(payload),
+            { status, headers: out.headers },
+          );
     const map = new Map<string, string>();
     res.headers.forEach((v, k) => map.set(k.toLowerCase(), v));
     return {

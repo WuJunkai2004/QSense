@@ -15,7 +15,7 @@ import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
 import { makeFakeRuntime } from "./helpers/qq-runtime";
-import { ConnectorRegistry } from "@qsense/connector-sdk";
+import { ConnectorRegistry, FakeNetKit } from "@qsense/connector-sdk";
 import type { ConnectorNet, ProactiveWire, ReplyWire } from "@qsense/connector-sdk";
 import type { ConnectorRuntime } from "../src/connectors/runtime";
 import { createWeixinConnector } from "@qsense/connector-weixin";
@@ -883,35 +883,26 @@ async function setupWeixinServer(
   repo.setSendEnable(true);
 
   const plugins = new ConnectorRegistry();
-  plugins.register(
-    createWeixinConnector({
-      api: {
-        fetch: (async (input: unknown, init?: RequestInit) => {
-          const url = new URL(String(input));
-          const json = (obj: unknown) =>
-            new Response(JSON.stringify(obj), {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
-            });
-          if (url.pathname.endsWith("/get_bot_qrcode")) {
-            return json({ qrcode: "QR-SECRET-TOKEN", qrcode_img_content: WX_QR_URL });
-          }
-          if (url.pathname.endsWith("/get_qrcode_status")) {
-            const next = steps.shift();
-            if (next === undefined) {
-              // 脚本耗尽：挂起到请求中止（不空转）
-              await new Promise<void>((resolve) => {
-                init?.signal?.addEventListener("abort", () => resolve(), { once: true });
-              });
-              return json({ status: "wait" });
-            }
-            return json(next);
-          }
-          return json({ ret: 0 }); // notifystart / notifystop 探活
-        }) as typeof fetch,
-      },
-    }),
+  const wxKit = new FakeNetKit();
+  wxKit.onMatch(
+    (u) => u.includes("/ilink/bot/"),
+    async (req) => {
+      const path = new URL(req.url).pathname;
+      if (path.endsWith("/get_bot_qrcode")) {
+        return { body: { qrcode: "QR-SECRET-TOKEN", qrcode_img_content: WX_QR_URL } };
+      }
+      if (path.endsWith("/get_qrcode_status")) {
+        const next = steps.shift();
+        if (next === undefined) {
+          // 脚本耗尽：永久挂起（模拟服务端长轮询挂起；不占事件循环句柄，不空转）
+          return new Promise<never>(() => undefined);
+        }
+        return { body: next };
+      }
+      return { body: { ret: 0 } }; // notifystart / notifystop 探活
+    },
   );
+  plugins.register(createWeixinConnector({ net: wxKit }));
   const registry = new BotRegistry({
     db,
     verify: async (platform, credentials) => {

@@ -1,5 +1,5 @@
-// 微信扫码登录测试（P4）：插件 webui 路由（create/poll）+ 后台状态机全状态——
-// 零真实网络（假 fetch 脚本化 get_bot_qrcode / get_qrcode_status）。
+// 微信扫码登录测试（P4；B⁺ T4.2 起 FakeNetKit 驱动）：插件 webui 路由（create/poll）
+// + 后台状态机全状态——零真实网络。
 // 覆盖：创建任务（local_token_list / 令牌不下发）、wait→scaned→confirmed 出凭据
 // （appid 安全形式 / baseurl / owner_id）、binded_redirect、need_verifycode /
 // verify_code_blocked、expired、IDC 重定向、凭据不完整、上游连续失败、TTL 过期。
@@ -12,7 +12,7 @@ import type {
   PluginWebuiRequest,
   StatePort,
 } from "@qsense/connector-sdk";
-import { createNetKit } from "@qsense/connector-sdk";
+import { FakeNetKit, NetError, createNetKit } from "@qsense/connector-sdk";
 import {
   WeixinError,
   createWeixinConnector,
@@ -21,6 +21,7 @@ import {
 } from "@qsense/connector-weixin";
 
 const QR_CONTENT = "https://weixin.qq.com/q/ABC";
+const BASE = "https://ilinkai.weixin.qq.com";
 
 function noopLog(): ConnectorLogger {
   const noop = (): void => undefined;
@@ -52,13 +53,6 @@ function fakeHost(): PluginContext {
   };
 }
 
-interface Call {
-  method: string;
-  url: string;
-  body: string;
-  headers: Record<string, string>;
-}
-
 /** 延迟应答句柄：测试在「挂起中」时推进时钟/改条件后再放行 */
 interface Deferred {
   kind: "deferred";
@@ -77,9 +71,8 @@ function deferred(): Deferred {
 type Step = Record<string, unknown> | Error | Deferred;
 
 interface QrFake {
-  fetch: typeof fetch;
-  calls: Call[];
-  /** 状态查询脚本（按调用序出队；耗尽后永久挂起到 abort） */
+  kit: FakeNetKit;
+  /** 状态查询脚本（按调用序出队；耗尽后永久挂起——不占事件循环句柄） */
   steps: Step[];
   createStatus: number;
   createBody: unknown;
@@ -87,45 +80,30 @@ interface QrFake {
 }
 
 function qrFake(): QrFake {
-  const calls: Call[] = [];
+  const kit = new FakeNetKit();
   const fx: QrFake = {
-    calls,
+    kit,
     steps: [],
     createStatus: 200,
     createBody: { qrcode: "QR-TOKEN", qrcode_img_content: QR_CONTENT },
     createError: null,
-    fetch: (async (input: unknown, init?: RequestInit) => {
-      const url = new URL(String(input));
-      calls.push({
-        method: init?.method ?? "GET",
-        url: url.toString(),
-        body: String(init?.body ?? ""),
-        headers: (init?.headers ?? {}) as Record<string, string>,
-      });
-      const json = (obj: unknown, status = 200) =>
-        new Response(JSON.stringify(obj), {
-          status,
-          headers: { "Content-Type": "application/json" },
-        });
-      if (url.pathname === "/ilink/bot/get_bot_qrcode") {
-        if (fx.createError !== null) throw fx.createError;
-        return json(fx.createBody, fx.createStatus);
-      }
-      if (url.pathname === "/ilink/bot/get_qrcode_status") {
-        const next = fx.steps.shift();
-        if (next === undefined) {
-          await new Promise<void>((resolve) => {
-            init?.signal?.addEventListener("abort", () => resolve(), { once: true });
-          });
-          return json({ status: "wait" });
-        }
-        if (next instanceof Error) throw next;
-        if (next.kind === "deferred") return json(await next.promise);
-        return json(next);
-      }
-      return new Response("not found", { status: 404 });
-    }) as typeof fetch,
   };
+  kit.onMatch(
+    (u) => u.includes("/get_bot_qrcode") || u.includes("/get_qrcode_status"),
+    async (req) => {
+      const path = new URL(req.url).pathname;
+      if (path.endsWith("/get_bot_qrcode")) {
+        if (fx.createError !== null) throw fx.createError;
+        return { status: fx.createStatus, body: fx.createBody };
+      }
+      // get_qrcode_status：脚本出队；耗尽后挂起（模拟服务端长轮询，无句柄不阻塞退出）
+      const next = fx.steps.shift();
+      if (next instanceof Error) throw next;
+      if (next === undefined) return new Promise<never>(() => undefined);
+      if (next.kind === "deferred") return { body: await next.promise };
+      return { body: next };
+    },
+  );
   return fx;
 }
 
@@ -136,12 +114,12 @@ interface QrTestPlugin extends WeixinConnectorPlugin {
 
 type QrOpts = Pick<
   QrLoginManagerDeps,
-  "ttlMs" | "pollTimeoutMs" | "retryDelayMs" | "maxFailures" | "now" | "newId"
+  "ttlMs" | "pollTimeoutMs" | "retryDelayMs" | "maxFailures"
 >;
 
 function makePlugin(fx: QrFake, qr: Partial<QrOpts> = {}): QrTestPlugin {
   const plugin = createWeixinConnector({
-    api: { fetch: fx.fetch },
+    net: fx.kit,
     qr: { retryDelayMs: 5, ...qr },
   });
   const route = (path: string) =>
@@ -179,8 +157,8 @@ const CONFIRMED = {
   ilink_user_id: "u1@im.wechat",
 };
 
-function statusCalls(fx: QrFake): Call[] {
-  return fx.calls.filter((c) => c.url.includes("/get_qrcode_status"));
+function statusCalls(fx: QrFake) {
+  return fx.kit.requests.filter((r) => r.url.includes("/get_qrcode_status"));
 }
 
 /** 经 poll 路由轮询直到任务进入指定状态（failed 以抛错形式呈现） */
@@ -223,13 +201,13 @@ test("create：get_bot_qrcode（bot_type=3）→ task_id + 二维码内容；轮
   assert.equal(typeof out.task_id, "string");
   assert.equal(out.connect_url, QR_CONTENT);
   assert.equal(out.interval_s, 2);
-  const call = fx.calls[0]!;
+  const call = fx.kit.requests[0]!;
   assert.equal(call.method, "POST");
-  assert.equal(call.url, "https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3");
-  assert.deepEqual(JSON.parse(call.body), { local_token_list: [] });
+  assert.equal(call.url, `${BASE}/ilink/bot/get_bot_qrcode?bot_type=3`);
+  assert.deepEqual(JSON.parse(String(call.body)), { local_token_list: [] });
   // qrcode（轮询令牌）只留服务端内存
   assert.equal(JSON.stringify(out).includes("QR-TOKEN"), false);
-  assert.equal(call.headers["Authorization"], undefined);
+  assert.equal(call.headers["authorization"], undefined);
 });
 
 test("create：local_token_list = 本端已注册 bot 的 token（至多 10 个；forget 即注销）", async () => {
@@ -247,7 +225,7 @@ test("create：local_token_list = 本端已注册 bot 的 token（至多 10 个�
   for (let i = 4; i <= 12; i += 1) reg(`b${i}`, `t${i}`);
   plugin.forget("b2");
   await plugin.createQr();
-  const list = (JSON.parse(fx.calls[0]!.body) as { local_token_list: string[] })
+  const list = (JSON.parse(String(fx.kit.requests[0]!.body)) as { local_token_list: string[] })
     .local_token_list;
   assert.equal(list.length, 10); // 上限 10
   assert.equal(list.includes("t2"), false); // 已 forget
@@ -333,7 +311,7 @@ test("IDC 重定向：scaned_but_redirect 后续查询切到 https://{redirect_h
     const { task_id } = await plugin.createQr();
     await waitStatus(plugin, task_id, "completed");
     const calls = statusCalls(fx);
-    assert.equal(calls[0]!.url.startsWith("https://ilinkai.weixin.qq.com/"), true);
+    assert.equal(calls[0]!.url.startsWith(`${BASE}/`), true);
     assert.equal(calls[1]!.url.startsWith("https://ilink-sh.weixin.qq.com/"), true);
   }
   {
@@ -347,7 +325,7 @@ test("IDC 重定向：scaned_but_redirect 后续查询切到 https://{redirect_h
     const { task_id } = await plugin.createQr();
     await waitStatus(plugin, task_id, "completed");
     assert.equal(
-      statusCalls(fx)[1]!.url.startsWith("https://ilinkai.weixin.qq.com/"),
+      statusCalls(fx)[1]!.url.startsWith(`${BASE}/`),
       true,
     );
   }
@@ -363,10 +341,13 @@ test("容错：未知状态按等待继续；可重试失败达上限 → failed
     await waitStatus(plugin, task_id, "completed");
     assert.equal(statusCalls(fx).length, 2);
   }
-  // 连续网络失败达上限
+  // 连续网络失败达上限（NetError network 经真 api 层分档 → WeixinApiError network）
   {
     const fx = qrFake();
-    fx.steps.push(new TypeError("fetch failed"), new TypeError("fetch failed"));
+    fx.steps.push(
+      new NetError("network", "fetch failed"),
+      new NetError("network", "fetch failed"),
+    );
     const plugin = makePlugin(fx, { maxFailures: 2 });
     const { task_id } = await plugin.createQr();
     await waitStatus(plugin, task_id, "failed");
@@ -375,21 +356,20 @@ test("容错：未知状态按等待继续；可重试失败达上限 → failed
   // 单次网络失败后重试成功
   {
     const fx = qrFake();
-    fx.steps.push(new TypeError("fetch failed"), CONFIRMED);
+    fx.steps.push(new NetError("network", "fetch failed"), CONFIRMED);
     const plugin = makePlugin(fx);
     const { task_id } = await plugin.createQr();
     await waitStatus(plugin, task_id, "completed");
   }
-  // TTL：时钟推进超过存活上限 → expired
+  // TTL：fake 时钟推进超过存活上限 → expired
   {
     const fx = qrFake();
     const gate = deferred();
     fx.steps.push({ status: "wait" }, gate);
-    let clock = 1_000_000;
-    const plugin = makePlugin(fx, { ttlMs: 60_000, now: () => clock });
+    const plugin = makePlugin(fx, { ttlMs: 60_000 });
     const { task_id } = await plugin.createQr();
     await waitCalls(fx, 2); // 第二次查询挂起中
-    clock += 61_000;
+    fx.kit.tick(61_000); // fake 时钟推进（net.now()）
     gate.resolve({ status: "wait" });
     await waitStatus(plugin, task_id, "expired");
   }
@@ -404,7 +384,7 @@ test("create 上游失败：HTTP 5xx / 缺字段 / 网络异常 → 502 可操�
       fx.createBody = { qrcode: "only-token" };
     },
     (fx) => {
-      fx.createError = new TypeError("fetch failed");
+      fx.createError = new NetError("network", "fetch failed");
     },
   ];
   for (const setup of setups) {

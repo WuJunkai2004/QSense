@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { httpClient } from "@qsense/connector-sdk";
 import {
   WeixinApiError,
   baseInfo,
@@ -110,7 +111,7 @@ test("getupdates：请求头 / 请求体 / uint64 无损解析 / 服务端建议
           '"get_updates_buf":"BUF1","longpolling_timeout_ms":20000}',
       ),
     );
-    const api = createWeixinApi(TOKEN, { baseUrl: mock.baseUrl });
+    const api = createWeixinApi(httpClient(), TOKEN, mock.baseUrl);
     const resp = await api.getUpdates("CURSOR", { timeoutMs: 5000 });
 
     const req = mock.seen[0]!;
@@ -147,7 +148,7 @@ test("getupdates：请求头 / 请求体 / uint64 无损解析 / 服务端建议
 test("sendmessage：message_id 无损回执；ret / errcode 非零 → biz 错（code 可取）", async () => {
   const mock = await startMock();
   try {
-    const api = createWeixinApi(TOKEN, { baseUrl: mock.baseUrl });
+    const api = createWeixinApi(httpClient(), TOKEN, mock.baseUrl);
     mock.routes.set("/ilink/bot/sendmessage", (req, res) => {
       const body = JSON.parse(req.body) as { msg: { to_user_id: string } };
       assert.equal(body.msg.to_user_id, "u1@im.wechat");
@@ -186,7 +187,7 @@ test("sendmessage：message_id 无损回执；ret / errcode 非零 → biz 错�
 test("错误分档：HTTP 401 → http；连接被拒 → network；挂起不回 → timeout；外部 signal → aborted", async () => {
   const mock = await startMock();
   try {
-    const api = createWeixinApi(TOKEN, { baseUrl: mock.baseUrl });
+    const api = createWeixinApi(httpClient(), TOKEN, mock.baseUrl);
     mock.routes.set("/ilink/bot/msg/notifystart", (_req, res) => json(res, { ret: 401 }, 401));
     await assert.rejects(
       () => api.notifyStart(),
@@ -208,7 +209,7 @@ test("错误分档：HTTP 401 → http；连接被拒 → network；挂起不回
   } finally {
     await mock.close();
   }
-  const api = createWeixinApi(TOKEN, { baseUrl: await deadBaseUrl() });
+  const api = createWeixinApi(httpClient(), TOKEN, await deadBaseUrl());
   await assert.rejects(
     () => api.notifyStart({ timeoutMs: 5000 }),
     (e: unknown) => e instanceof WeixinApiError && e.kind === "network",
@@ -218,7 +219,7 @@ test("错误分档：HTTP 401 → http；连接被拒 → network；挂起不回
 test("notifystart / notifystop / getuploadurl：路径与请求体；业务码非零抛 biz", async () => {
   const mock = await startMock();
   try {
-    const api = createWeixinApi(TOKEN, { baseUrl: mock.baseUrl });
+    const api = createWeixinApi(httpClient(), TOKEN, mock.baseUrl);
     mock.routes.set("/ilink/bot/msg/notifystart", (_req, res) => json(res, { ret: 0 }));
     mock.routes.set("/ilink/bot/msg/notifystop", (_req, res) => json(res, { ret: 0 }));
     mock.routes.set("/ilink/bot/getuploadurl", (_req, res) =>
@@ -268,7 +269,7 @@ test("扫码两接口：get_bot_qrcode（POST，bot_type=3，body 仅 local_toke
   const mock = await startMock();
   const other = await startMock();
   try {
-    const api = createWeixinApi("", { baseUrl: mock.baseUrl });
+    const api = createWeixinApi(httpClient(), "", mock.baseUrl);
     mock.routes.set("/ilink/bot/get_bot_qrcode", (_req, res) =>
       raw(res, '{"qrcode":"QR-TOKEN","qrcode_img_content":"https://weixin.qq.com/x/abc"}'),
     );
