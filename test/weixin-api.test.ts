@@ -13,7 +13,7 @@ import {
   bizCodeOf,
   clientVersionOf,
   createWeixinApi,
-  parseWeixinJson,
+  quoteWeixinUint64,
 } from "@qsense/connector-weixin";
 
 interface Seen {
@@ -311,11 +311,11 @@ test("扫码两接口：get_bot_qrcode（POST，bot_type=3，body 仅 local_toke
   }
 });
 
-test("parseWeixinJson 单元：只改写 id 键位置的数字；字符串内部 / 数组元素 / 其它键不动", () => {
+test("quoteWeixinUint64 单元：只改写 id 键位置的数字；字符串内部 / 数组元素 / 其它键不动", () => {
   const src =
     '{"message_id":123,"svr_id": 456 ,"msg_id":\n789,"seq":999,' +
     '"x":{"message_id":18446744073709551615},"text":"a \\"message_id\\": 5 b","a":[1,2],"neg":-14}';
-  assert.deepEqual(parseWeixinJson(src), {
+  assert.deepEqual(JSON.parse(quoteWeixinUint64(src)), {
     message_id: "123",
     svr_id: "456",
     msg_id: "789",
@@ -326,10 +326,13 @@ test("parseWeixinJson 单元：只改写 id 键位置的数字；字符串内部
     neg: -14,
   });
   // 冒号后不是数字：原样
-  assert.deepEqual(parseWeixinJson('{"message_id":"already","msg_id":null}'), {
-    message_id: "already",
-    msg_id: null,
-  });
+  assert.deepEqual(
+    JSON.parse(quoteWeixinUint64('{"message_id":"already","msg_id":null}')),
+    {
+      message_id: "already",
+      msg_id: null,
+    },
+  );
 });
 
 test("常量与纯函数：clientVersionOf / baseInfo / bizCodeOf", () => {
