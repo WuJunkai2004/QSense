@@ -46,7 +46,6 @@ export interface TelegramUser {
   first_name?: string;
   last_name?: string;
   username?: string;
-  [key: string]: unknown;
 }
 
 export const TelegramUserSchema = z.looseObject({
@@ -64,7 +63,6 @@ export interface TelegramChat {
   title?: string;
   first_name?: string;
   last_name?: string;
-  [key: string]: unknown;
 }
 
 export const TelegramChatSchema = z.looseObject({
@@ -97,7 +95,6 @@ export interface TelegramSticker {
   set_name?: string;
   width?: number;
   height?: number;
-  [key: string]: unknown;
 }
 
 export const TelegramStickerSchema = z.looseObject({
@@ -160,7 +157,6 @@ export interface TelegramEntity {
   offset?: number;
   length?: number;
   user?: TelegramUser;
-  [key: string]: unknown;
 }
 
 export const TelegramEntitySchema = z.looseObject({
@@ -192,7 +188,6 @@ export interface TelegramMessage {
   delete_chat_photo?: true;
   group_chat_created?: true;
   pinned_message?: TelegramMessage;
-  [key: string]: unknown;
 }
 
 export const TelegramMessageSchema: z.ZodType<TelegramMessage> = z.lazy(() =>
@@ -224,7 +219,6 @@ export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
-  [key: string]: unknown;
 }
 
 export const TelegramUpdateSchema = z.looseObject({
@@ -250,7 +244,6 @@ export const TelegramFileSchema = z.looseObject({
 export interface TelegramMe {
   id: number;
   username?: string;
-  [key: string]: unknown;
 }
 
 export const TelegramMeSchema = z.looseObject({
@@ -261,7 +254,6 @@ export const TelegramMeSchema = z.looseObject({
 /** sendMessage/sendPhoto/sendVoice 回执（发送侧只消费 message_id） */
 export interface TelegramMessageIdResult {
   message_id: number;
-  [key: string]: unknown;
 }
 
 export const TelegramMessageIdResultSchema = z.looseObject({
@@ -295,7 +287,7 @@ export interface TelegramApi {
   call<T>(
     method: string,
     result: ZodType<T>,
-    body?: Record<string, unknown>,
+    body?: TgCallBody,
     opts?: { signal?: AbortSignal },
   ): Promise<T>;
   /** multipart 上传（sendPhoto/sendVoice 等的文件直传） */
@@ -311,6 +303,19 @@ export interface TelegramApi {
 }
 
 const BASE_URL = "https://api.telegram.org";
+
+/** 官方 reply_parameters 参数（嵌套对象；JSON 体直传，multipart 面 JSON.stringify） */
+export interface TgReplyParameters {
+  message_id: number;
+  allow_sending_without_reply?: boolean;
+}
+
+/** Bot API JSON 请求体值域（官方参数面：标量、字符串数组与 reply_parameters
+ * 嵌套对象；undefined = 缺省省略） */
+export type TgCallBody = Record<
+  string,
+  string | number | boolean | string[] | TgReplyParameters | undefined
+>;
 
 /** 应答信封：ok 缺失/为 false → TelegramApiError（保真 description/error_code）；
  * ok=true → result 字段过 wire schema（违规=可定位字段路径，不带数据值）。 */
@@ -389,8 +394,8 @@ export function createTelegramApi(http: HttpClient, token: string): TelegramApi 
 
 /** 可重试分档：NetError 机械档（timeout/network）→ true；TelegramApiError
  * 网络 0 码 / 5xx / 429 → true（实例退避重试）；401/409 及其他 4xx → false（fatal） */
-export function isRetryableApiError(e: unknown): boolean {
-  if (e instanceof Error && isNetError(e)) {
+export function isRetryableApiError(e: Error): boolean {
+  if (isNetError(e)) {
     return e.kind === "network" || e.kind === "timeout";
   }
   if (e instanceof TelegramApiError) {
@@ -403,8 +408,8 @@ export function isRetryableApiError(e: unknown): boolean {
 }
 
 /** 发送类错误的可操作翻译（connector 自带平台提示，宿主/基座不再加工平台语义） */
-export function describeSendFailure(e: unknown): string {
-  const reason = e instanceof Error ? e.message : String(e);
+export function describeSendFailure(e: Error): string {
+  const reason = e.message;
   if (e instanceof TelegramApiError) {
     if (/chat not found/i.test(reason)) return tt("tg_chat_not_found", { reason });
     if (/voice/i.test(reason) || / Wrong file id|unsupported/i.test(reason)) {

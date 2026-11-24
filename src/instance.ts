@@ -173,7 +173,9 @@ export function createTelegramInstance(
       try {
         return await sendWire(wire);
       } catch (e) {
-        throw new Error(describeSendFailure(e));
+        throw new Error(
+          describeSendFailure(e instanceof Error ? e : new Error(String(e))),
+        );
       }
     },
     // 契约兼容别名（passiveWindow=false 平台 core 不会路由到此）：
@@ -193,7 +195,9 @@ export function createTelegramInstance(
           force,
         );
       } catch (e) {
-        throw new Error(describeSendFailure(e));
+        throw new Error(
+          describeSendFailure(e instanceof Error ? e : new Error(String(e))),
+        );
       }
     },
     async recall(wire: RecallWire) {
@@ -277,7 +281,7 @@ export function createTelegramInstance(
               "getUpdates",
               z.array(TelegramUpdateSchema),
               {
-                offset: offset === 0 ? undefined : offset,
+                offset: offset === 0 || offset === null ? undefined : offset,
                 timeout: TG_POLL_TIMEOUT_S,
                 allowed_updates: ["message"],
               },
