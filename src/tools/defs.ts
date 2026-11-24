@@ -15,7 +15,7 @@
 // `bot` 参数已全工具面退役（绑定关系在 HTTP 层 Bearer→bot 完成，agent 无需感知 bot 维度）。
 
 import type { BotRegistry } from "../bots";
-import type { Sender } from "../sender";
+import type { Sender, SendResult } from "../sender";
 import { synthesizeSpeech } from "../tts";
 import type { MsgRow, Repo } from "../store/repo";
 import { Buffer } from "node:buffer";
@@ -128,6 +128,22 @@ function requireSender(ctx: ToolContext): Sender {
     throw new Error("发送功能未启用：服务端未装配发送器（写工具面关闭）。");
   }
   return ctx.sender;
+}
+
+/** MCP 面瘦身（2026-11-24）：SendResult 只回模型有用的字段。channel（被动|主动）
+ * 与 msg_seq 是 core 记账语义（窗口/额度内务）——模型无法基于它们做任何决策，
+ * 对扮演无帮助，属上下文噪音；人类调试面在 WebUI sends 列表（kind/msg_seq 列）。
+ * status 保留：pending_audit（勿重发）/ downgraded / replayed 影响 AI 下一步行动。 */
+function sendResultForModel(
+  r: SendResult,
+): Pick<SendResult, "status" | "provider_msg_id" | "detail"> {
+  return {
+    status: r.status,
+    ...(r.provider_msg_id !== undefined
+      ? { provider_msg_id: r.provider_msg_id }
+      : {}),
+    ...(r.detail !== undefined ? { detail: r.detail } : {}),
+  };
 }
 
 // —— 行 → 输出形状：无任何会话回显（id 是 agent 刚传的参数，不再 echo）；
@@ -757,12 +773,14 @@ export const TOOLS: ToolDef[] = [
     handler: async (args, ctx) => {
       const sender = requireSender(ctx);
       const { botId, scopeId, kind } = resolveSession(ctx, args);
-      return sender.sendAuto(
-        botId,
-        scopeId,
-        str(args, "text", "要发送的文本"),
-        optStr(args, "quote_msg_id"),
-        kind,
+      return sendResultForModel(
+        await sender.sendAuto(
+          botId,
+          scopeId,
+          str(args, "text", "要发送的文本"),
+          optStr(args, "quote_msg_id"),
+          kind,
+        ),
       );
     },
   },
@@ -814,22 +832,26 @@ export const TOOLS: ToolDef[] = [
           );
         }
         const { buf } = await synthesizeSpeech(cfg, mediaParam.slice(4), ctx.ttsDeps);
-        return sender.sendVoiceBytes(
+        return sendResultForModel(
+          await sender.sendVoiceBytes(
+            botId,
+            scopeId,
+            buf,
+            optStr(args, "text"),
+            optStr(args, "quote_msg_id"),
+            kind,
+          ),
+        );
+      }
+      return sendResultForModel(
+        await sender.sendMediaAuto(
           botId,
           scopeId,
-          buf,
+          mediaParam,
           optStr(args, "text"),
           optStr(args, "quote_msg_id"),
           kind,
-        );
-      }
-      return sender.sendMediaAuto(
-        botId,
-        scopeId,
-        mediaParam,
-        optStr(args, "text"),
-        optStr(args, "quote_msg_id"),
-        kind,
+        ),
       );
     },
   },
