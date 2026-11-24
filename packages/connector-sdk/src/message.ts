@@ -42,8 +42,10 @@ export interface NormalizedMention {
 export interface NormalizedQuote {
   /** 平台引用锚点（如 QQ msg_idx 令牌 / Telegram 被引 message_id 字符串） */
   msgIdx?: string;
-  /** 被引正文快照（插件摄取期可得则填；读取端不二次解析） */
+  /** 被引正文快照（插件摄取期可得则填；读取端不二次解析）。纯媒体被引时为文字占位（如 [图片]） */
   body?: string;
+  /** 被引媒体（如 QQ 103 引用自带被引图片）：归引用结构，不混入本条正文/顶层附件 */
+  attachments?: NormalizedAttachment[];
   /** 被引作者/消息（被引晚到可留 null，读取端懒补） */
   authorOpenid?: string | null;
   authorName?: string | null;

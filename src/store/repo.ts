@@ -11,7 +11,11 @@
 
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { NormalizedMessage, MsgScope } from "@qsense/connector-sdk";
+import type {
+  NormalizedAttachment,
+  NormalizedMessage,
+  MsgScope,
+} from "@qsense/connector-sdk";
 import type { TtsConfig } from "../tts";
 import type { DB } from "./db";
 
@@ -69,6 +73,8 @@ export interface QuoteMsgData {
   id: string | null;
   msgId: string | null;
   body: string;
+  /** 被引媒体（QQ 引图场景：103 自带被引图片，归引用不混正文）；无则缺省 */
+  attachments?: NormalizedAttachment[];
 }
 
 export class Repo {
@@ -429,6 +435,7 @@ export class Repo {
     let q: {
       msgIdx?: string;
       body?: string;
+      attachments?: unknown;
       authorOpenid?: string | null;
       authorName?: string | null;
       msgId?: string | null;
@@ -464,10 +471,14 @@ export class Repo {
     }
     const first = (q.body ?? "").split("\n")[0] ?? "";
     const cps = Array.from(first);
+    const atts = Array.isArray(q.attachments)
+      ? (q.attachments as NormalizedAttachment[])
+      : [];
     return {
       id: authorOpenid ?? null,
       msgId: msgId ?? null,
       body: cps.length > 50 ? `${cps.slice(0, 50).join("")}…` : first,
+      ...(atts.length > 0 ? { attachments: atts } : {}),
     };
   }
 

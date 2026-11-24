@@ -471,7 +471,8 @@ test("M2-10 媒体占位符与引用结构化：媒体前置/103 内嵌媒体收
   assert.ok(mix !== null);
   assert.equal(mix!.content, "![附件1]\n图片和文字");
 
-  // 引用元素（真机 103 形状）：原文结构化进 quote；被引图片照常收集占位
+  // 引用元素（真机 103 形状）：原文结构化进 quote；被引图片归 quote.attachments，
+  // 不混入本条正文/附件（2026-11-24 真机 bug 修复：被引图曾被误当本条 ![附件1]）
   const quote = normalizeMessage(
     ev("GROUP_MESSAGE_CREATE", {
       ...groupMsgShape,
@@ -490,12 +491,48 @@ test("M2-10 媒体占位符与引用结构化：媒体前置/103 内嵌媒体收
     }),
   );
   assert.ok(quote !== null);
-  assert.equal(quote!.content, "我引用了一条消息\n![附件1]");
+  assert.equal(quote!.content, "我引用了一条消息", "被引媒体不混入本条正文");
   assert.equal(quote!.text, "我引用了一条消息");
   assert.equal(quote!.quote?.msgIdx, "REFIDX_A");
   assert.equal(quote!.quote?.body, "被引的原文");
-  assert.equal(quote!.attachments.length, 1);
-  assert.equal(quote!.attachments[0]!.url, "https://cdn.example/q.png");
+  assert.equal(quote!.attachments.length, 0, "被引媒体不进本条附件");
+  assert.equal(quote!.quote?.attachments?.length, 1);
+  assert.equal(quote!.quote?.attachments?.[0]!.url, "https://cdn.example/q.png");
+
+  // 纯媒体被引（真机 2026-11-24 引表情包形状：103 content 空 + 自带图片附件）：
+  // body=官方同款文字占位，图片只活在 quote.attachments
+  const imgQuote = normalizeMessage(
+    ev("GROUP_MESSAGE_CREATE", {
+      ...groupMsgShape,
+      id: "MSGID_QUOTE_IMG",
+      content: "这是引用消息，不带图片",
+      msg_elements: [
+        {
+          message_type: 103,
+          msg_idx: "REFIDX_B",
+          content: "",
+          attachments: [
+            {
+              url: "https://multimedia.nt.qq.com.cn/q.jpeg",
+              content_type: "image/jpeg",
+              filename: "emoji.jpeg",
+              width: 960,
+              height: 960,
+              size: 183409,
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.ok(imgQuote !== null);
+  assert.equal(imgQuote!.content, "这是引用消息，不带图片");
+  assert.equal(imgQuote!.text, "这是引用消息，不带图片");
+  assert.equal(imgQuote!.attachments.length, 0);
+  assert.equal(imgQuote!.quote?.body, "[图片]");
+  assert.equal(imgQuote!.quote?.attachments?.length, 1);
+  assert.equal(imgQuote!.quote?.attachments?.[0]!.kind, "image");
+  assert.equal(imgQuote!.quote?.attachments?.[0]!.filename, "emoji.jpeg");
 
   // msg_idx 从 message_scene.ext 提取（本条自己的锚，落 msg_idx 列）；无 103 元素不构成引用
   const idx = normalizeMessage(

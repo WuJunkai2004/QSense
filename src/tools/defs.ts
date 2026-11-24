@@ -157,7 +157,14 @@ function msgOut(
   };
   const quote = repo.quoteOf(row);
   if (quote !== null) {
-    out.quote_msg = { id: quote.id, msg_id: quote.msgId, content: quote.body };
+    out.quote_msg = {
+      id: quote.id,
+      msg_id: quote.msgId,
+      content: quote.body,
+      ...(quote.attachments !== undefined
+        ? { attachments: quote.attachments }
+        : {}),
+    };
   }
   if (row.records_count > 0) out.records_count = row.records_count;
   if (row.mentions_json) {
