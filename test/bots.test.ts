@@ -211,7 +211,7 @@ test("M9-B3b add：auth_level 落库（缺省 uncertified），非法值拒绝",
           credentials: { appid: "30003", secret: "s3" },
           authLevel: "gold" as never,
         }),
-      (e: unknown) =>
+      (e) =>
         e instanceof BotRegistryError && e.message.includes("auth_level"),
     );
     assert.throws(() => reg.setAuthLevel("30003", "certified"), /不在注册表中/);

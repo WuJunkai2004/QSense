@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { BotRegistry } from "../src/bots";
 import { createLogger } from "../src/utils/logger";
 import { Sender } from "../src/sender";
+import type { ConnectorNet } from "@qsense/connector-sdk";
 import { buildServer } from "../src/server/http";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
@@ -35,18 +36,30 @@ const WAV = Buffer.concat([
   Buffer.alloc(8),
 ]);
 
+/** TTS 上游请求体（OpenAI 兼容 /audio/speech 线格式；synthesizeSpeech 产出） */
+interface TtsRequestBody {
+  model: string;
+  input: string;
+  voice: string;
+  response_format: string;
+}
+
 function fakeTts(
-  handler: (url: string, body: Record<string, unknown>, headers: Record<string, string>) => Response,
-): typeof fetch & { calls: Array<{ url: string; body: Record<string, unknown>; headers: Record<string, string> }> } {
-  const calls: Array<{ url: string; body: Record<string, unknown>; headers: Record<string, string> }> = [];
-  const impl = async (url: unknown, init?: RequestInit): Promise<Response> => {
+  handler: (url: string, body: TtsRequestBody, headers: Record<string, string>) => Response,
+): typeof fetch & { calls: Array<{ url: string; body: TtsRequestBody; headers: Record<string, string> }> } {
+  const calls: Array<{ url: string; body: TtsRequestBody; headers: Record<string, string> }> = [];
+  const impl = async (
+    url: Parameters<typeof fetch>[0],
+    init?: RequestInit,
+  ): Promise<Response> => {
     const headers = (init?.headers ?? {}) as Record<string, string>;
+    // JSON.parse 返回 any（库签名）：即过 TtsRequestBody 形状消费（断言面）
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : {};
     calls.push({ url: String(url), body, headers });
     return handler(String(url), body, headers);
   };
   return Object.assign(impl, { calls }) as typeof fetch & {
-    calls: Array<{ url: string; body: Record<string, unknown>; headers: Record<string, string> }>;
+    calls: Array<{ url: string; body: TtsRequestBody; headers: Record<string, string> }>;
   };
 }
 
@@ -142,7 +155,7 @@ test("tts 单元：上游 500 与非音频响应 → 可操作 TtsError", async 
   const fail = fakeTts(() => new Response("upstream boom", { status: 500 }));
   await assert.rejects(
     synthesizeSpeech(cfg, "hi", { fetchImpl: fail }),
-    (e: unknown) => e instanceof TtsError && e.message.includes("500") && e.message.includes("boom"),
+    (e) => e instanceof TtsError && e.message.includes("500") && e.message.includes("boom"),
   );
   const html = fakeTts(() => new Response("<html>gateway</html>", { status: 200 }));
   await assert.rejects(
@@ -157,7 +170,7 @@ const TOKEN = "tts-test-admin-token-0123456789abc";
 
 interface HttpFixture {
   baseUrl: string;
-  tts: typeof fetch & { calls: Array<{ url: string; body: Record<string, unknown> }> };
+  tts: typeof fetch & { calls: Array<{ url: string; body: TtsRequestBody }> };
   repo: Repo;
   close: () => Promise<void>;
 }
@@ -184,7 +197,7 @@ async function setupHttp(): Promise<HttpFixture> {
     registry,
     connectors: fxRuntime.runtime,
     botStatuses: () => [],
-    ttsDeps: { fetchImpl: tts as unknown as typeof fetch },
+    ttsDeps: { fetchImpl: tts },
   });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const addr = app.server.address();
@@ -210,10 +223,19 @@ const auth = (): Record<string, string> => ({
   "Content-Type": "application/json",
 });
 
+/** TTS 设置页 wire 请求体（config PUT / test POST 同形：全部可选字段） */
+interface TtsSettingsBody {
+  base_url?: string;
+  model?: string;
+  voice?: string;
+  api_key?: string;
+  format?: string;
+}
+
 test("tts 集成：config 保存/打码回显/空 key 保留旧值；缺字段 400", async () => {
   const fx = await setupHttp();
   try {
-    const put = (body: Record<string, unknown>): Promise<Response> =>
+    const put = (body: TtsSettingsBody): Promise<Response> =>
       fetch(`${fx.baseUrl}/ui/api/tts/config`, {
         method: "PUT",
         headers: auth(),
@@ -234,7 +256,15 @@ test("tts 集成：config 保存/打码回显/空 key 保留旧值；缺字段 4
     });
 
     const got = await fetch(`${fx.baseUrl}/ui/api/tts/config`, { headers: auth() });
-    const cfg = (await got.json()) as Record<string, unknown>;
+    // GET /tts/config 应答形状（WebUI 设置页消费面；打码后无 api_key 原文）
+    const cfg = (await got.json()) as {
+      configured: boolean;
+      base_url: string;
+      model: string;
+      voice: string;
+      format: string;
+      api_key_masked: string;
+    };
     assert.equal(cfg.configured, true);
     assert.equal(cfg.base_url, "https://tts.example.com/v1");
     assert.equal(cfg.format, "wav"); // 缺省格式
@@ -274,7 +304,7 @@ test("tts 集成：config 保存/打码回显/空 key 保留旧值；缺字段 4
 test("tts 集成：test 试听（草稿优先/回退已存/未配置 400/上游 502）", async () => {
   const fx = await setupHttp();
   try {
-    const post = (body: Record<string, unknown>): Promise<Response> =>
+    const post = (body: TtsSettingsBody): Promise<Response> =>
       fetch(`${fx.baseUrl}/ui/api/tts/test`, {
         method: "POST",
         headers: auth(),
@@ -308,10 +338,7 @@ test("tts 集成：test 试听（草稿优先/回退已存/未配置 400/上游 
     const r2 = await post({ model: "draft-model" });
     assert.equal(r2.status, 200);
     assert.equal(fx.tts.calls.at(-1)!.body.model, "draft-model");
-    assert.equal(
-      (fx.tts.calls.at(-1)!.body as Record<string, string>).voice,
-      "alloy",
-    );
+    assert.equal(fx.tts.calls.at(-1)!.body.voice, "alloy"); // api_key 仍回退已存
 
     // 草稿带 format=mp3 → 上游收到 mp3，content-type 跟随
     const r3 = await post({ format: "mp3" });
@@ -348,7 +375,7 @@ test("tts 集成：test 试听（草稿优先/回退已存/未配置 400/上游 
       connectors: fxRuntime.runtime,
       botStatuses: () => [],
       ttsDeps: {
-        fetchImpl: fakeTts(() => new Response("boom", { status: 500 })) as unknown as typeof fetch,
+        fetchImpl: fakeTts(() => new Response("boom", { status: 500 })),
       },
     });
     await app.listen({ port: 0, host: "127.0.0.1" });
@@ -433,25 +460,25 @@ function setupTool(): ToolFixture {
   const registry = new BotRegistry({ db });
   const uploads: ToolFixture["uploads"] = [];
   const sends: ToolFixture["sends"] = [];
-  const mock = {
-    async reply(wire: { content?: unknown; media?: unknown }) {
+  const mock: ConnectorNet = {
+    async reply(wire) {
       sends.push({
-        scope: String((wire as { scope?: string }).scope ?? ""),
-        target: String((wire as { target?: string }).target ?? ""),
+        scope: wire.scope,
+        target: wire.target,
         media: wire.media !== undefined,
       });
       return { providerMsgId: `PROVIDER_${sends.length}` };
     },
-    async proactive(wire: { content?: unknown; media?: unknown }) {
+    async proactive(wire) {
       sends.push({
-        scope: String((wire as { scope?: string }).scope ?? ""),
-        target: String((wire as { target?: string }).target ?? ""),
+        scope: wire.scope,
+        target: wire.target,
         media: wire.media !== undefined,
       });
       return { providerMsgId: `PROVIDER_${sends.length}` };
     },
     async recall() {},
-    async uploadMedia(wire: { kind: string; source: { kind: string } }) {
+    async uploadMedia(wire) {
       uploads.push({ mediaType: wire.kind, srcKind: wire.source.kind });
       return { handle: "FILEINFO_1" };
     },
@@ -460,7 +487,7 @@ function setupTool(): ToolFixture {
     log: createLogger("error"),
     repo,
     bots: registry,
-    transportFor: () => mock as never,
+    transportFor: () => mock,
   });
   return {
     db,

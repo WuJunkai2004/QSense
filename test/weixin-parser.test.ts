@@ -21,6 +21,7 @@ import {
   createWeixinConnector,
   normalizeWeixinInbound,
   normalizeWeixinMessage,
+  type PartialText,
   type WeixinInboundPayload,
   type WeixinMessage,
 } from "@qsense/connector-weixin";
@@ -60,15 +61,15 @@ function makePipeline(repo: Repo) {
   plugins.register(createQqConnector());
   plugins.register(createTelegramConnector());
   plugins.register(createWeixinConnector());
-  const log = {
+  const log: ConnectorLogger = {
     debug: () => undefined,
     info: () => undefined,
     warn: () => undefined,
     error: () => undefined,
     fatal: () => undefined,
     child: () => log,
-  } as unknown as ConnectorLogger;
-  return createIngestPipeline({ repo, log: log as never, plugins });
+  };
+  return createIngestPipeline({ repo, log, plugins });
 }
 
 function openDb(): { db: DB; dir: string } {
@@ -339,7 +340,7 @@ test("parser：被引图片归 quote.attachments（不混本条正文/附件）�
 });
 
 test("parser：局部引用（选区）在可得正文里定位；定位失败回落整条", () => {
-  const mk = (partial: Record<string, unknown>) =>
+  const mk = (partial: PartialText) =>
     normalizeWeixinMessage(
       BOT,
       payloadOf(
@@ -349,7 +350,7 @@ test("parser：局部引用（选区）在可得正文里定位；定位失败�
             {
               type: MessageItemType.TEXT,
               text_item: { text: "这句什么意思" },
-              ref_msg: { svr_id: "330", partial_text: partial as never },
+              ref_msg: { svr_id: "330", partial_text: partial },
             },
           ],
         }),
@@ -390,7 +391,7 @@ test("parser：非消费面 → null（机器人回声/群消息/已删除/无�
   assert.equal(
     plugin.normalize(
       BOT,
-      payloadOf(textMsg({ message_id: undefined, item_list: [{ type: 1, msg_id: 42 as unknown as string, text_item: { text: "x" } }] })),
+      payloadOf(textMsg({ message_id: undefined, item_list: [{ type: 1, msg_id: JSON.parse("42"), text_item: { text: "x" } }] })),
     ),
     null,
   );

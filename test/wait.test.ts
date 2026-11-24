@@ -11,7 +11,12 @@ import { ConnectorRegistry } from "@qsense/connector-sdk";
 import { createQqConnector } from "@qsense/connector-qq";
 import { buildServer } from "../src/server/http";
 import { createLogger } from "../src/utils/logger";
-import { WaitHub, matchFacts } from "../src/server/wait";
+import {
+  WaitHub,
+  matchFacts,
+  type WaitBodyWire,
+  type WaitResponse,
+} from "../src/server/wait";
 import { createIngestPipeline } from "../src/connectors/ingest";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
@@ -125,7 +130,7 @@ async function setupFixture(opts: { maxWaitersPerBot?: number } = {}): Promise<F
 
 function waitOf(
   fx: Fixture,
-  body: unknown,
+  body: WaitBodyWire,
   agentToken = fx.agentToken,
 ): Promise<Response> {
   return fetch(`${fx.baseUrl}/wait`, {
@@ -138,8 +143,8 @@ function waitOf(
   });
 }
 
-async function responseJson(resp: Response): Promise<Record<string, unknown>> {
-  return JSON.parse(await resp.text()) as Record<string, unknown>;
+async function responseJson<T = WaitResponse>(resp: Response): Promise<T> {
+  return JSON.parse(await resp.text());
 }
 
 test("W-1 无 token / 错 token → 401", async () => {
@@ -165,8 +170,8 @@ test("W-2 mcp_enabled=0 → 403（与 /mcp 同闸）", async () => {
     reg.setMcpEnabled(APPID, false);
     const resp = await waitOf(fx, { hold: 1 });
     assert.equal(resp.status, 403);
-    const body = await responseJson(resp);
-    assert.match(String(body["error"] ?? ""), /MCP 访问/);
+    const body = await responseJson<{ error?: string }>(resp);
+    assert.match(String(body.error ?? ""), /MCP 访问/);
   } finally {
     await fx.close();
   }
@@ -175,21 +180,23 @@ test("W-2 mcp_enabled=0 → 403（与 /mcp 同闸）", async () => {
 test("W-3 参数校验：未知字段/非法 scope/非法 hold/坏 id 数组 → 400", async () => {
   const fx = await setupFixture();
   try {
-    const cases: Array<Record<string, unknown>> = [
-      { foo: 1 },
-      { filter: { bad_key: true } },
-      { filter: { scope: "dm" } },
-      { hold: 0 },
-      { hold: 700 },
-      { hold: 1.5 },
-      { filter: { sessions: [] } },
-      { filter: { sessions: [""] } },
-      { filter: [] },
-      { filter: [{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}] }, // 11 项超限
+    // 畸形体（JSON 文本 → JSON.parse any 库签名）：服务端 zod strictObject 硬拒 → 400
+    const cases = [
+      '{"foo":1}',
+      '{"filter":{"bad_key":true}}',
+      '{"filter":{"scope":"dm"}}',
+      '{"hold":0}',
+      '{"hold":700}',
+      '{"hold":1.5}',
+      '{"filter":{"sessions":[]}}',
+      '{"filter":{"sessions":[""]}}',
+      '{"filter":[]}',
+      `{"filter":[${Array.from({ length: 11 }, () => "{}").join(",")}]}`, // 11 项超限
     ];
-    for (const body of cases) {
-      const resp = await waitOf(fx, body);
-      assert.equal(resp.status, 400, `body=${JSON.stringify(body)}`);
+    for (const raw of cases) {
+      // JSON.parse 返回 any（库签名）：直入 waitOf——服务端 zod strictObject 硬拒 → 400
+      const resp = await waitOf(fx, JSON.parse(raw));
+      assert.equal(resp.status, 400, `body=${raw}`);
     }
   } finally {
     await fx.close();
@@ -205,13 +212,13 @@ test("W-4 缺省 filter：群消息即醒，返回事件 + 未读快照", async 
     const resp = await pending;
     assert.equal(resp.status, 200);
     const body = await responseJson(resp);
-    assert.equal(body["timeout"], false);
-    const events = body["events"] as Array<Record<string, unknown>>;
+    assert.equal(body.timeout, false);
+    const events = body.events;
     assert.equal(events.length, 1);
-    assert.equal(events[0]!["id"], GROUP);
-    const unread = body["unread"] as Array<Record<string, unknown>>;
+    assert.equal(events[0]!.id, GROUP);
+    const unread = body.unread;
     assert.ok(unread.length >= 1);
-    assert.equal(unread[0]!["id"], GROUP);
+    assert.equal(unread[0]!.id, GROUP);
   } finally {
     await fx.close();
   }
@@ -225,15 +232,15 @@ test("W-5 scope=chat：群消息不醒，私聊醒", async () => {
     publish({ scope: "group", scopeId: GROUP, text: "群里说话" });
     const resp = await pending;
     const body = await responseJson(resp);
-    assert.equal(body["timeout"], true);
+    assert.equal(body.timeout, true);
 
     const pending2 = waitOf(fx, { filter: { scope: "chat" }, hold: 5 });
     publish({ scope: "chat", scopeId: PEER, text: "私聊来了" });
     const resp2 = await pending2;
     const body2 = await responseJson(resp2);
-    assert.equal(body2["timeout"], false);
-    const events = body2["events"] as Array<Record<string, unknown>>;
-    assert.equal(events[0]!["id"], PEER);
+    assert.equal(body2.timeout, false);
+    const events = body2.events;
+    assert.equal(events[0]!.id, PEER);
   } finally {
     await fx.close();
   }
@@ -250,13 +257,13 @@ test("W-6 sessions=私聊openid：私聊命中；同一作者在群聊发言不�
     // 同一作者在群里发言——群是另一个 session，不得触发
     publish({ scope: "group", scopeId: GROUP, author: PEER, text: "群里冒泡" });
     const resp = await pending;
-    assert.equal((await responseJson(resp))["timeout"], true);
+    assert.equal((await responseJson(resp)).timeout, true);
 
     const pending2 = waitOf(fx, { filter: { sessions: [PEER] }, hold: 5 });
     publish({ scope: "chat", scopeId: PEER, text: "私聊" });
     const resp2 = await pending2;
     const body2 = await responseJson(resp2);
-    assert.equal(body2["timeout"], false);
+    assert.equal(body2.timeout, false);
   } finally {
     await fx.close();
   }
@@ -270,27 +277,27 @@ test("W-7 mention 口径：atMe=true 命中；未知+含@从宽命中；未知�
     // QQ AT 事件（atMe=true）
     const p1 = waitOf(fx, { filter: { scope: "group", mention: true }, hold: 5 });
     publish({ scope: "group", scopeId: GROUP, atMe: true, mentions: 1 });
-    assert.equal((await responseJson(await p1))["timeout"], false);
+    assert.equal((await responseJson(await p1)).timeout, false);
 
     // 全量群消息 @ 归属未知但含 @（从宽）
     const p2 = waitOf(fx, { filter: { mention: true }, hold: 5 });
     publish({ scope: "group", scopeId: GROUP, mentions: 2 });
-    assert.equal((await responseJson(await p2))["timeout"], false);
+    assert.equal((await responseJson(await p2)).timeout, false);
 
     // 全量群消息无 @（不命中）
     const p3 = waitOf(fx, { filter: { mention: true }, hold: 1 });
     publish({ scope: "group", scopeId: GROUP });
-    assert.equal((await responseJson(await p3))["timeout"], true);
+    assert.equal((await responseJson(await p3)).timeout, true);
 
     // Telegram 权威否定（atMe=false，即使含 @ 实体）
     const p4 = waitOf(fx, { filter: { mention: true }, hold: 1 });
     publish({ scope: "group", scopeId: GROUP, atMe: false, mentions: 3 });
-    assert.equal((await responseJson(await p4))["timeout"], true);
+    assert.equal((await responseJson(await p4)).timeout, true);
 
     // 私聊天然命中 mention
     const p5 = waitOf(fx, { filter: { mention: true }, hold: 5 });
     publish({ scope: "chat", scopeId: PEER });
-    assert.equal((await responseJson(await p5))["timeout"], false);
+    assert.equal((await responseJson(await p5)).timeout, false);
   } finally {
     await fx.close();
   }
@@ -306,7 +313,7 @@ test("W-8 authors：指定作者任意会话命中；他人不命中", async () 
 
     const p2 = waitOf(fx, { filter: { authors: ["U_BOSS"] }, hold: 5 });
     publish({ scope: "chat", scopeId: PEER, author: "U_BOSS" });
-    assert.equal((await responseJson(await p2))["timeout"], false);
+    assert.equal((await responseJson(await p2)).timeout, false);
   } finally {
     await fx.close();
   }
@@ -322,11 +329,11 @@ test("W-9 DNF：数组 filter 跨对象 OR", async () => {
     ];
     const p1 = waitOf(fx, { filter: dnf, hold: 1 });
     publish({ scope: "group", scopeId: GROUP }); // 群里普通消息：两项都不命中
-    assert.equal((await responseJson(await p1))["timeout"], true);
+    assert.equal((await responseJson(await p1)).timeout, true);
 
     const p2 = waitOf(fx, { filter: dnf, hold: 5 });
     publish({ scope: "chat", scopeId: PEER, author: "U_X" }); // 第 2 项命中
-    assert.equal((await responseJson(await p2))["timeout"], false);
+    assert.equal((await responseJson(await p2)).timeout, false);
   } finally {
     await fx.close();
   }
@@ -338,7 +345,7 @@ test("W-10 hold 到点无命中 → timeout:true（响应可 JSON 解析）", as
     const resp = await waitOf(fx, { hold: 1 });
     assert.equal(resp.status, 200);
     const body = await responseJson(resp);
-    assert.equal(body["timeout"], true);
+    assert.equal(body.timeout, true);
     assert.deepEqual(body["events"], []);
   } finally {
     await fx.close();
@@ -381,8 +388,8 @@ test("W-12 每 bot waiter 并发上限 → 429", async () => {
     assert.equal(fx.hub.waiterCountOf(APPID), 2);
     const c = await waitOf(fx, { hold: 1 });
     assert.equal(c.status, 429);
-    const body = await responseJson(c);
-    assert.match(String(body["error"] ?? ""), /超上限/);
+    const body = await responseJson<{ error?: string }>(c);
+    assert.match(String(body.error ?? ""), /超上限/);
     // 释放挂起连接（避免 close 时不必要的 socket 残留）
     a.catch(() => {});
     b.catch(() => {});
@@ -400,10 +407,10 @@ test("W-13 防抖聚合：同会话窗口内两条消息只醒一次", async () 
     publish({ scope: "group", scopeId: GROUP, msgId: "D2", text: "2/2" });
     const resp = await pending;
     const body = await responseJson(resp);
-    assert.equal(body["timeout"], false);
-    const events = body["events"] as unknown[];
+    assert.equal(body.timeout, false);
+    const events = body.events;
     assert.equal(events.length, 1);
-    const unread = body["unread"] as Array<{ id: string; unread: number }>;
+    const unread = body.unread;
     const row = unread.find((u) => u.id === GROUP);
     assert.ok(row !== undefined && row.unread >= 2);
   } finally {
@@ -478,9 +485,9 @@ test("W-15 ingest tap 端到端：真 QQ 插件 normalize AT 事件 → hub 唤�
     pipeline({ botId: APPID, payload: atEvent });
     const resp = await pending;
     const body = await responseJson(resp);
-    assert.equal(body["timeout"], false, "AT 事件（is_you=true）应命中 mention 过滤");
-    const events = body["events"] as Array<Record<string, unknown>>;
-    assert.equal(events[0]!["id"], GROUP);
+    assert.equal(body.timeout, false, "AT 事件（is_you=true）应命中 mention 过滤");
+    const events = body.events;
+    assert.equal(events[0]!.id, GROUP);
 
     // 姊妹断言（2026-11-19 bug 回归）：全量群消息 @他人（is_you=false）不得唤醒
     // mention 过滤——旧 parser 漏读 is_you 导致 atMe=undefined 而误触发从宽兜底。

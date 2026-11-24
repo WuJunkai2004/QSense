@@ -16,12 +16,15 @@ import {
   type ConnectorStatus,
 
   type HostApi,
+  type RawInbound,
   type StatePort,
 } from "@qsense/connector-sdk";
 import {
   createTelegramApi,
   createTelegramConnector,
+  type TelegramInboundPayload,
   type TelegramUpdate,
+  type TgCallBody,
 } from "../packages/connector-telegram/src/index";
 import { createTelegramInstance } from "../packages/connector-telegram/src/instance";
 
@@ -34,13 +37,13 @@ const botUrl = (method: string): string => `${BASE}/bot${TOKEN}/${method}`;
 
 function fakeHost(): {
   host: HostApi;
-  ingested: Array<{ botId: string; payload: unknown }>;
+  ingested: Array<RawInbound>;
   statuses: ConnectorStatus[];
   state: Map<string, string>;
 } {
   // StatePort B⁺ T6 字符串化：值 = JSON 文本（实例侧 stringify/parseJsonWith 直通）
   const state = new Map<string, string>();
-  const ingested: Array<{ botId: string; payload: unknown }> = [];
+  const ingested: Array<RawInbound> = [];
   const statuses: ConnectorStatus[] = [];
   const host: HostApi = {
     log: noopLog(),
@@ -137,9 +140,9 @@ function textUpdate(updateId: number, chatId: number, text: string): TelegramUpd
   };
 }
 
-function jsonBody(log: { body?: string | Uint8Array | FormData }): Record<string, unknown> {
+function jsonBody(log: { body?: string | Uint8Array | FormData }): TgCallBody {
   assert.equal(typeof log.body, "string");
-  return JSON.parse(log.body as string) as Record<string, unknown>;
+  return JSON.parse(log.body as string);
 }
 
 // —— 轮询生命周期 ——
@@ -197,7 +200,7 @@ test("缩略图富化：photo 消息走真链路（getFile + 文件下载）摄�
   const inst = makeInstance(kit, fx);
   const start = inst.start();
   await waitFor(() => fx.ingested.length > 0, "ingested");
-  const payload = fx.ingested[0]!.payload as { mediaBlobs?: Record<string, string> };
+  const payload = fx.ingested[0]!.payload as TelegramInboundPayload;
   const blob = payload.mediaBlobs?.["thumb-fid"];
   assert.match(blob ?? "", /^data:image\/jpeg;base64,/);
   assert.equal(kit.count(`${BASE}/file/bot${TOKEN}/photos/thumb.jpg`), 1);
@@ -491,7 +494,7 @@ import { migrations } from "../src/store/migrations";
 function createLoggerCompat(): import("../src/utils/logger").Logger {
   // eslint 不涉足测试文件；直接构造结构兼容的静默 logger
   const noop = (): void => undefined;
-  const logger = {
+  const logger: import("../src/utils/logger").Logger = {
     debug: noop,
     info: noop,
     warn: noop,
@@ -499,7 +502,7 @@ function createLoggerCompat(): import("../src/utils/logger").Logger {
     fatal: noop,
     child: () => logger,
   };
-  return logger as unknown as import("../src/utils/logger").Logger;
+  return logger;
 }
 
 async function waitFor(cond: () => boolean, what: string): Promise<void> {

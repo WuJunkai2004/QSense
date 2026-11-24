@@ -17,9 +17,7 @@ import { createTelegramConnector } from "@qsense/connector-telegram";
 import { buildServer } from "../src/server/http";
 import { createLogger } from "../src/utils/logger";
 import { Sender } from "../src/sender";
-import {
-  ConnectorRuntime,
-} from "../src/connectors/runtime";
+import { ConnectorSupervisor } from "../src/connectors/runtime";
 import { createBotHost, configSnapshotOf } from "../src/connectors/host";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
@@ -183,7 +181,7 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
   if (opts.telegramBot === true) {
     plugins.register(createTelegramConnector({ log: createLogger("error") }));
   }
-  const connectors = {
+  const connectors: ConnectorSupervisor = {
     plugins,
     addBot: () => undefined,
     removeBot: () => undefined,
@@ -197,8 +195,7 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
         onStatus: () => undefined,
       }),
     configOf: (botId: string) => configSnapshotOf(repo, registry, botId),
-    statuses: () => [],
-  } as unknown as ConnectorRuntime;
+  };
 
   const app = buildServer({
     log: createLogger("debug"),
@@ -433,12 +430,12 @@ test("跨平台工具过滤（P5）：telegram bot 工具面无 quota，跨平�
     assert.match(denied.content[0]!.text, /平台 qq 的扩展工具/);
     assert.match(denied.content[0]!.text, /telegram/);
     // 未知工具仍报可用名单（本平台过滤后的）
-    const unknown = (await client.callTool({
+    const noSuchTool = (await client.callTool({
       name: "no_such_tool",
       arguments: {},
     })) as { isError?: boolean; content: Array<{ text: string }> };
-    assert.equal(unknown.isError, true);
-    assert.match(unknown.content[0]!.text, /未知工具/);
+    assert.equal(noSuchTool.isError, true);
+    assert.match(noSuchTool.content[0]!.text, /未知工具/);
   } finally {
     try {
       await client?.close();
@@ -956,7 +953,10 @@ test("M3-6 get_media：图像块返回（多模态）；非图片/越界/缺消�
     const ok = (await client.callTool({
       name: "get_media",
       arguments: { id: GROUP, msg_id: "MD1", n: 1 },
-    })) as { isError?: boolean; content: Array<Record<string, unknown>> };
+    })) as {
+      isError?: boolean;
+      content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+    };
     assert.equal(ok.isError, undefined);
     assert.equal(ok.content[0]!.type, "image", "首块为 MCP 图像块");
     assert.equal(ok.content[0]!.mimeType, "image/png");
@@ -1050,7 +1050,10 @@ test("M3-6b 内联 data:URL 附件：工具输出不回显 base64 载荷（带�
     const media = (await client.callTool({
       name: "get_media",
       arguments: { id: GROUP, msg_id: "MD2", n: 1 },
-    })) as { isError?: boolean; content: Array<Record<string, unknown>> };
+    })) as {
+      isError?: boolean;
+      content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+    };
     assert.equal(media.isError, undefined);
     assert.equal(media.content[0]!.type, "image");
     assert.equal(media.content[0]!.data, payload);
@@ -1235,13 +1238,13 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     assert.ok(miss.content[0]!.text.includes("search"));
 
     // 探测失败 → 可操作错误（未知 id：两侧无缓存且不在白名单）
-    const unknown = (await client.callTool({
+    const unknownSession = (await client.callTool({
       name: "get_new",
       arguments: { id: "NO_SUCH_SESSION" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
-    assert.equal(unknown.isError, true);
+    assert.equal(unknownSession.isError, true);
     assert.ok(
-      unknown.content[0]!.text.includes("无法定位会话"),
+      unknownSession.content[0]!.text.includes("无法定位会话"),
       "探测失败应给可操作提示",
     );
 

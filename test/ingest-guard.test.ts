@@ -13,11 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ConnectorRegistry,
+  UnifiedInboundSchema,
   type ConnectorLogger,
   type ConnectorPlugin,
   type InboundEffect,
   type NormalizedMessage,
+  type RawEnvelope,
 } from "@qsense/connector-sdk";
+import { z } from "zod";
 import { createIngestPipeline } from "../src/connectors/ingest";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
@@ -55,14 +58,16 @@ interface TestRig {
   db: DB;
   warns: string[];
   dir: string;
-  /** 投递一批（inbound 直接透传给管线，模拟插件 normalize 产出） */
-  feed: (inbound: { messages: NormalizedMessage[]; effects: InboundEffect[] } | null) => void;
+  /** 投递一批（inbound 预校验形状直接透传给管线——测试完全控制管线产出的垃圾值） */
+  feed: (inbound: InboundWire | null) => void;
 }
 
+/** 管线输入面（schema 输入类型：default 字段可省——模拟 normalize 漏字段） */
+type InboundWire = z.input<typeof UnifiedInboundSchema>;
+
 /** fake 平台插件：声明面补齐过 validatePlugin 闸门，normalize 由用例给定 */
-function makeFakePlugin(
-  normalize: (botId: string, payload: unknown) => unknown,
-): ConnectorPlugin {
+function makeFakePlugin(normalize: ConnectorPlugin["normalize"]): ConnectorPlugin {
+  const unused = new Error("测试假插件不得触发网络面");
   return {
     id: "fake",
     sdkRange: "^2.0.0",
@@ -78,10 +83,33 @@ function makeFakePlugin(
     credentialSchema: { type: "object", properties: {} },
     credentialSecrets: [],
     tools: [],
-    create: () => ({}) as never, // 声明面过闸即可；ingest 管线只用 normalize
+    // 声明面过闸即可；ingest 管线只用 normalize（网络面 stub 一律抛错）
+    create: () => ({
+      start: async () => undefined,
+      stop: () => undefined,
+      net: {
+        reply: async () => {
+          throw unused;
+        },
+        proactive: async () => {
+          throw unused;
+        },
+        recall: async () => {
+          throw unused;
+        },
+        uploadMedia: async () => {
+          throw unused;
+        },
+      },
+    }),
     normalize,
-  } as unknown as ConnectorPlugin;
+  };
 }
+
+/** 透传 normalize：信封原样当产出（管线只做守门，真值经 schema 校验） */
+const passThrough = (_botId: string, payload: RawEnvelope) =>
+  // JSON round-trip 返回 any（库签名）——契约违规的注入面在此
+  JSON.parse(JSON.stringify(payload));
 
 /** 台架：fake 插件（normalize=透传）+ 假日志（收集 warn）+ 真库 */
 function setup(): TestRig {
@@ -90,18 +118,18 @@ function setup(): TestRig {
   runMigrations(db, migrations);
   const repo = new Repo(db);
   const warns: string[] = [];
-  const log = {
+  const log: ConnectorLogger = {
     debug: () => undefined,
     info: () => undefined,
     warn: (s: string) => warns.push(s),
     error: () => undefined,
     fatal: () => undefined,
     child: () => log,
-  } as unknown as ConnectorLogger;
+  };
   const plugins = new ConnectorRegistry();
   // fake 平台插件：normalize 原样透传信封内容（测试完全控制管线产出）
-  plugins.register(makeFakePlugin((_botId, payload) => payload));
-  const pipeline = createIngestPipeline({ repo, log: log as never, plugins });
+  plugins.register(makeFakePlugin(passThrough));
+  const pipeline = createIngestPipeline({ repo, log, plugins });
   return {
     repo,
     db,
@@ -164,7 +192,7 @@ test("G-1b 可机械清洗的违规被兜底入库：records 缺失 → 清洗�
   try {
     const sloppy = msg({
       msgId: "m-sloppy",
-      records: undefined as unknown as [], // normalize 漏字段 → schema default([]) 兜底
+      records: undefined, // normalize 漏字段 → schema default([]) 兜底
     });
     rig.feed({ messages: [sloppy], effects: [] });
     assert.equal(countByMsgId(rig, "m-sloppy"), 1, "可清洗违规兜底入库（不丢消息）");
@@ -181,14 +209,15 @@ test("G-2 存储层故障不标记去重：故障排除后重投可入库（封�
   const rig = setup();
   try {
     // 模拟存储层故障（db 锁/约束等任何 saveMessage 抛错来源）
-    const boomRepo = Object.assign(Object.create(Object.getPrototypeOf(rig.repo)), rig.repo, {
-      saveMessage: () => {
+    class BoomRepo extends Repo {
+      override saveMessage(): never {
         throw new Error("db-boom");
-      },
-    }) as unknown as Repo;
+      }
+    }
+    const boomRepo = new BoomRepo(rig.db);
     const plugins = new ConnectorRegistry();
-    plugins.register(makeFakePlugin((_botId, payload) => payload));
-    const warnLog = {
+    plugins.register(makeFakePlugin(passThrough));
+    const warnLog: ConnectorLogger = {
       debug: () => undefined,
       info: () => undefined,
       warn: (s: string) => rig.warns.push(s),
@@ -198,7 +227,7 @@ test("G-2 存储层故障不标记去重：故障排除后重投可入库（封�
     };
     const pipeline = createIngestPipeline({
       repo: boomRepo,
-      log: warnLog as never,
+      log: warnLog,
       plugins,
     });
     const failing = msg({ msgId: "m-x" });
@@ -242,14 +271,15 @@ test("G-4 效应落地失败不炸管线、不影响同批消息", () => {
     const good = msg({ msgId: "m-e" });
     // repo 效应路径对坏参数天然归一化（如 enabled?1:0），自然抛错难以构造——
     // 隔离机制的测试直接 mock repo 注入抛错，不赌 repo 内部实现细节
-    const boomRepo = Object.assign(Object.create(Object.getPrototypeOf(rig.repo)), rig.repo, {
-      setGroupSwitch: () => {
+    class BoomFxRepo extends Repo {
+      override setGroupSwitch(): never {
         throw new Error("fx-boom");
-      },
-    }) as unknown as Repo;
+      }
+    }
+    const boomRepo = new BoomFxRepo(rig.db);
     const plugins = new ConnectorRegistry();
-    plugins.register(makeFakePlugin((_botId, payload) => payload));
-    const warnLog = {
+    plugins.register(makeFakePlugin(passThrough));
+    const warnLog: ConnectorLogger = {
       debug: () => undefined,
       info: () => undefined,
       warn: (s: string) => rig.warns.push(s),
@@ -259,7 +289,7 @@ test("G-4 效应落地失败不炸管线、不影响同批消息", () => {
     };
     const pipeline = createIngestPipeline({
       repo: boomRepo,
-      log: warnLog as never,
+      log: warnLog,
       plugins,
     });
     const badFx = fx({ kind: "group-opt", scopeId: "G1", allow: true });
@@ -279,19 +309,19 @@ test("G-5 管线整体绝不抛错（每条消息路径纪律）：null 信封 /
   try {
     assert.doesNotThrow(() => rig.feed(null));
     const plugins = new ConnectorRegistry();
-    const log = {
+    const log: ConnectorLogger = {
       debug: () => undefined,
       info: () => undefined,
       warn: (s: string) => rig.warns.push(s),
       error: () => undefined,
       fatal: () => undefined,
       child: () => log,
-    } as unknown as ConnectorLogger;
+    };
     const throwingPlugin = makeFakePlugin(() => {
       throw new Error("boom");
     });
     plugins.register(throwingPlugin);
-    const pipeline = createIngestPipeline({ repo: rig.repo, log: log as never, plugins });
+    const pipeline = createIngestPipeline({ repo: rig.repo, log, plugins });
     assert.doesNotThrow(() =>
       pipeline({ botId: "bot-t1", payload: { platform: "boom", x: 1 } }),
     );

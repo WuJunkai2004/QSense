@@ -46,10 +46,15 @@ function classifyLine(line: string): {
   asAssert: boolean;
 } {
   const code = stripComment(line);
+  // 引号/反引号内整段字符串剥离：日志文案或状态字面量里的英文单词（如 "unknown"）
+  // 不是类型标注（类型标注不会出现在字符串字面量里）
+  const bare = code
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/`(?:[^`\\]|\\.)*`/g, "``");
   return {
     any: /\b(?:as any|:\s*any\b|<any[,>\s]|any\[\])/.test(code),
-    // 引号内的 "unknown"（如网关状态字面量）不是类型标注
-    unknown: /\bunknown\b/.test(code.replace(/(['"])unknown\1/g, "")),
+    unknown: /\bunknown\b/.test(bare),
     megaDict:
       /\bJsonValue\b/.test(code) ||
       /Record<\s*string\s*,\s*(?:unknown|any|never)\s*>/.test(code) ||

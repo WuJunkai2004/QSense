@@ -84,7 +84,7 @@ test("httpClient.json：schema 违规 → http 档 + 字段路径（不含数据
 
 test("httpClient：外部中止 → aborted 档", async () => {
   const orig = globalThis.fetch;
-  globalThis.fetch = ((_url: unknown, init?: { signal?: AbortSignal }) =>
+  globalThis.fetch = ((_url: Parameters<typeof fetch>[0], init?: { signal?: AbortSignal }) =>
     new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () =>
         reject(new DOMException("Aborted", "AbortError")),
@@ -107,7 +107,7 @@ test("httpClient：外部中止 → aborted 档", async () => {
 
 test("httpClient：超时 → timeout 档（unref 定时器，20ms 短超时）", async () => {
   const orig = globalThis.fetch;
-  globalThis.fetch = ((_url: unknown, init?: { signal?: AbortSignal }) =>
+  globalThis.fetch = ((_url: Parameters<typeof fetch>[0], init?: { signal?: AbortSignal }) =>
     new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
     })) as typeof fetch;

@@ -22,22 +22,22 @@ import {
 import { createIngestPipeline } from "../src/connectors/ingest";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
-import { Repo } from "../src/store/repo";
+import { Repo, type MemberRow, type MsgRow } from "../src/store/repo";
 
 /** 表驱动 ingest 台架：真 QQ 插件 + 假日志（信封 {platform:"qq", type, data} 全链路） */
 function makePipeline(repo: Repo) {
   const plugins = new ConnectorRegistry();
   plugins.register(createQqConnector());
-  const log = {
+  const log: ConnectorLogger = {
     debug: () => undefined,
     info: () => undefined,
     warn: () => undefined,
     error: () => undefined,
     fatal: () => undefined,
     child: () => log,
-  } as unknown as ConnectorLogger;
-  const pipeline = createIngestPipeline({ repo, log: log as never, plugins });
-  return (type: string, data: unknown, botId = "10001"): void =>
+  };
+  const pipeline = createIngestPipeline({ repo, log, plugins });
+  return (type: string, data: QqEventData = {}, botId = "10001"): void =>
     pipeline({ botId, payload: { platform: "qq", type, data } });
 }
 
@@ -216,18 +216,18 @@ test("M2-3 官方形状群消息：规范化入库（scope 合一）、msg_id �
     assert.equal(repo.saveMessage(m!), false, "重复 msg_id 幂等拒绝");
 
     const row = db
-      .prepare(
+      .prepare<[], MsgRow>(
         "SELECT * FROM messages WHERE bot_id='10001' AND scope='group' AND scope_id='GROUP_OPENID_G1' AND msg_id='MSGID_1'",
       )
-      .get() as Record<string, unknown>;
+      .get()!;
     assert.equal(row.author_openid, "MEMBER_OPENID_A");
     assert.equal(row.text, "今晚一起<@MEMBER_OPENID_B>开会吗");
-    assert.deepEqual(JSON.parse(row.mentions_json as string), [
+    assert.deepEqual(JSON.parse(row.mentions_json!), [
       { id: "MEMBER_OPENID_B", name: "小红" },
     ]);
     assert.equal(row.ts, Date.parse("2026-10-24T20:00:00+08:00"));
     assert.equal(
-      JSON.parse(row.raw_json as string).group_openid,
+      JSON.parse(row.raw_json!).group_openid,
       "GROUP_OPENID_G1",
     );
     assert.equal(row.records_count, 0);
@@ -297,10 +297,10 @@ test("M2-5 成员名册 upsert（关系事实）+ users 昵称 last-write-wins",
     );
     // 名册：msg_count/角色随消息更新；username 列已砍（名字权威在 users）
     const row = db
-      .prepare(
+      .prepare<[], MemberRow>(
         "SELECT * FROM members WHERE bot_id='10001' AND group_openid='GROUP_OPENID_G1' AND member_openid='MEMBER_OPENID_A'",
       )
-      .get() as Record<string, unknown>;
+      .get()!;
     assert.equal(row.msg_count, 2);
     assert.equal(row.member_role, "admin");
     assert.ok(!("username" in row), "members 不再存名字列");

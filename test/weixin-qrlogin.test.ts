@@ -17,11 +17,13 @@ import {
   NetError,
   createNetKit,
   jsonResponse,
+  type QrPairPollOut,
 } from "@qsense/connector-sdk";
 import {
   WeixinError,
   createWeixinConnector,
   type QrLoginManagerDeps,
+  type QrcodeStatusResp,
   type WeixinConnectorPlugin,
 } from "@qsense/connector-weixin";
 
@@ -46,8 +48,8 @@ function fakeHost(): PluginContext {
   return {
     log: noopLog(),
     state: {
-      async get<T = unknown>() {
-        return null as T;
+      async get() {
+        return null;
       },
       async set() {},
       async delete() {},
@@ -61,19 +63,19 @@ function fakeHost(): PluginContext {
 /** 延迟应答句柄：测试在「挂起中」时推进时钟/改条件后再放行 */
 interface Deferred {
   kind: "deferred";
-  promise: Promise<Record<string, unknown>>;
-  resolve: (v: Record<string, unknown>) => void;
+  promise: Promise<QrcodeStatusResp>;
+  resolve: (v: QrcodeStatusResp) => void;
 }
 
 function deferred(): Deferred {
-  let resolve!: (v: Record<string, unknown>) => void;
-  const promise = new Promise<Record<string, unknown>>((r) => {
+  let resolve!: (v: QrcodeStatusResp) => void;
+  const promise = new Promise<QrcodeStatusResp>((r) => {
     resolve = r;
   });
   return { kind: "deferred", promise, resolve };
 }
 
-type Step = Record<string, unknown> | Error | Deferred;
+type Step = QrcodeStatusResp | Error | Deferred;
 
 /** create 应答 wire 形状（iLink get_bot_qrcode 实际消费字段） */
 interface QrCreateResp {
@@ -112,9 +114,8 @@ function qrFake(): QrFake {
       if (next instanceof Error) throw next;
       if (next === undefined) return new Promise<never>(() => undefined);
       if ("promise" in next) {
-        // Deferred.promise 声明即 Record 形状（测试自产自销，断言收口一次）
-        const payload: Record<string, unknown> = (await next.promise) as Record<string, unknown>;
-        return jsonResponse(payload);
+        // Deferred.promise 即 wire 应答形状（测试自产自销）
+        return jsonResponse(await next.promise);
       }
       return jsonResponse(next);
     },
@@ -124,7 +125,7 @@ function qrFake(): QrFake {
 
 interface QrTestPlugin extends WeixinConnectorPlugin {
   createQr(): Promise<{ task_id: string; connect_url: string; interval_s: number }>;
-  pollQr(taskId: string): Promise<Record<string, unknown>>;
+  pollQr(taskId: string): Promise<QrPairPollOut>;
 }
 
 type QrOpts = Pick<
@@ -160,7 +161,7 @@ function makePlugin(fx: QrFake, qr: Partial<QrOpts> = {}): QrTestPlugin {
         interval_s: number;
       },
     pollQr: async (taskId: string) =>
-      (await call("/login/qr/poll", { task_id: taskId })) as Record<string, unknown>,
+    (await call("/login/qr/poll", { task_id: taskId })) as QrPairPollOut,
   });
 }
 
@@ -197,7 +198,7 @@ async function waitStatus(
   for (;;) {
     let actual: string;
     try {
-      actual = String((await plugin.pollQr(taskId))["status"]);
+      actual = String((await plugin.pollQr(taskId)).status);
     } catch (e) {
       if (!(e instanceof WeixinError)) throw e;
       actual = "failed";
@@ -293,7 +294,7 @@ test("状态机：等待中 poll 回 pending；已扫码回 pending（scanned=tr
 });
 
 test("终态失败映射：binded_redirect / need_verifycode / blocked / 凭据不完整 → 带状态的可操作错误", async () => {
-  const cases: Array<[Record<string, unknown>, number, RegExp]> = [
+  const cases: Array<[QrcodeStatusResp, number, RegExp]> = [
     [{ status: "binded_redirect" }, 409, /已绑定/],
     [{ status: "need_verifycode" }, 409, /配对码/],
     [{ status: "confirmed_but_need_verifycode" }, 409, /配对码/], // beta 新态
@@ -306,7 +307,7 @@ test("终态失败映射：binded_redirect / need_verifycode / blocked / 凭据�
     const plugin = makePlugin(fx);
     const { task_id } = await plugin.createQr();
     await waitStatus(plugin, task_id, "failed");
-    await assert.rejects(() => plugin.pollQr(task_id), (e: unknown) => {
+    await assert.rejects(() => plugin.pollQr(task_id), (e) => {
       assert.ok(e instanceof WeixinError, "应为 WeixinError");
       assert.equal(e.status, status);
       assert.match(e.message, pattern);
@@ -417,7 +418,7 @@ test("create 上游失败：HTTP 5xx / 缺字段 / 网络异常 → 502 可操�
     const fx = qrFake();
     setup(fx);
     const plugin = makePlugin(fx);
-    await assert.rejects(() => plugin.createQr(), (e: unknown) => {
+    await assert.rejects(() => plugin.createQr(), (e) => {
       assert.ok(e instanceof WeixinError, "应为 WeixinError");
       assert.equal(e.status, 502);
       return true;

@@ -24,7 +24,7 @@ test("redact：敏感键整键替换为 [REDACTED]（平面字段值域）", () 
 test("pretty（缺省）：loguru 风格行、级别过滤、敏感字段剥离", () => {
   const lines: string[] = [];
   const origWrite = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: unknown) => {
+  process.stdout.write = ((chunk: Parameters<typeof process.stdout.write>[0]) => {
     lines.push(String(chunk));
     return true;
   }) as typeof process.stdout.write;
@@ -50,7 +50,7 @@ test("pretty（缺省）：loguru 风格行、级别过滤、敏感字段剥离"
 test("json 格式（LOG_FORMAT=json）：结构化 JSON 行，采集端可解析", () => {
   const lines: string[] = [];
   const origWrite = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: unknown) => {
+  process.stdout.write = ((chunk: Parameters<typeof process.stdout.write>[0]) => {
     lines.push(String(chunk));
     return true;
   }) as typeof process.stdout.write;

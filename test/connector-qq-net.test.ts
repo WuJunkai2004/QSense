@@ -12,7 +12,12 @@ import {
   type QQSendApi,
   type QqSendBody,
 } from "@qsense/connector-qq";
-import type { ProactiveWire, ReplyWire, UploadMediaWire } from "@qsense/connector-sdk";
+import type {
+  MediaSourceWire,
+  ProactiveWire,
+  ReplyWire,
+  UploadMediaWire,
+} from "@qsense/connector-sdk";
 
 const CREDS = { appid: "10001", secret: "s" };
 
@@ -195,7 +200,12 @@ test("createQqNet：wire → QQSendApi 映射（scope/目标/凭据/线格式/�
     targetId: string;
     body: QqSendBody;
   }> = [];
-  const uploads: Array<{ scope: string; targetId: string; kind: string; src: unknown }> = [];
+  const uploads: Array<{
+    scope: string;
+    targetId: string;
+    kind: string;
+    src: MediaSourceWire;
+  }> = [];
   const recalls: Array<{ scope: string; targetId: string; messageId: string }> = [];
   const net = createQqNet({
     creds: { botId: "10001", platform: "qq", credential: CREDS },

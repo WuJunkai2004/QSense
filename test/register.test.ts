@@ -73,9 +73,17 @@ async function setupServer(): Promise<Fixture> {
   };
 }
 
+/** /register 请求体（管理面 wire 形状：凭据键按平台 credentialSchema 动态） */
+interface RegisterBody {
+  platform?: string;
+  credentials?: Record<string, string>;
+  name?: string;
+  auth_level?: string;
+}
+
 async function register(
   url: string,
-  body: unknown,
+  body: RegisterBody,
   token: string = TOKEN,
 ): Promise<Response> {
   return fetch(`${url}/register`, {
@@ -136,12 +144,13 @@ test("R-3 credentials 形状硬校验：缺失/数组/空对象 → 400 可操�
   const fx = await setupServer();
   try {
     for (const bad of [
-      {},
-      { credentials: [ "appid", "secret" ] },
-      { credentials: {} },
-      { credentials: { appid: "40004", secret: 42 } }, // 非字符串值 → 硬校验拒绝（不静默剥离）
+      "{}",
+      '{"credentials":["appid","secret"]}',
+      '{"credentials":{}}',
+      '{"credentials":{"appid":"40004","secret":42}}', // 非字符串值 → 硬校验拒绝（不静默剥离）
     ]) {
-      const res = await register(fx.baseUrl, bad);
+      // 畸形体经 JSON.parse any（库签名）进入——服务端 zod 硬校验路径
+      const res = await register(fx.baseUrl, JSON.parse(bad));
       assert.equal(res.status, 400);
       const out = (await res.json()) as { error: string };
       assert.match(out.error, /credentials/);

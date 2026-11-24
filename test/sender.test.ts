@@ -75,9 +75,9 @@ function makeNetMock(
   const proactives: ProactiveWire[] = [];
   const recalls: RecallWire[] = [];
   const uploads: UploadMediaWire[] = [];
-  const fail = (r: unknown): { providerMsgId: string } => {
+  const fail = (r: Error | { providerMsgId: string }): { providerMsgId: string } => {
     if (r instanceof Error) throw r;
-    return r as { providerMsgId: string };
+    return r;
   };
   const mock: ConnectorNet = {
     reply: async (wire) => {
@@ -659,10 +659,10 @@ test("M6-13 purgeGroupAll（原 forget 迁 WebUI /ui/api）：清消息/名册/�
     assert.equal(
       (
         fx.db
-          .prepare(
+          .prepare<[], { rowid: number }>(
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH '收到'",
           )
-          .all() as unknown[]
+          .all()
       ).length,
       0,
     );

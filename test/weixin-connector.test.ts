@@ -22,6 +22,7 @@ import {
   type ConnectorPlugin,
   type ConnectorStatus,
   type PluginContext,
+  type RawInbound,
   type StatePort,
 } from "@qsense/connector-sdk";
 import { jsonResponse } from "@qsense/connector-sdk";
@@ -37,7 +38,9 @@ import {
   encryptAesEcb,
   parseAesKey,
   type GetUpdatesResp,
+  type GetUploadUrlReq,
   type WeixinApi,
+  type WeixinInboundPayload,
   type WeixinMessage,
 } from "@qsense/connector-weixin";
 import { Sender } from "../src/sender";
@@ -55,13 +58,13 @@ const AES_KEY = Buffer.from("000102030405060708090a0b0c0d0e0f", "hex");
 
 function fakeHost(): {
   host: PluginContext;
-  ingested: Array<{ botId: string; payload: unknown }>;
+  ingested: Array<RawInbound>;
   statuses: ConnectorStatus[];
   state: Map<string, string>;
 } {
   // StatePort B⁺ T6 字符串化：值 = JSON 文本（实例侧 stringify/parseJsonWith 直通）
   const state = new Map<string, string>();
-  const ingested: Array<{ botId: string; payload: unknown }> = [];
+  const ingested: Array<RawInbound> = [];
   const statuses: ConnectorStatus[] = [];
   const host: PluginContext = {
     log: noopLog(),
@@ -100,8 +103,11 @@ function noopLog(): ConnectorLogger {
 
 interface Call {
   method: string;
-  args: unknown;
+  args: CallArgs;
 }
+
+/** 假 api 记录的调用入参（按方法判别：getUpdates 游标 / sendMessage 消息 / getUploadUrl 请求） */
+type CallArgs = { buf: string } | WeixinMessage | GetUploadUrlReq | undefined;
 
 interface FakeApi {
   api: WeixinApi;
@@ -235,11 +241,11 @@ test("轮询：notifystart → 批次摄取（context_token/引用线索/图片�
   assert.deepEqual(pollsOf(fake).slice(0, 2), ["", "BUF1"]);
   // 入站载荷：platform 章 + 原始消息；第二条带引用线索与解密图（键 = item 下标）
   assert.equal(fx.ingested[0]!.botId, BOT);
-  const p1 = fx.ingested[0]!.payload as Record<string, unknown>;
+  const p1 = fx.ingested[0]!.payload as WeixinInboundPayload;
   assert.equal(p1.platform, "weixin");
-  assert.equal((p1.message as WeixinMessage).message_id, "1");
+  assert.equal(p1.message?.message_id, "1");
   assert.equal(p1.mediaBlobs, undefined);
-  const p2 = fx.ingested[1]!.payload as Record<string, unknown>;
+  const p2 = fx.ingested[1]!.payload as WeixinInboundPayload;
   assert.equal(p2.quoteText, "第一条");
   assert.deepEqual(p2.mediaBlobs, {
     "1": `data:image/png;base64,${PNG.toString("base64")}`,
@@ -685,7 +691,7 @@ test("插件声明面：caps / credentialSchema / login / 无扩展工具 → �
     poll: "/login/qr/poll",
   });
   assert.deepEqual(
-    Object.keys(plugin.credentialSchema.properties as Record<string, unknown>),
+    Object.keys(plugin.credentialSchema.properties ?? {}),
     ["appid", "token", "base_url", "owner_id"],
   );
   const router = new ToolRouter(BASE_TOOL_NAMES);
@@ -851,7 +857,7 @@ test("conformance harness：声明闸门 / 生命周期 / 原语齐备 / normali
 
 function createLoggerCompat(): import("../src/utils/logger").Logger {
   const noop = (): void => undefined;
-  const logger = {
+  const logger: import("../src/utils/logger").Logger = {
     debug: noop,
     info: noop,
     warn: noop,
@@ -859,7 +865,7 @@ function createLoggerCompat(): import("../src/utils/logger").Logger {
     fatal: noop,
     child: () => logger,
   };
-  return logger as unknown as import("../src/utils/logger").Logger;
+  return logger;
 }
 
 async function waitFor(cond: () => boolean, what: string): Promise<void> {

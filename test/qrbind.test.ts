@@ -27,9 +27,28 @@ import { makeFakeRuntime } from "./helpers/qq-runtime";
 
 const TOKEN = "qr-test-admin-token-0123456789abcdef";
 
+/** lite 上游请求体（q.qq.com 扫码绑定接口：create 交 key / poll 交 task_id） */
+interface LiteReqBody {
+  key?: string;
+  task_id?: string;
+}
+
+/** lite 上游应答（wire 形状；data 按接口给出） */
+interface LiteResp {
+  retcode?: number;
+  msg?: string;
+  data?: {
+    task_id?: string;
+    status?: number;
+    bot_appid?: string;
+    bot_encrypt_secret?: string;
+    user_openid?: string;
+  };
+}
+
 /** 假 lite 上游（FakeNetKit）：按路径分派，记录请求体。应答 = JSON 文本（Response） */
 function liteKit(
-  handler: (path: string, body: Record<string, unknown> | undefined) => object,
+  handler: (path: string, body: LiteReqBody | undefined) => LiteResp,
 ): { http: HttpClient; kit: FakeNetKit } {
   const kit = new FakeNetKit();
   kit.on("https://q.qq.com/", (req) => {
@@ -70,7 +89,7 @@ test("qrbind 单元：create/poll 状态映射（FakeNetKit，bind_key 上交且
   // 有状态假上游：create 记 key；poll 按 status 给形状
   let storedKey = "";
   let upstreamStatus = 1;
-  let sentKeys: Array<Record<string, unknown> | undefined> = [];
+  let sentKeys: Array<LiteReqBody | undefined> = [];
   const f = liteKit((path, body) => {
     sentKeys.push(body);
     if (path === "/lite/create_bind_task") {
@@ -104,8 +123,8 @@ test("qrbind 单元：create/poll 状态映射（FakeNetKit，bind_key 上交且
     "https://q.qq.com/qqbot/openclaw/connect.html?task_id=TID-1&_wv=2",
   );
   // create 时上交 32 字节 base64 密钥
-  const sent = sentKeys[0] as { key: string };
-  assert.equal(Buffer.from(sent.key, "base64").length, 32);
+  const sent = sentKeys[0]!;
+  assert.equal(Buffer.from(sent.key ?? "", "base64").length, 32);
   assert.equal(sent.key, task.bindKey);
 
   assert.deepEqual(await pollQrBind(task, f.http), { status: "pending" });

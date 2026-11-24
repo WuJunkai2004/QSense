@@ -153,7 +153,7 @@ export function createIngestPipeline(deps: IngestDeps): <P extends RawEnvelope>(
         deps.log.warn(t("ingest_save_fail", {
           platform,
           id: m.msgId,
-          reason: shortReason(e),
+          reason: shortReason(e instanceof Error ? e : new Error(String(e))),
         }));
         continue; // 未标记去重：重拉同批时本条仍有机会重新入库
       }
@@ -166,15 +166,16 @@ export function createIngestPipeline(deps: IngestDeps): <P extends RawEnvelope>(
         deps.log.warn(t("ingest_effect_fail", {
           platform,
           kind: fx.kind,
-          reason: shortReason(e),
+          reason: shortReason(e instanceof Error ? e : new Error(String(e))),
         }));
       }
     }
   };
 }
 
-/** 告警用错误摘要：截断防日志膨胀；不含消息正文（log_content 纪律） */
-function shortReason(e: unknown): string {
-  const s = e instanceof Error ? e.message : String(e);
+/** 告警用错误摘要：截断防日志膨胀；不含消息正文（log_content 纪律）。
+ * catch 点先 instanceof 窄化后传入（types.md 错误边界约定）。 */
+function shortReason(e: Error): string {
+  const s = e.message;
   return s.length > 200 ? `${s.slice(0, 200)}…` : s;
 }

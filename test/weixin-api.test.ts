@@ -33,7 +33,7 @@ interface Mock {
   close(): Promise<void>;
 }
 
-function json(res: ServerResponse, obj: unknown, status = 200): void {
+function json<T>(res: ServerResponse, obj: T, status = 200): void {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
   res.setHeader("Connection", "close");
@@ -172,12 +172,12 @@ test("sendmessage：message_id 无损回执；ret / errcode 非零 → biz 错�
     );
     await assert.rejects(
       () => api.sendMessage({ to_user_id: "u", from_user_id: "", client_id: "c", message_type: 2, item_list: [] }),
-      (e: unknown) => e instanceof WeixinApiError && e.kind === "biz" && e.code === 500001,
+      (e) => e instanceof WeixinApiError && e.kind === "biz" && e.code === 500001,
     );
     mock.routes.set("/ilink/bot/sendmessage", (_req, res) => raw(res, '{"errcode":-14,"errmsg":"stale"}'));
     await assert.rejects(
       () => api.sendMessage({ to_user_id: "u", from_user_id: "", client_id: "c", message_type: 2, item_list: [] }),
-      (e: unknown) => e instanceof WeixinApiError && e.kind === "biz" && e.code === -14,
+      (e) => e instanceof WeixinApiError && e.kind === "biz" && e.code === -14,
     );
   } finally {
     await mock.close();
@@ -191,20 +191,20 @@ test("错误分档：HTTP 401 → http；连接被拒 → network；挂起不回
     mock.routes.set("/ilink/bot/msg/notifystart", (_req, res) => json(res, { ret: 401 }, 401));
     await assert.rejects(
       () => api.notifyStart(),
-      (e: unknown) => e instanceof WeixinApiError && e.kind === "http" && e.status === 401,
+      (e) => e instanceof WeixinApiError && e.kind === "http" && e.status === 401,
     );
     // 挂起不回：客户端超时
     mock.routes.set("/ilink/bot/msg/notifystart", () => undefined);
     await assert.rejects(
       () => api.notifyStart({ timeoutMs: 80 }),
-      (e: unknown) => e instanceof WeixinApiError && e.kind === "timeout",
+      (e) => e instanceof WeixinApiError && e.kind === "timeout",
     );
     // 外部 signal 中止
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 30);
     await assert.rejects(
       () => api.notifyStart({ signal: ac.signal, timeoutMs: 5000 }),
-      (e: unknown) => e instanceof WeixinApiError && e.kind === "aborted",
+      (e) => e instanceof WeixinApiError && e.kind === "aborted",
     );
   } finally {
     await mock.close();
@@ -212,7 +212,7 @@ test("错误分档：HTTP 401 → http；连接被拒 → network；挂起不回
   const api = createWeixinApi(httpClient(), TOKEN, await deadBaseUrl());
   await assert.rejects(
     () => api.notifyStart({ timeoutMs: 5000 }),
-    (e: unknown) => e instanceof WeixinApiError && e.kind === "network",
+    (e) => e instanceof WeixinApiError && e.kind === "network",
   );
 });
 
@@ -255,7 +255,7 @@ test("notifystart / notifystop / getuploadurl：路径与请求体；业务码�
     mock.routes.set("/ilink/bot/msg/notifystart", (_req, res) => json(res, { ret: -1, errmsg: "bad" }));
     await assert.rejects(
       () => api.notifyStart(),
-      (e: unknown) => e instanceof WeixinApiError && e.kind === "biz" && e.code === -1,
+      (e) => e instanceof WeixinApiError && e.kind === "biz" && e.code === -1,
     );
     // 应答体业务码缺省/为 0 视为成功；空应答体也容忍
     mock.routes.set("/ilink/bot/msg/notifystart", (_req, res) => raw(res, ""));

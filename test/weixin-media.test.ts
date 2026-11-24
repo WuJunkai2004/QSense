@@ -38,6 +38,7 @@ import {
   sniffOutbound,
   uploadMediaToCdn,
   type CdnUploadResult,
+  type GetUploadUrlReq,
   type WeixinApi,
 } from "@qsense/connector-weixin";
 
@@ -69,17 +70,17 @@ function fakeHttp(handler: FetchHandler): { http: HttpClient; kit: FakeNetKit } 
 }
 
 interface FakeApi extends WeixinApi {
-  uploadReqs: Array<Record<string, unknown>>;
+  uploadReqs: GetUploadUrlReq[];
 }
 
 /** 假 iLink api：只关心 getuploadurl 入参 */
 function fakeApi(getUploadUrl?: WeixinApi["getUploadUrl"]): FakeApi {
-  const uploadReqs: Array<Record<string, unknown>> = [];
+  const uploadReqs: GetUploadUrlReq[] = [];
   return {
     baseUrl: "https://ilinkai.weixin.qq.com",
     uploadReqs,
     async getUploadUrl(req) {
-      uploadReqs.push(req as unknown as Record<string, unknown>);
+      uploadReqs.push(req);
       return getUploadUrl !== undefined
         ? getUploadUrl(req)
         : { upload_full_url: "https://cdn.example/up?sig=1" };

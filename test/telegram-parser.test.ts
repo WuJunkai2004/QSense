@@ -21,6 +21,8 @@ import { createQqConnector } from "@qsense/connector-qq";
 import {
   createTelegramConnector,
   type TelegramInboundPayload,
+  type TelegramMessage,
+  type TelegramUpdate,
 } from "@qsense/connector-telegram";
 import { createIngestPipeline } from "../src/connectors/ingest";
 import { Repo } from "../src/store/repo";
@@ -32,19 +34,19 @@ function makePipeline(repo: Repo, withQq = false) {
   const plugins = new ConnectorRegistry();
   plugins.register(createTelegramConnector());
   if (withQq) plugins.register(createQqConnector());
-  const log = {
+  const log: ConnectorLogger = {
     debug: () => undefined,
     info: () => undefined,
     warn: () => undefined,
     error: () => undefined,
     fatal: () => undefined,
     child: () => log,
-  } as unknown as ConnectorLogger;
-  return createIngestPipeline({ repo, log: log as never, plugins });
+  };
+  return createIngestPipeline({ repo, log, plugins });
 }
 
-function payloadOf(update: Record<string, unknown>): TelegramInboundPayload {
-  return { platform: "telegram", update: update as never };
+function payloadOf(update: TelegramUpdate): TelegramInboundPayload {
+  return { platform: "telegram", update };
 }
 
 // —— 声明面 normalize（T4.1 收口：不再直呼 parser 内部函数） ——
@@ -52,7 +54,7 @@ function payloadOf(update: Record<string, unknown>): TelegramInboundPayload {
 const PLUGIN = createTelegramConnector();
 
 /** Update → NormalizedMessage（经 plugin.normalize 声明面；null 透传） */
-function normalizeOf(update: Record<string, unknown>): NormalizedMessage | null {
+function normalizeOf(update: TelegramUpdate): NormalizedMessage | null {
   return PLUGIN.normalize("TG", payloadOf(update))?.messages[0] ?? null;
 }
 
@@ -179,7 +181,7 @@ test("parser：私聊 → scope chat；handler 私聊落 C2C 开关（opt-in 等
 });
 
 test("parser：服务消息 → 括注行（text 留空）；贴纸 → [贴纸] emoji", () => {
-  const mk = (extra: Record<string, unknown>) =>
+  const mk = (extra: Partial<TelegramMessage>) =>
     normalizeOf({
       update_id: 9,
       message: {

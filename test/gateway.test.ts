@@ -20,7 +20,7 @@ import {
   type GatewayStatus,
 } from "../src/connectors/runtime";
 import { createIngestPipeline } from "../src/connectors/ingest";
-import type { NormalizedMessage } from "@qsense/connector-sdk";
+import type { InboundEffect, NormalizedMessage } from "@qsense/connector-sdk";
 import { BotRegistry } from "../src/bots";
 import { createLogger } from "../src/utils/logger";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
@@ -54,7 +54,7 @@ interface Ctx {
   db: DB;
   gw: MockGateway;
   registry: BotRegistry;
-  captured: Array<{ messages: NormalizedMessage[]; effects: unknown[] }>;
+  captured: Array<{ messages: NormalizedMessage[]; effects: InboundEffect[] }>;
   statuses: GatewayStatus[];
   runtime: ConnectorRuntime;
   cleared: () => number;
@@ -80,7 +80,7 @@ async function setup(
     registry.setReceiveEnabled("10001", false); // 模拟 WebUI 已禁用后再启动
   }
   const repo = new Repo(db);
-  const captured: Array<{ messages: NormalizedMessage[]; effects: unknown[] }> = [];
+  const captured: Array<{ messages: NormalizedMessage[]; effects: InboundEffect[] }> = [];
   const statuses: GatewayStatus[] = [];
   let clearCount = 0;
   // /gateway 控制请求脚本化（原 getGatewayUrl 测试缝的形态收口）：网关地址指向本地 mock

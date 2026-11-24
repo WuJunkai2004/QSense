@@ -44,8 +44,9 @@ export class MockGateway {
   private sessionId = "";
   private identifyCount = 0;
   private ws: WebSocket | null = null;
-  /** 断线期间排队的事件（Resume 后按序补发——官方语义） */
-  private readonly pending: Array<{ t: string; d: unknown }> = [];
+  /** 断线期间排队的事件（Resume 后按序补发——官方语义）。d = JSON 文本
+   * （派发事件体由调用方构造，排队时一次性序列化，补发时原样嵌入帧） */
+  private readonly pending: Array<{ t: string; d: string }> = [];
   private readonly server: Server;
   private readonly wss: WebSocketServer;
   private portValue = 0;
@@ -73,12 +74,12 @@ export class MockGateway {
     return this.sessionId;
   }
 
-  /** 下发 dispatch 事件；无活跃连接时排队，等待 Resume 后补发 */
-  sendDispatch(t: string, d: unknown): void {
+  /** 下发 dispatch 事件（d 由调用方构造，原样 JSON 化）；无活跃连接时排队，等待 Resume 后补发 */
+  sendDispatch<D>(t: string, d: D): void {
     if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
       this.send(this.ws, { op: OP.DISPATCH, t, s: ++this.s, d });
     } else {
-      this.pending.push({ t, d });
+      this.pending.push({ t, d: JSON.stringify(d) });
     }
   }
 
@@ -121,7 +122,7 @@ export class MockGateway {
     switch (payload.op) {
       case OP.IDENTIFY: {
         this.identifyCount += 1;
-        const d = payload.d as { token?: string; intents?: number } | undefined;
+        const d = payload.d as IdentifyFrame | undefined;
         this.identifies.push({
           token: d?.token ?? "",
           intents: d?.intents ?? 0,
@@ -145,9 +146,7 @@ export class MockGateway {
         break;
       }
       case OP.RESUME: {
-        const d = payload.d as
-          | { token?: string; session_id?: string; seq?: number | null }
-          | undefined;
+        const d = payload.d as ResumeFrame | undefined;
         this.resumes.push({
           token: d?.token ?? "",
           session_id: d?.session_id ?? "",
@@ -155,7 +154,7 @@ export class MockGateway {
         });
         this.s = d?.seq ?? 0;
         // 官方语义：按 seq 补发遗漏事件，最后下发 RESUMED
-        for (const ev of this.pending.splice(0)) this.sendDispatch(ev.t, ev.d);
+        for (const ev of this.pending.splice(0)) this.sendRawDispatch(ev);
         this.send(ws, {
           op: OP.DISPATCH,
           t: "RESUMED",
@@ -172,14 +171,49 @@ export class MockGateway {
     }
   }
 
-  private send(ws: WebSocket, payload: Payload): void {
+  /** 补发排队事件：d 已是 JSON 文本，原样嵌入帧（避免二次序列化变形） */
+  private sendRawDispatch(ev: { t: string; d: string }): void {
+    if (this.ws === null) return;
+    this.sendText(
+      this.ws,
+      `{"op":${OP.DISPATCH},"t":${JSON.stringify(ev.t)},"s":${++this.s},"d":${ev.d}}`,
+    );
+  }
+
+  private send<D = undefined>(ws: WebSocket, payload: ServerPayload<D>): void {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  }
+
+  private sendText(ws: WebSocket, text: string): void {
+    if (ws.readyState === WebSocket.OPEN) ws.send(text);
   }
 }
 
+/** 下发帧（服务端 → 客户端）：d 由调用方构造、原样 JSON 化 */
+interface ServerPayload<D> {
+  op: number;
+  d?: D;
+  t?: string;
+  s?: number;
+}
+
+/** 客户端上行帧数据面（Identify / Resume / 心跳三个已知形状；JSON.parse 后 as 收口） */
+interface IdentifyFrame {
+  token?: string;
+  intents?: number;
+}
+
+interface ResumeFrame {
+  token?: string;
+  session_id?: string;
+  seq?: number | null;
+}
+
+type ClientFrameData = IdentifyFrame | ResumeFrame | number;
+
 interface Payload {
   op: number;
-  d?: unknown;
+  d?: ClientFrameData;
   t?: string;
   s?: number;
 }
