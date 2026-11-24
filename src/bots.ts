@@ -21,8 +21,6 @@ import type Database from "better-sqlite3";
 import type { AuthLevel } from "./utils/config";
 import type { DB } from "./store/db";
 
-type Stmt<P extends unknown[] = unknown[]> = Database.Statement<P>;
-
 export interface BotRegistryDeps {
   db: DB;
   /**
@@ -66,7 +64,7 @@ interface BotRow {
 }
 
 /** 认证等级白名单校验：非法值报可操作错误 */
-export function parseAuthLevel(raw: unknown): AuthLevel {
+export function parseAuthLevel(raw: string): AuthLevel {
   if (raw === "certified" || raw === "uncertified") return raw;
   throw new BotRegistryError(
     "auth_level 无效：只接受 certified（已认证，主动消息 60 条/分钟）或 uncertified（未认证，30 条/分钟）。",
@@ -75,7 +73,8 @@ export function parseAuthLevel(raw: unknown): AuthLevel {
 
 function parseAllowGroups(raw: string): string[] {
   try {
-    const parsed: unknown = JSON.parse(raw);
+    // JSON.parse 返回 any（库签名）：Array.isArray 现场窄化后逐项收字符串
+    const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((g): g is string => typeof g === "string" && g !== "");
   } catch {
@@ -90,7 +89,8 @@ function parseAuthLevelColumn(raw: string): AuthLevel {
 /** 凭据 JSON 解析：只保留字符串值键；坏数据按空凭据处理（读路径安全默认） */
 function parseCredentials(raw: string): Record<string, string> {
   try {
-    const parsed: unknown = JSON.parse(raw);
+    // JSON.parse 返回 any（库签名）：对象形状现场窄化，逐键 typeof 收字符串
+    const parsed = JSON.parse(raw);
     if (
       parsed === null ||
       typeof parsed !== "object" ||
@@ -99,7 +99,7 @@ function parseCredentials(raw: string): Record<string, string> {
       return {};
     }
     const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    for (const [k, v] of Object.entries(parsed)) {
       if (typeof v === "string") out[k] = v;
     }
     return out;
@@ -132,12 +132,12 @@ export class BotRegistry {
    * allowGroupsOf=发送门禁+侧别探测兜底；agentTokenOf=资产票据签发/校验；authLevelOf=quota。
    * 管理面写操作（add/remove/rename/setAllowGroups/setAuthLevel/rotate）低频，保持 inline prepare。
    */
-  private readonly appIdByTokenStmt: Stmt<[string]>;
-  private readonly allowGroupsStmt: Stmt<[string]>;
-  private readonly agentTokenStmt: Stmt<[string]>;
-  private readonly authLevelStmt: Stmt<[string]>;
-  private readonly receiveEnabledStmt: Stmt<[string]>;
-  private readonly mcpEnabledStmt: Stmt<[string]>;
+  private readonly appIdByTokenStmt: Database.Statement<[string]>;
+  private readonly allowGroupsStmt: Database.Statement<[string]>;
+  private readonly agentTokenStmt: Database.Statement<[string]>;
+  private readonly authLevelStmt: Database.Statement<[string]>;
+  private readonly receiveEnabledStmt: Database.Statement<[string]>;
+  private readonly mcpEnabledStmt: Database.Statement<[string]>;
 
   constructor(private readonly deps: BotRegistryDeps) {
     this.verify = deps.verify ?? (async () => {});

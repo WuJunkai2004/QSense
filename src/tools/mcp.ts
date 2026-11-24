@@ -60,7 +60,14 @@ export function bearerOk(
   return timingSafeEqual(a, b);
 }
 
-function json(res: ServerResponse, status: number, body: unknown): void {
+/** JSON-RPC 错误应答体（本文件唯一 json() 消费形状） */
+interface RpcErrorBody {
+  jsonrpc: "2.0";
+  error: { code: number; message: string };
+  id: null;
+}
+
+function json(res: ServerResponse, status: number, body: RpcErrorBody): void {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
 }
@@ -78,13 +85,19 @@ function rpcError(
   });
 }
 
+/** MCP 传输层入口的请求体形参类型（库签名提取——协议面任意 JSON-RPC 消息
+ * 原样透传给 transport，本层不解构；types.md 反模式 #6 的 Parameters<> 用法） */
+type McpRequestBody = Parameters<
+  StreamableHTTPServerTransport["handleRequest"]
+>[2];
+
 /** 组装 /mcp 路由处理器：签名 (rawReq, rawRes, parsedBody, botId)。botId 由 HTTP 层按 Bearer→bots 表反查得出。 */
 export function createMcpHandler(
   deps: McpDeps,
 ): (
   req: IncomingMessage,
   res: ServerResponse,
-  body?: unknown,
+  body?: McpRequestBody,
   botId?: string,
 ) => Promise<void> {
   const { log, repo, version } = deps;
@@ -250,7 +263,7 @@ export function createMcpHandler(
   return async function handleMcp(
     req,
     res,
-    body?: unknown,
+    body?: McpRequestBody,
     botId?: string,
   ): Promise<void> {
     if (botId === undefined) {

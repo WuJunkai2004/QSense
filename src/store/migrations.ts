@@ -385,7 +385,9 @@ export const migrations: Migration[] = [
             type:
               scope === "group" ? "GROUP_MESSAGE_CREATE" : "C2C_MESSAGE_CREATE",
             botId: row.bot_id,
-            data: JSON.parse(row.raw_json) as Record<string, unknown>,
+            // JSON.parse 返回 any（库签名）：即入 normalizeQqMessage，QqEventData
+            // 形状由 wire schema safeParse 把关（坏档 try/catch 退化平移）
+            data: JSON.parse(row.raw_json),
           });
         } catch {
           m = null; // 坏 raw 不炸迁移：退化为直接平移旧行
@@ -453,14 +455,14 @@ export const migrations: Migration[] = [
       };
 
       const groupRows = db
-        .prepare("SELECT rowid AS rid, * FROM messages_v7")
-        .all() as unknown as V7Row[];
+        .prepare<[], V7Row>("SELECT rowid AS rid, * FROM messages_v7")
+        .all();
       for (const row of groupRows) {
         migrateRow(row, "group", row.group_openid ?? "");
       }
       const chatRows = db
-        .prepare("SELECT rowid AS rid, * FROM c2c_messages_v7")
-        .all() as unknown as V7Row[];
+        .prepare<[], V7Row>("SELECT rowid AS rid, * FROM c2c_messages_v7")
+        .all();
       for (const row of chatRows) {
         migrateRow(row, "chat", row.user_openid ?? "");
       }
