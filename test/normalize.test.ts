@@ -14,8 +14,10 @@ import {
 import {
   createQqConnector,
   decomposeElements,
+  normalizeQqEnvelope,
   normalizeQqMessage as normalizeMessage,
   type QqEvent,
+  type QqEventData,
 } from "@qsense/connector-qq";
 import { createIngestPipeline } from "../src/connectors/ingest";
 import { openDatabase, runMigrations, type DB } from "../src/store/db";
@@ -60,7 +62,7 @@ function cleanup(dir: string, db: DB): void {
   }
 }
 
-const ev = (type: string, data: unknown, botId = "10001"): QqEvent => ({
+const ev = (type: string, data: QqEventData = {}, botId = "10001"): QqEvent => ({
   botId,
   type,
   data,
@@ -417,10 +419,18 @@ test("M2-9 元素消息分解落库：记录标记+records；畸形容器不炸"
     assert.equal(m!.records[0].text, "记录内容");
     repo.saveMessage(m!);
 
-    // 畸形事件：缺 id / 缺 group_openid / data 非对象 → 安全丢弃
+    // 畸形事件：缺 id / 缺 group_openid → 安全丢弃；data 非对象在信封边界兜底
+    // （QqEnvelopeSchema data .catch(undefined)，运行时垃圾载荷走 normalizeQqEnvelope 验证）
     handleGatewayEvent(repo, ev("GROUP_MESSAGE_CREATE", { content: "no id" }));
     handleGatewayEvent(repo, ev("GROUP_MESSAGE_CREATE", { id: "X" }));
-    handleGatewayEvent(repo, ev("GROUP_MESSAGE_CREATE", "string-data"));
+    assert.equal(
+      normalizeQqEnvelope("10001", {
+        platform: "qq",
+        type: "GROUP_MESSAGE_CREATE",
+        data: "string-data",
+      }),
+      null,
+    );
     handleGatewayEvent(
       repo,
       ev("UNKNOWN_EVENT", { id: "Y", group_openid: "G9" }),

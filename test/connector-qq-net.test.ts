@@ -10,6 +10,7 @@ import {
   qqSendError,
   scopeToApi,
   type QQSendApi,
+  type QqSendBody,
 } from "@qsense/connector-qq";
 import type { ProactiveWire, ReplyWire, UploadMediaWire } from "@qsense/connector-sdk";
 
@@ -192,7 +193,7 @@ test("createQqNet：wire → QQSendApi 映射（scope/目标/凭据/线格式/�
   const calls: Array<{
     scope: string;
     targetId: string;
-    body: Record<string, unknown>;
+    body: QqSendBody;
   }> = [];
   const uploads: Array<{ scope: string; targetId: string; kind: string; src: unknown }> = [];
   const recalls: Array<{ scope: string; targetId: string; messageId: string }> = [];
