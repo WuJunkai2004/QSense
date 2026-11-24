@@ -18,7 +18,7 @@
 // 凭据经宿主中介（core 拦截 completed → verifyCredential → 注册）绝不下发浏览器。
 
 import { randomUUID } from "node:crypto";
-import type { ConnectorLogger } from "@qsense/connector-sdk";
+import type { ConnectorLogger, NetKit } from "@qsense/connector-sdk";
 import { LONG_POLL_TIMEOUT_MS, WeixinApiError, type WeixinApi } from "./api";
 import { WeixinError } from "./errors";
 import { tt } from "./texts";
@@ -70,6 +70,8 @@ export interface QrLoginManagerDeps {
   /** 无 token 客户端（扫码流程固定从缺省入口起步，按 IDC 重定向切换） */
   api: WeixinApi;
   log: ConnectorLogger;
+  /** NetKit（时钟 now()/可中断休眠；测试注入 FakeNetKit 得到手动时钟） */
+  net: NetKit;
   /** 任务存活上限（毫秒）：缺省 8 分钟（参照实现的登录等待上限 480s） */
   ttlMs?: number;
   pollTimeoutMs?: number;
@@ -77,9 +79,6 @@ export interface QrLoginManagerDeps {
   retryDelayMs?: number;
   /** 状态查询连续可重试失败的上限（缺省 8 次 → failed） */
   maxFailures?: number;
-  /** 时钟/id 注入（测试用） */
-  now?: () => number;
-  newId?: () => string;
 }
 
 export interface QrLoginManager {
@@ -104,20 +103,6 @@ function failed(reason: string, httpStatus: number): QrLoginState {
   return { status: "failed", reason, httpStatus };
 }
 
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(t);
-        resolve();
-      },
-      { once: true },
-    );
-  });
-}
-
 /** confirmed 应答 → 凭据；缺机器人 id 或 token 视为不完整 */
 export function credentialOfConfirmed(resp: QrcodeStatusResp): QrLoginState {
   const botIdRaw = resp.ilink_bot_id?.trim() ?? "";
@@ -138,8 +123,7 @@ export function createQrLoginManager(deps: QrLoginManagerDeps): QrLoginManager {
   const pollTimeout = deps.pollTimeoutMs ?? LONG_POLL_TIMEOUT_MS;
   const retryDelay = deps.retryDelayMs ?? 2000;
   const maxFailures = deps.maxFailures ?? 8;
-  const now = deps.now ?? (() => Date.now());
-  const newId = deps.newId ?? randomUUID;
+  const now = (): number => deps.net.now();
   const log = deps.log.child("qr");
   const tasks = new Map<string, Task>();
 
@@ -216,7 +200,11 @@ export function createQrLoginManager(deps: QrLoginManagerDeps): QrLoginManager {
             task.state = failed(tt("wx_qr_poll_failed", { reason }), 502);
             return;
           }
-          await sleep(retryDelay, task.controller.signal);
+          try {
+            await deps.net.sleep(retryDelay, task.controller.signal);
+          } catch {
+            return; // 停服中止（net.sleep 拒绝 NetError aborted）
+          }
           continue;
         }
         task.state = failed(reason, 502);
@@ -245,7 +233,7 @@ export function createQrLoginManager(deps: QrLoginManagerDeps): QrLoginManager {
         throw new WeixinError(tt("wx_qr_invalid_resp"), 502);
       }
       const task: Task = {
-        id: newId(),
+        id: randomUUID(),
         qrcode,
         baseUrl: ILINK_BASE_URL,
         createdAt: now(),

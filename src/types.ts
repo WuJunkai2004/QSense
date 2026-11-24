@@ -5,6 +5,13 @@
 // 协议说明书，协议操作在此自研实现。只声明本项目消费的字段；未知键透传不解读。
 // 参照包由安装器 @tencent-weixin/openclaw-weixin-cli 按 COMPAT_MATRIX 装入
 // （latest → 2.4.10），本文件即对应该版本。
+//
+// B⁺ T4.2：应答面 wire schema（zod，looseObject 透传未知键）——api 层出参即校验过的
+// 类型化数据。纪律与 telegram 同：只守结构不守词表（未知 status/枚举宽容接收，
+// 词表判定归调用侧），防协议漂移把轮询卡死在网关。递归形状（ref_msg ↔ message_item）
+// 手写接口做显式标注——schema 是运行时权威，接口仅编译期锚点。
+
+import { z } from "zod";
 
 /** iLink API 缺省入口（扫码流程固定从这里起步；账号实际入口以 confirmed 的 baseurl 为准） */
 export const ILINK_BASE_URL = "https://ilinkai.weixin.qq.com";
@@ -268,3 +275,154 @@ export interface QrcodeStatusResp {
   /** IDC 重定向主机（scaned_but_redirect 时切换轮询入口） */
   redirect_host?: string;
 }
+
+// ---------------------------------------------------------------------------
+// wire schema（B⁺ T4.2）：与上方接口族一一对应；全部宽松（字段 optional +
+// looseObject 透传），只守结构。递归接口（MessageItem/WeixinMessage）无法由
+// zod 推断，schema 用 z.ZodType<接口> 显式标注。
+// ---------------------------------------------------------------------------
+
+export const CdnMediaSchema = z.looseObject({
+  encrypt_query_param: z.string().optional(),
+  aes_key: z.string().optional(),
+  encrypt_type: z.number().optional(),
+  full_url: z.string().optional(),
+});
+
+export const TextItemSchema = z.looseObject({ text: z.string().optional() });
+
+export const ImageItemSchema = z.looseObject({
+  media: CdnMediaSchema.optional(),
+  thumb_media: CdnMediaSchema.optional(),
+  aeskey: z.string().optional(),
+  url: z.string().optional(),
+  mid_size: z.number().optional(),
+  thumb_size: z.number().optional(),
+  thumb_height: z.number().optional(),
+  thumb_width: z.number().optional(),
+  hd_size: z.number().optional(),
+});
+
+export const VoiceItemSchema = z.looseObject({
+  media: CdnMediaSchema.optional(),
+  encode_type: z.number().optional(),
+  bits_per_sample: z.number().optional(),
+  sample_rate: z.number().optional(),
+  playtime: z.number().optional(),
+  text: z.string().optional(),
+});
+
+export const FileItemSchema = z.looseObject({
+  media: CdnMediaSchema.optional(),
+  file_name: z.string().optional(),
+  md5: z.string().optional(),
+  len: z.string().optional(),
+});
+
+export const VideoItemSchema = z.looseObject({
+  media: CdnMediaSchema.optional(),
+  video_size: z.number().optional(),
+  play_length: z.number().optional(),
+  video_md5: z.string().optional(),
+  thumb_media: CdnMediaSchema.optional(),
+  thumb_size: z.number().optional(),
+  thumb_height: z.number().optional(),
+  thumb_width: z.number().optional(),
+});
+
+export const MessageItemSchema: z.ZodType<MessageItem> = z.lazy(() =>
+  z.looseObject({
+    type: z.number().optional(),
+    create_time_ms: z.number().optional(),
+    update_time_ms: z.number().optional(),
+    is_completed: z.boolean().optional(),
+    msg_id: z.string().optional(),
+    ref_msg: z.lazy(() => RefMessageSchema).optional(),
+    text_item: TextItemSchema.optional(),
+    image_item: ImageItemSchema.optional(),
+    voice_item: VoiceItemSchema.optional(),
+    file_item: FileItemSchema.optional(),
+    video_item: VideoItemSchema.optional(),
+  }),
+);
+
+export const RefMessageSchema: z.ZodType<RefMessage> = z.lazy(() =>
+  z.looseObject({
+    message_item: MessageItemSchema.optional(),
+    title: z.string().optional(),
+    svr_id: z.string().optional(),
+    partial_text: z.looseObject({
+      start: z.string().optional(),
+      end: z.string().optional(),
+      startindex: z.number().optional(),
+      endindex: z.number().optional(),
+      quotemd5: z.string().optional(),
+    }).optional(),
+  }),
+);
+
+export const WeixinMessageSchema: z.ZodType<WeixinMessage> = z.lazy(() =>
+  z.looseObject({
+    seq: z.number().optional(),
+    message_id: z.string().optional(),
+    from_user_id: z.string().optional(),
+    to_user_id: z.string().optional(),
+    client_id: z.string().optional(),
+    create_time_ms: z.number().optional(),
+    update_time_ms: z.number().optional(),
+    delete_time_ms: z.number().optional(),
+    session_id: z.string().optional(),
+    group_id: z.string().optional(),
+    message_type: z.number().optional(),
+    message_state: z.number().optional(),
+    item_list: z.array(MessageItemSchema).optional(),
+    context_token: z.string().optional(),
+    run_id: z.string().optional(),
+  }),
+);
+
+export const GetUpdatesRespSchema = z.looseObject({
+  ret: z.number().optional(),
+  errcode: z.number().optional(),
+  errmsg: z.string().optional(),
+  msgs: z.array(WeixinMessageSchema).optional(),
+  get_updates_buf: z.string().optional(),
+  longpolling_timeout_ms: z.number().optional(),
+});
+
+export const SendMessageRespSchema = z.looseObject({
+  message_id: z.string().optional(),
+  ret: z.number().optional(),
+  errcode: z.number().optional(),
+  errmsg: z.string().optional(),
+});
+
+export const GetUploadUrlRespSchema = z.looseObject({
+  upload_param: z.string().optional(),
+  thumb_upload_param: z.string().optional(),
+  upload_full_url: z.string().optional(),
+  // 业务码随应答体下发（非零即 biz 错，与 SendMessageResp 同形）
+  ret: z.number().optional(),
+  errcode: z.number().optional(),
+  errmsg: z.string().optional(),
+});
+
+export const NotifyRespSchema = z.looseObject({
+  ret: z.number().optional(),
+  errcode: z.number().optional(),
+  errmsg: z.string().optional(),
+});
+
+export const BotQrcodeRespSchema = z.looseObject({
+  qrcode: z.string(),
+  qrcode_img_content: z.string(),
+});
+
+export const QrcodeStatusRespSchema = z.looseObject({
+  status: z.string(),
+  bot_token: z.string().optional(),
+  ilink_bot_id: z.string().optional(),
+  baseurl: z.string().optional(),
+  ilink_user_id: z.string().optional(),
+  redirect_host: z.string().optional(),
+});

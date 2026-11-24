@@ -21,13 +21,11 @@ export {
   parseWeixinJson,
   type WeixinApi,
   type WeixinApiKind,
-  type WeixinApiOverrides,
   type RequestOptions,
 } from "./api";
 export {
   createWeixinInstance,
   type WeixinInstanceDeps,
-  type WeixinInstanceOverrides,
 } from "./instance";
 export {
   isSupportedInbound,
@@ -89,6 +87,9 @@ export {
   MessageType,
   STALE_TOKEN_ERRCODE,
   UploadMediaType,
+  GetUpdatesRespSchema,
+  SendMessageRespSchema,
+  WeixinMessageSchema,
   type CdnMedia,
   type FileItem,
   type GetUpdatesResp,

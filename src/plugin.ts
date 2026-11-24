@@ -15,15 +15,13 @@
 import type {
   ConnectorLogger,
   ConnectorPlugin,
-  HostApi,
   NormalizedInbound,
+  PluginContext,
 } from "@qsense/connector-sdk";
-import { WeixinApiError, createWeixinApi, type WeixinApiOverrides } from "./api";
+import { createNetKit, type NetKit } from "@qsense/connector-sdk";
+import { WeixinApiError, createWeixinApi } from "./api";
 import { WeixinError } from "./errors";
-import {
-  createWeixinInstance,
-  type WeixinInstanceOverrides,
-} from "./instance";
+import { createWeixinInstance } from "./instance";
 import { normalizeWeixinInbound } from "./parser";
 import {
   createQrLoginManager,
@@ -36,14 +34,13 @@ import { ILINK_BASE_URL } from "./types";
 export interface WeixinConnectorOpts {
   /** 宿主根日志器（loadModule 注入；缺省=静默 noop，仅独立调试用） */
   log?: ConnectorLogger;
-  /** 测试注入：API 端点/fetch（优先于凭据里的 base_url） */
-  api?: WeixinApiOverrides;
-  /** 测试注入：实例参数（富化替身/节流/超时） */
-  instance?: WeixinInstanceOverrides;
-  /** 测试注入：扫码状态机参数（时钟/id/超时） */
+  /** 控制面 NetKit（verifyCredential / 扫码状态机；测试注入 FakeNetKit，缺省真实现）。
+   * 实例数据面一律用宿主 ctx.net。 */
+  net?: NetKit;
+  /** 扫码状态机产品参数（TTL/超时/重试上限） */
   qr?: Pick<
     QrLoginManagerDeps,
-    "ttlMs" | "pollTimeoutMs" | "retryDelayMs" | "maxFailures" | "now" | "newId"
+    "ttlMs" | "pollTimeoutMs" | "retryDelayMs" | "maxFailures"
   >;
 }
 
@@ -79,14 +76,17 @@ export function createWeixinConnector(
   opts: WeixinConnectorOpts = {},
 ): WeixinConnectorPlugin {
   const log = opts.log ?? noopLog();
+  // 控制面 NetKit（verifyCredential / 扫码状态机；无实例上下文的注册期调用）
+  const controlNet = opts.net ?? createNetKit();
 
   // 本端已注册 bot 的 token（插入序 = 新旧序）：扫码时作为 local_token_list 上送，
   // 让服务端识别「已绑定到本端」的 bot 并回 binded_redirect
   const knownTokens = new Map<string, string>();
 
   const qr = createQrLoginManager({
-    api: createWeixinApi("", opts.api ?? {}),
+    api: createWeixinApi(controlNet.http({ timeoutMs: 15_000 }), "", ILINK_BASE_URL),
     log,
+    net: controlNet,
     ...(opts.qr ?? {}),
   });
 
@@ -174,10 +174,11 @@ export function createWeixinConnector(
           throw new Error(tt("wx_credential_missing"));
         }
         if (!APPID_RE.test(appid)) throw new Error(tt("wx_appid_form"));
-        const api = createWeixinApi(token, {
-          ...opts.api,
-          baseUrl: opts.api?.baseUrl ?? safeBaseUrl(credential["base_url"]) ?? ILINK_BASE_URL,
-        });
+        const api = createWeixinApi(
+          controlNet.http({ timeoutMs: 15_000 }),
+          token,
+          safeBaseUrl(credential["base_url"]) ?? ILINK_BASE_URL,
+        );
         // 探活 = notifystart（账号实际入口 + token 有效性一次验证；无消息面副作用）。
         // 不用 getupdates 探活：空游标的长轮询可能取走消息却被丢弃。
         try {
@@ -197,19 +198,19 @@ export function createWeixinConnector(
         }
       },
     },
-    create: (host: HostApi, creds) => {
+    create: (ctx: PluginContext, creds) => {
       const token = (creds.credential["token"] ?? "").trim();
-      const api = createWeixinApi(token, {
-        ...opts.api,
-        baseUrl: opts.api?.baseUrl ?? safeBaseUrl(creds.credential["base_url"]) ?? ILINK_BASE_URL,
-      });
+      const api = createWeixinApi(
+        ctx.net.http({ timeoutMs: 15_000 }),
+        token,
+        safeBaseUrl(creds.credential["base_url"]) ?? ILINK_BASE_URL,
+      );
       if (knownTokens.has(creds.botId)) knownTokens.delete(creds.botId);
       knownTokens.set(creds.botId, token);
       return createWeixinInstance({
-        host,
+        ctx,
         botId: creds.botId,
         api,
-        overrides: opts.instance,
       });
     },
     forget(botId: string): void {

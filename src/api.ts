@@ -1,5 +1,10 @@
 // 微信 iLink bot API 客户端（每 bot 一个）：JSON over HTTPS + Bearer ilink_bot_token。
-// 零运行时依赖（Node 20 全局 fetch）；测试经 overrides.fetch / baseUrl 注入假端点。
+// B⁺ T4.2：传输机械走 SDK NetKit（HttpClient 统一超时/中止合并/unref 定时器），
+// 应答经本包 wire schema（zod）校验——网络层出来的数据 = 插件声明类型，无盲转型；
+// parseWeixinJson（uint64 无损）保留为传输解码步骤，先解码后校验。测试驱动权
+// 统一收口 FakeNetKit（包内不再自持 overrides.fetch / 假端点管道）。
+// baseUrl 是生产参数（扫码 confirmed 下发的账号实际入口，IDC 就近），显式入参。
+//
 // 分仓纪律：connector 只做网络（字节进出与机械编解码），消息解读权在本包 parser。
 //
 // 线格式事实（参照实现 2.4.10 src/api/api.ts，2026-11-24 解包核对）：
@@ -11,11 +16,19 @@
 // - 业务错误走应答体 ret / errcode（HTTP 可能仍 200）；-14 = bot token 失效
 
 import { randomBytes } from "node:crypto";
+import { z } from "zod";
+import { isNetError, type HttpClient, type HttpResponse } from "@qsense/connector-sdk";
 import {
   CONNECTOR_VERSION,
   ILINK_APP_ID,
   ILINK_BASE_URL,
   ILINK_CHANNEL_VERSION,
+  BotQrcodeRespSchema,
+  GetUpdatesRespSchema,
+  GetUploadUrlRespSchema,
+  NotifyRespSchema,
+  QrcodeStatusRespSchema,
+  SendMessageRespSchema,
   type BaseInfo,
   type BotQrcodeResp,
   type GetUploadUrlReq,
@@ -30,7 +43,7 @@ import {
 export type WeixinApiKind =
   /** HTTP 非 2xx（status 字段可取） */
   | "http"
-  /** 应答体 ret / errcode 非零（code 字段可取） */
+  /** 应答体 ret / errcode 非零，或应答不符合 wire schema（code 字段可取） */
   | "biz"
   /** DNS / TCP / TLS 等网络层失败 */
   | "network"
@@ -167,13 +180,6 @@ function bizError(label: string, resp: { ret?: number; errcode?: number; errmsg?
   );
 }
 
-export interface WeixinApiOverrides {
-  /** 缺省 globalThis.fetch；测试注入假实现 */
-  fetch?: typeof globalThis.fetch;
-  /** 缺省 https://ilinkai.weixin.qq.com；账号实际入口（confirmed 的 baseurl）由此覆盖 */
-  baseUrl?: string;
-}
-
 export interface RequestOptions {
   /** 外部中止（停服即时打断在途请求） */
   signal?: AbortSignal;
@@ -207,16 +213,32 @@ function ensureNoTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
+/** 应答体过 wire schema；违规 = 协议异常（biz 档，可定位字段路径、不含数据值） */
+function unwrap<T>(label: string, raw: unknown, schema: z.ZodType<T>): T {
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    const paths = parsed.error.issues
+      .slice(0, 5)
+      .map((iss) => `${iss.path.join(".") || "(root)"}: ${iss.message}`)
+      .join("; ");
+    throw new WeixinApiError(`${label} 响应不符合 wire schema：${paths}`, "biz");
+  }
+  return parsed.data;
+}
+
+/**
+ * API 工厂。baseUrl：账号实际 API 入口（扫码 confirmed 的 baseurl / 凭据 base_url；
+ * 缺省协议常量入口）。
+ */
 export function createWeixinApi(
+  http: HttpClient,
   token: string,
-  overrides: WeixinApiOverrides = {},
+  baseUrl?: string,
 ): WeixinApi {
-  const doFetch = overrides.fetch ?? globalThis.fetch;
-  const baseUrl = ensureNoTrailingSlash(
-    overrides.baseUrl?.trim() || ILINK_BASE_URL,
-  );
+  const base = ensureNoTrailingSlash(baseUrl?.trim() || ILINK_BASE_URL);
   const bearer = token.trim();
 
+  /** 传输 + 解码 + 分档：NetError → WeixinApiError 同义档；业务码检查在方法层 */
   async function request(
     path: string,
     init: {
@@ -228,21 +250,7 @@ export function createWeixinApi(
     },
     opts: RequestOptions = {},
   ): Promise<unknown> {
-    const base = ensureNoTrailingSlash(init.base ?? baseUrl);
-    const url = new URL(path, `${base}/`);
-    const timeoutMs = opts.timeoutMs ?? init.defaultTimeout;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    // 超时定时器不独自撑住事件循环：进程停服时在途请求（如扫码状态机的后台长轮询）
-    // 不应把退出拖到定时器到点——运行期进程由宿主 HTTP 服务与连接句柄持有
-    timer.unref?.();
-    const onExternalAbort = (): void => controller.abort();
-    const external = opts.signal;
-    if (external !== undefined) {
-      if (external.aborted) controller.abort();
-      else external.addEventListener("abort", onExternalAbort, { once: true });
-    }
-
+    const url = new URL(path, `${ensureNoTrailingSlash(init.base ?? base)}/`);
     const headers: Record<string, string> = {
       "iLink-App-Id": ILINK_APP_ID,
       "iLink-App-ClientVersion": String(CLIENT_VERSION),
@@ -253,49 +261,45 @@ export function createWeixinApi(
       headers["X-WECHAT-UIN"] = randomWechatUin();
       if (bearer !== "") headers["Authorization"] = `Bearer ${bearer}`;
     }
-
+    let res: HttpResponse;
     try {
-      let res: Response;
-      let text: string;
-      try {
-        res = await doFetch(url.toString(), {
-          method: init.method,
-          headers,
-          ...(init.body !== undefined ? { body: init.body } : {}),
-          signal: controller.signal,
-        });
-        text = await res.text();
-      } catch (e) {
-        if (e instanceof Error && e.name === "AbortError") {
-          throw new WeixinApiError(
-            external?.aborted === true ? "请求已取消" : `请求超时（${timeoutMs}ms）`,
-            external?.aborted === true ? "aborted" : "timeout",
-          );
+      res = await http.request(url.toString(), {
+        method: init.method,
+        headers,
+        ...(init.body !== undefined ? { body: init.body } : {}),
+        timeoutMs: opts.timeoutMs ?? init.defaultTimeout,
+        ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+      });
+    } catch (e) {
+      // NetKit 机械档 → 平台错误档（调用侧语义不变：timeout/aborted/network）
+      if (isNetError(e)) {
+        if (e.kind === "timeout") {
+          throw new WeixinApiError(`请求超时（${opts.timeoutMs ?? init.defaultTimeout}ms）`, "timeout");
         }
-        throw new WeixinApiError(
-          `网络请求失败：${e instanceof Error ? e.message : String(e)}`,
-          "network",
-        );
+        if (e.kind === "aborted") {
+          throw new WeixinApiError("请求已取消", "aborted");
+        }
+        throw new WeixinApiError(`网络请求失败：${e.message}`, "network");
       }
-      if (!res.ok) {
-        throw new WeixinApiError(
-          `HTTP ${res.status}${text !== "" ? `：${text.slice(0, 200)}` : ""}`,
-          "http",
-          { status: res.status },
-        );
-      }
-      if (text === "") return {};
-      return parseWeixinJson(text);
-    } finally {
-      clearTimeout(timer);
-      external?.removeEventListener("abort", onExternalAbort);
+      throw e;
     }
+    if (res.status < 200 || res.status >= 300) {
+      const text = await res.text().catch(() => "");
+      throw new WeixinApiError(
+        `HTTP ${res.status}${text !== "" ? `：${text.slice(0, 200)}` : ""}`,
+        "http",
+        { status: res.status },
+      );
+    }
+    const text = await res.text();
+    if (text === "") return {};
+    return parseWeixinJson(text);
   }
 
   return {
-    baseUrl,
+    baseUrl: base,
     async getUpdates(getUpdatesBuf, opts = {}) {
-      const resp = (await request(
+      const raw = await request(
         "ilink/bot/getupdates",
         {
           method: "POST",
@@ -306,12 +310,13 @@ export function createWeixinApi(
           defaultTimeout: LONG_POLL_TIMEOUT_MS,
         },
         opts,
-      )) as GetUpdatesResp;
-      return resp ?? {};
+      );
+      // 应答体业务错误不抛（返回原样交轮询循环判定，-14=token 失效）
+      return unwrap("getupdates", raw ?? {}, GetUpdatesRespSchema);
     },
 
     async sendMessage(msg, opts = {}) {
-      const resp = (await request(
+      const raw = await request(
         "ilink/bot/sendmessage",
         {
           method: "POST",
@@ -319,14 +324,15 @@ export function createWeixinApi(
           defaultTimeout: API_TIMEOUT_MS,
         },
         opts,
-      )) as SendMessageResp;
-      const code = bizCodeOf(resp ?? {});
+      );
+      const resp = unwrap("sendMessage", raw ?? {}, SendMessageRespSchema);
+      const code = bizCodeOf(resp);
       if (code !== undefined) throw bizError("sendMessage", resp);
-      return resp ?? {};
+      return resp;
     },
 
     async getUploadUrl(req, opts = {}) {
-      const resp = (await request(
+      const raw = await request(
         "ilink/bot/getuploadurl",
         {
           method: "POST",
@@ -334,42 +340,45 @@ export function createWeixinApi(
           defaultTimeout: API_TIMEOUT_MS,
         },
         opts,
-      )) as GetUploadUrlResp & { ret?: number; errcode?: number; errmsg?: string };
-      const code = bizCodeOf(resp ?? {});
+      );
+      const resp = unwrap("getUploadUrl", raw ?? {}, GetUploadUrlRespSchema);
+      const code = bizCodeOf(resp);
       if (code !== undefined) throw bizError("getUploadUrl", resp);
-      return resp ?? {};
+      return resp;
     },
 
     async notifyStart(opts = {}) {
-      const resp = (await request(
+      const raw = await request(
         "ilink/bot/msg/notifystart",
         { method: "POST", body: JSON.stringify({ base_info: baseInfo() }), defaultTimeout: LIGHT_TIMEOUT_MS },
         opts,
-      )) as { ret?: number; errcode?: number; errmsg?: string };
-      const code = bizCodeOf(resp ?? {});
+      );
+      const resp = unwrap("notifyStart", raw ?? {}, NotifyRespSchema);
+      const code = bizCodeOf(resp);
       if (code !== undefined) throw bizError("notifyStart", resp);
     },
 
     async notifyStop(opts = {}) {
-      const resp = (await request(
+      const raw = await request(
         "ilink/bot/msg/notifystop",
         { method: "POST", body: JSON.stringify({ base_info: baseInfo() }), defaultTimeout: LIGHT_TIMEOUT_MS },
         opts,
-      )) as { ret?: number; errcode?: number; errmsg?: string };
-      const code = bizCodeOf(resp ?? {});
+      );
+      const resp = unwrap("notifyStop", raw ?? {}, NotifyRespSchema);
+      const code = bizCodeOf(resp);
       if (code !== undefined) throw bizError("notifyStop", resp);
     },
 
     async getBotQrcode(localTokenList) {
-      const resp = (await request(
+      const raw = await request(
         `ilink/bot/get_bot_qrcode?bot_type=3`,
         {
           method: "POST",
           body: JSON.stringify({ local_token_list: localTokenList }),
           defaultTimeout: LIGHT_TIMEOUT_MS,
         },
-      )) as BotQrcodeResp;
-      return resp ?? ({} as BotQrcodeResp);
+      );
+      return unwrap("get_bot_qrcode", raw ?? {}, BotQrcodeRespSchema);
     },
 
     async getQrcodeStatus(qrcode, opts = {}) {
@@ -377,16 +386,16 @@ export function createWeixinApi(
       const query = `qrcode=${encodeURIComponent(qrcode)}${
         verify ? `&verify_code=${encodeURIComponent(verify)}` : ""
       }`;
-      const resp = (await request(
+      const raw = await request(
         `ilink/bot/get_qrcode_status?${query}`,
         {
           method: "GET",
-          base: opts.baseUrl,
+          ...(opts.baseUrl !== undefined ? { base: opts.baseUrl } : {}),
           defaultTimeout: LONG_POLL_TIMEOUT_MS,
         },
         opts,
-      )) as QrcodeStatusResp;
-      return resp ?? ({} as QrcodeStatusResp);
+      );
+      return unwrap("get_qrcode_status", raw ?? {}, QrcodeStatusRespSchema);
     },
   };
 }

@@ -16,6 +16,7 @@
 //   （与入站 parseAesKey 的第二种编码同形）——照参照实现逐字节一致，勿改成 base64(原始字节)
 
 import { createHash, randomBytes } from "node:crypto";
+import type { HttpClient, HttpResponse } from "@qsense/connector-sdk";
 import type { WeixinApi } from "./api";
 import {
   aesEcbPaddedSize,
@@ -86,7 +87,8 @@ export async function downloadAndDecrypt(params: {
   /** base64 形式 key（inboundImageKey 或 media.aes_key） */
   aesKeyBase64: string;
   cdnBaseUrl: string;
-  fetchImpl: typeof globalThis.fetch;
+  /** NetKit HTTP 客户端（测试注入 FakeNetKit） */
+  http: HttpClient;
   timeoutMs?: number;
 }): Promise<Buffer> {
   const { media } = params;
@@ -105,20 +107,20 @@ export async function downloadAndDecrypt(params: {
     );
   }
   const key = parseAesKey(params.aesKeyBase64);
-  let res: Response;
+  let res: HttpResponse;
   try {
-    res = await params.fetchImpl(url, {
-      signal: AbortSignal.timeout(params.timeoutMs ?? 15_000),
+    res = await params.http.request(url, {
+      timeoutMs: params.timeoutMs ?? 15_000,
     });
   } catch (e) {
     throw new Error(
       tt("wx_cdn_download_failed", { reason: e instanceof Error ? e.message : String(e) }),
     );
   }
-  if (!res.ok) {
+  if (res.status < 200 || res.status >= 300) {
     throw new Error(tt("wx_cdn_download_failed", { reason: `HTTP ${res.status}` }));
   }
-  const encrypted = Buffer.from(await res.arrayBuffer());
+  const encrypted = Buffer.from(await res.raw.arrayBuffer());
   try {
     return decryptAesEcb(encrypted, key);
   } catch {
@@ -130,18 +132,18 @@ export async function downloadAndDecrypt(params: {
 async function postCdn(
   url: string,
   ciphertext: Buffer,
-  fetchImpl: typeof globalThis.fetch,
+  http: HttpClient,
 ): Promise<string> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= UPLOAD_MAX_RETRIES; attempt += 1) {
     try {
-      const res = await fetchImpl(url, {
+      const res: HttpResponse = await http.request(url, {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
         body: new Uint8Array(ciphertext),
-        signal: AbortSignal.timeout(60_000),
+        timeoutMs: 60_000,
       });
-      const errHeader = res.headers.get("x-error-message");
+      const errHeader = res.header("x-error-message");
       if (res.status >= 400 && res.status < 500) {
         throw new WeixinCdnClientError(
           `HTTP ${res.status}：${errHeader ?? (await res.text().catch(() => ""))}`,
@@ -150,7 +152,7 @@ async function postCdn(
       if (res.status !== 200) {
         throw new Error(`HTTP ${res.status}：${errHeader ?? "无错误说明"}`);
       }
-      const param = res.headers.get("x-encrypted-param");
+      const param = res.header("x-encrypted-param");
       if (!param) throw new Error("应答缺 x-encrypted-param 响应头");
       return param;
     } catch (e) {
@@ -182,7 +184,8 @@ export async function uploadMediaToCdn(params: {
   /** proto UploadMediaType：1 图 / 2 视频 / 3 文件 */
   mediaType: number;
   cdnBaseUrl: string;
-  fetchImpl: typeof globalThis.fetch;
+  /** NetKit HTTP 客户端（测试注入 FakeNetKit） */
+  http: HttpClient;
 }): Promise<CdnUploadResult> {
   const plaintext = params.buf;
   const rawSize = plaintext.length;
@@ -213,7 +216,7 @@ export async function uploadMediaToCdn(params: {
   if (target === undefined) throw new Error(tt("wx_upload_no_url"));
 
   const ciphertext = encryptAesEcb(plaintext, aesKey);
-  const downloadParam = await postCdn(target, ciphertext, params.fetchImpl);
+  const downloadParam = await postCdn(target, ciphertext, params.http);
   return {
     filekey,
     aesKeyHex,

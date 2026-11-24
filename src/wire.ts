@@ -9,6 +9,7 @@
 // 语音条出站线格式在参照实现中没有发送路径（encode_type 等字段只有入站语义），
 // 属未核实区：音频一律按「文件附件」降级发送（走已核实的 FILE 通道），不猜线上形状。
 
+import { z } from "zod";
 import type { CdnUploadResult } from "./cdn";
 import { outboundAesKey } from "./cdn";
 import { tt } from "./texts";
@@ -44,29 +45,30 @@ export function encodeHandle(plan: UploadedPlan): string {
   return HANDLE_PREFIX + Buffer.from(JSON.stringify(plan), "utf-8").toString("base64url");
 }
 
+/** 句柄内容 schema（无状态句柄的形状契约；坏值给可操作错误） */
+const UploadedPlanSchema = z.object({
+  kind: z.enum(["image", "video", "file"]),
+  fileName: z.string().min(1),
+  up: z.object({
+    filekey: z.string(),
+    aesKeyHex: z.string(),
+    rawSize: z.number(),
+    rawMd5: z.string(),
+    cipherSize: z.number(),
+    downloadParam: z.string().min(1),
+  }),
+});
+
 /** 句柄解码 + 形状校验；坏值给可操作错误 */
 export function decodeHandle(handle: string): UploadedPlan {
   try {
     if (!handle.startsWith(HANDLE_PREFIX)) throw new Error("bad prefix");
-    const plan = JSON.parse(
+    const raw: unknown = JSON.parse(
       Buffer.from(handle.slice(HANDLE_PREFIX.length), "base64url").toString("utf-8"),
-    ) as UploadedPlan;
-    const up = plan.up;
-    if (
-      (plan.kind !== "image" && plan.kind !== "video" && plan.kind !== "file") ||
-      typeof plan.fileName !== "string" ||
-      plan.fileName === "" ||
-      up === null ||
-      typeof up !== "object" ||
-      typeof up.downloadParam !== "string" ||
-      up.downloadParam === "" ||
-      typeof up.aesKeyHex !== "string" ||
-      typeof up.cipherSize !== "number" ||
-      typeof up.rawSize !== "number"
-    ) {
-      throw new Error("bad shape");
-    }
-    return plan;
+    );
+    const parsed = UploadedPlanSchema.safeParse(raw);
+    if (!parsed.success) throw new Error("bad shape");
+    return parsed.data;
   } catch {
     throw new Error(tt("wx_media_handle_invalid"));
   }

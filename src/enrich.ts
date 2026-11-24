@@ -6,6 +6,7 @@
 // → 回落缩略图（thumb_media）；再失败 → 不内联（附件只留元数据，get_media 给可操作错误）。
 // 语音（SILK）/文件/视频不内联：语音转写文本已随消息下发，文件/视频 get_media 本就不取。
 
+import type { HttpClient } from "@qsense/connector-sdk";
 import { downloadAndDecrypt, inboundImageKey } from "./cdn";
 import {
   ILINK_CDN_BASE_URL,
@@ -47,7 +48,8 @@ export function sniffImageMime(buf: Buffer): ImageMime | null {
 }
 
 export interface EnrichDeps {
-  fetchImpl: typeof globalThis.fetch;
+  /** NetKit HTTP 客户端（CDN 下载走传输机械层；测试注入 FakeNetKit） */
+  http: HttpClient;
   /** 缺省协议常量 */
   cdnBaseUrl?: string;
   /** 缺省 DEFAULT_MAX_INLINE_IMAGE_BYTES */
@@ -69,7 +71,7 @@ async function inlineImage(
       media,
       aesKeyBase64,
       cdnBaseUrl: deps.cdnBaseUrl ?? ILINK_CDN_BASE_URL,
-      fetchImpl: deps.fetchImpl,
+      http: deps.http,
       ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     });
     if (buf.length === 0 || buf.length > maxBytes) return undefined;
