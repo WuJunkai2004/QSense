@@ -15,7 +15,8 @@ import {
 import type {
   BotCreds,
   ConnectorInstance,
-  HostApi,
+  HttpClient,
+  PluginContext,
   StatePort,
 } from "@qsense/connector-sdk";
 import { OUR_INTENTS } from "./intents";
@@ -24,21 +25,29 @@ import { fetchGatewayUrl } from "./url";
 import { TokenService, type QqApp } from "./token";
 import { tt } from "./texts";
 
-/** 测试注入点：默认全部走真实官方通道（原 GatewayOverrides 迁入） */
+/**
+ * 官方 SDK 边界缝（如实评估，不假装能删——SDK 内部自管网络，接不进 NetKit）：
+ * - getAccessToken/clearTokenCache 包装官方 TokenManager（缓存+单飞+后台刷新是
+ *   SDK 内部实现）；测试经此注入假 token，CI 不碰真实网络
+ * - reconnect 是官方 ReconnectPolicy（测试要快速重连）
+ * - apiFor 替换发送原语的 SDK ApiClient/MediaApi 适配（SDK 自管 fetch）
+ */
 export interface QqOverrides {
-  getGatewayUrl?: (accessToken: string) => Promise<string>;
   getAccessToken?: (app: QqApp) => Promise<string>;
   clearTokenCache?: (app: QqApp) => void;
   reconnect?: Partial<ReconnectPolicy>;
-  /** 测试注入：替换发送原语的 SDK 适配 */
   apiFor?: (app: QqApp) => QQSendApi;
 }
 
 export interface QqInstanceDeps {
-  host: HostApi;
+  ctx: PluginContext;
   creds: BotCreds;
   /** 插件级共享（同一 TokenManager 服务多 bot，缓存复用） */
   tokens: TokenService;
+  /** /gateway 控制请求传输（缺省 ctx.net）。QQ 数据面是官方 SDK 自管的 WS/发送，
+   * 不经 NetKit——此为包内唯一 NetKit 触点；插件级注入（opts.net）供测试脚本化
+   * 网关地址（原 getGatewayUrl 测试缝的形态收口）。 */
+  net?: HttpClient;
   overrides?: QqOverrides;
 }
 
@@ -69,9 +78,11 @@ function validSession(v: PersistedSession | null | undefined): PersistedSession 
 }
 
 export function createQqInstance(deps: QqInstanceDeps): ConnectorInstance {
-  const { host, creds, tokens, overrides } = deps;
+  const { ctx, creds, tokens, overrides } = deps;
+  const host = ctx;
   const app: QqApp = appOfCreds(creds);
   const log = host.log.child("gateway").child(app.appid);
+  const gatewayHttp = deps.net ?? ctx.net.http({ timeoutMs: 30_000 });
   let controller: AbortController | null = null;
   let loop: Promise<void> | null = null;
 
@@ -117,10 +128,7 @@ export function createQqInstance(deps: QqInstanceDeps): ConnectorInstance {
             overrides?.clearTokenCache?.(app);
             tokens.clear(app);
           },
-          getGatewayUrl: (accessToken) =>
-            overrides?.getGatewayUrl
-              ? overrides.getGatewayUrl(accessToken)
-              : fetchGatewayUrl(accessToken),
+          getGatewayUrl: (accessToken) => fetchGatewayUrl(gatewayHttp, accessToken),
           reconnect: overrides?.reconnect,
           onReady: () => host.reportStatus({ state: "ready" }),
           onResumed: () => host.reportStatus({ state: "resumed" }),

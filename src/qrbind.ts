@@ -18,15 +18,9 @@
 // appid+AppSecret 添加路径常驻不删，本模块故障不影响添加功能。
 
 import { createDecipheriv, randomBytes } from "node:crypto";
+import type { HttpClient, HttpResponse } from "@qsense/connector-sdk";
 
 export const QQ_BIND_HOST = "q.qq.com";
-
-export interface QrBindDeps {
-  /** 缺省 globalThis.fetch；测试注入假实现 */
-  fetchImpl?: typeof fetch;
-  /** 缺省 q.qq.com；测试指向本地 mock 服务器 */
-  host?: string;
-}
 
 export interface QrTask {
   taskId: string;
@@ -51,21 +45,20 @@ export class QrBindError extends Error {}
 
 /** 统一 POST JSON + retcode 检查（官方 lite 风格：retcode=0 才算成功） */
 async function postLite(
-  deps: QrBindDeps,
+  http: HttpClient,
   path: string,
   payload: Record<string, string>,
 ): Promise<Record<string, unknown>> {
-  const host = deps.host?.trim() || QQ_BIND_HOST;
-  const doFetch = deps.fetchImpl ?? fetch;
-  let res: Response;
+  let res: HttpResponse;
   try {
-    res = await doFetch(`https://${host}${path}`, {
+    res = await http.request(`https://${QQ_BIND_HOST}${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
       },
       body: JSON.stringify(payload),
+      timeoutMs: 15_000,
     });
   } catch (e) {
     throw new QrBindError(
@@ -75,7 +68,7 @@ async function postLite(
   }
   const body = (await res.json().catch(() => null)) as
     (Record<string, unknown> & { retcode?: unknown; msg?: unknown }) | null;
-  if (!res.ok || body === null) {
+  if (res.status < 200 || res.status >= 300 || body === null) {
     throw new QrBindError(
       `扫码绑定接口异常（HTTP ${res.status}）。可改用手动方式添加。`,
     );
@@ -92,9 +85,9 @@ async function postLite(
 }
 
 /** 创建绑定任务：本地出密钥，官方发 task_id */
-export async function createQrBindTask(deps: QrBindDeps = {}): Promise<QrTask> {
+export async function createQrBindTask(http: HttpClient): Promise<QrTask> {
   const bindKey = randomBytes(32).toString("base64");
-  const body = await postLite(deps, "/lite/create_bind_task", { key: bindKey });
+  const body = await postLite(http, "/lite/create_bind_task", { key: bindKey });
   const data = body.data as Record<string, unknown> | undefined;
   const taskId = typeof data?.task_id === "string" ? data.task_id.trim() : "";
   if (taskId === "") {
@@ -102,20 +95,19 @@ export async function createQrBindTask(deps: QrBindDeps = {}): Promise<QrTask> {
       "扫码绑定任务创建失败：官方响应缺少 task_id。可改用手动方式添加。",
     );
   }
-  const host = deps.host?.trim() || QQ_BIND_HOST;
   return {
     taskId,
     bindKey,
-    connectUrl: `https://${host}/qqbot/openclaw/connect.html?task_id=${encodeURIComponent(taskId)}&_wv=2`,
+    connectUrl: `https://${QQ_BIND_HOST}/qqbot/openclaw/connect.html?task_id=${encodeURIComponent(taskId)}&_wv=2`,
   };
 }
 
 /** 轮询一次绑定结果：pending（继续轮）/ expired（重开任务）/ completed（含解密后 AppSecret） */
 export async function pollQrBind(
   task: Pick<QrTask, "taskId" | "bindKey">,
-  deps: QrBindDeps = {},
+  http: HttpClient,
 ): Promise<QrPollResult> {
-  const body = await postLite(deps, "/lite/poll_bind_result", {
+  const body = await postLite(http, "/lite/poll_bind_result", {
     task_id: task.taskId,
   });
   const data = body.data as Record<string, unknown> | undefined;

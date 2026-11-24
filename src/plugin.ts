@@ -11,11 +11,12 @@
 import type {
   ConnectorLogger,
   ConnectorPlugin,
-  HostApi,
   NormalizedInbound,
+  PluginContext,
   PluginToolCtx,
   ToolPayload,
 } from "@qsense/connector-sdk";
+import { createNetKit, type NetKit } from "@qsense/connector-sdk";
 import { createQqInstance, type QqOverrides } from "./instance";
 import {
   PER_GROUP_DAILY,
@@ -23,7 +24,7 @@ import {
   dailyTotalOf,
   type QqSendLimits,
 } from "./quota";
-import { createQrBindTask, pollQrBind, type QrBindDeps } from "./qrbind";
+import { createQrBindTask, pollQrBind } from "./qrbind";
 import { appOfCreds, type QqNetDeps } from "./net";
 import { qqSendError } from "./errors";
 import { fetchGatewayUrl } from "./url";
@@ -35,10 +36,11 @@ export interface QqConnectorOpts {
   log?: ConnectorLogger;
   /** 注入共享 TokenService（缺省自建） */
   tokens?: TokenService;
-  /** 测试注入点（网关 URL/token/重连策略/发送 API），缺省全走真实官方通道 */
+  /** 官方 SDK 边界缝（token/重连/发送 API 适配；详见 QqOverrides 注释） */
   overrides?: QqOverrides;
-  /** 扫码绑定上游依赖（fetch/host 注入；缺省=直连 q.qq.com），测试注入假端点 */
-  qrBind?: QrBindDeps;
+  /** 控制面 NetKit（凭据校验的 /gateway 请求 + 扫码 lite 接口 + 实例 /gateway
+   * 传输；测试注入 FakeNetKit，缺省真实现） */
+  net?: NetKit;
   /** 测试注入：覆盖额度默认值 */
   limits?: Partial<QqSendLimits>;
 }
@@ -68,6 +70,8 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
   const log = opts.log ?? noopLog();
   const tokens = opts.tokens ?? new TokenService(log.child("token"));
   const quota = createQuota(opts.limits);
+  // 控制面传输（凭据校验 /gateway + 扫码 lite 接口；实例 /gateway 亦同源）
+  const controlHttp = (opts.net ?? createNetKit()).http({ timeoutMs: 15_000 });
   const apps = new Map<string, QqApp>();
 
   // 扫码绑定内存任务表：task_id → 密钥（bind_key 只在本进程；完成即焚，进程重启失效）
@@ -145,7 +149,7 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
         summary: "创建扫码绑定任务（官方 lite 接口）",
         handler: async () => {
           pruneQrTasks();
-          const task = await createQrBindTask(opts.qrBind);
+          const task = await createQrBindTask(controlHttp);
           qrTasks.set(task.taskId, {
             bindKey: task.bindKey,
             createdAt: Date.now(),
@@ -174,7 +178,7 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
           }
           const r = await pollQrBind(
             { taskId, bindKey: task.bindKey },
-            opts.qrBind,
+            controlHttp,
           );
           if (r.status !== "pending") qrTasks.delete(taskId);
           if (r.status !== "completed") return r;
@@ -217,7 +221,7 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
             appid: credential["appid"] ?? "",
             secret: credential["secret"] ?? "",
           });
-          await fetchGatewayUrl(token);
+          await fetchGatewayUrl(controlHttp, token);
         } catch (e) {
           const reason = e instanceof Error ? e.message : String(e);
           throw new Error(
@@ -229,9 +233,15 @@ export function createQqConnector(opts: QqConnectorOpts = {}): QqConnectorPlugin
       proactiveGate: (ctx, botId, target) => quota.gate(ctx, botId, target),
       proactiveRecord: (ctx, botId, target) => quota.record(ctx, botId, target),
     },
-    create: (host: HostApi, creds) => {
+    create: (ctx: PluginContext, creds) => {
       apps.set(creds.botId, appOfCreds(creds));
-      return createQqInstance({ host, creds, tokens, overrides: opts.overrides });
+      return createQqInstance({
+        ctx,
+        creds,
+        tokens,
+        ...(opts.net !== undefined ? { net: opts.net.http({ timeoutMs: 30_000 }) } : {}),
+        overrides: opts.overrides,
+      });
     },
     forget(botId: string): void {
       const app = apps.get(botId);

@@ -43,7 +43,6 @@ export {
   decryptBindSecret,
   pollQrBind,
   QQ_BIND_HOST,
-  type QrBindDeps,
   type QrPollResult,
   type QrTask,
   QrBindError,
