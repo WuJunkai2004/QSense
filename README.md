@@ -79,21 +79,25 @@
 
 已实测（2026-11-24，对 `ilinkai.weixin.qq.com`）：`get_bot_qrcode` 返回 200 与二维码内容；`get_qrcode_status` 被服务端长轮询挂起（未扫码不返回）。
 
-待真人扫码后验收：
+**收发段已真机验收（2026-11-24 扫码 + 实发）**：
 
-1. `confirmed` 应答字段（`bot_token` / `ilink_bot_id` / `baseurl` / `ilink_user_id`）与 `appid` 安全形式是否与实际一致。
-2. `getupdates` 的真实消息形状：`item_list` 类型、`message_id` 位数、`context_token` 下发时机、空游标首拉是否回补历史。
-3. 出站 `sendmessage` 是否被受理（`context_token` 回带是否必需）、`message_id` 回执。
-4. 图片 CDN 下载解密（两种 `aes_key` 编码）、上传直传（`upload_full_url` / 回执头）。
-5. 入站语音 `voice_item.text`（平台转写）是否有值。
-6. 是否出现 `need_verifycode`（配对码二次校验）——当前流程不支持输入配对码，会以可操作错误终止。
-7. `notifystart` / `notifystop` 对有效 / 失效 token 的真实应答（`verifyCredential` 以此探活）。
-8. token 有效期与失效信号（`errcode -14` 的实际出现场景）。
+1. ✅ `confirmed` 应答字段与 `appid` 安全形式（扫码注册成功，bot 正常收发）。
+2. ✅ `getupdates` 真实消息形状：文本与图片消息均正确落库；`context_token` 下发正常（出站成功实证回带必需且有效）。
+3. ✅ 出站 `sendmessage` 受理：文本 / 图片（CDN 直传）/ 引用式发送均回 `message_id`，客户端可达。
+4. ✅ 图片 CDN 下载解密（中图内联 122KB，`get_media` 图像块内容正确）与上传直传（272KB JPEG 经 `getuploadurl` → 密文直传 → `send_media asset:` 成功）。
+5. ✅ 发送路由修复实证：sends 账本 `kind=proactive, status=sent`（caps 感知路由落地后恒主动通道）；`recall` 得可操作错误（平台能力缺失）。
+
+待继续观察 / 待场景触发：
+
+6. 入站语音 `voice_item.text`（平台转写）是否有值——尚未收到过语音消息。
+7. `need_verifycode`（配对码二次校验）——未出现（当前流程不支持输入，遇之以可操作错误终止）。
+8. `notifystart` / `notifystop` 对失效 token 的应答（有效 token 下探活正常——服务连续收发未触发失效分支）。
+9. token 有效期与 `errcode -14` 失效信号——需长时间运行观察。
 
 ## 已知限制
 
 - 平台消息体不含昵称：工具面 `author.name` 为 `null`（`author.id` 形如 `xxx@im.wechat`），WebUI 回落显示该 id。本包不推断、不编造展示名。
-- 出站引用（`quote_msg_id`）不生效：参照实现无发送路径，线上形状未核实，按普通消息发。
+- 出站引用（`quote_msg_id`）不生效：**已真机核实（2026-11-24）**——`sendmessage` 协议层受理（回 `message_id`、消息可达），但协议无引用字段，客户端按普通消息展示（与参照实现一致）。
 - 语音条不能发送（音频按文件附件降级）；入站语音只有转写文本，不内联音频。
 - 配对码二次校验（`need_verifycode`）无输入通道。
 - token 失效后需移除 bot 重新扫码；凭据热更新与 `binded_redirect` 后的凭据刷新未提供。
