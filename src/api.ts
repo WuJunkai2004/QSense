@@ -278,6 +278,14 @@ export interface TelegramInboundPayload {
   mediaBlobs?: Record<string, string>;
 }
 
+/** 信封 wire schema（B⁺ T5）：plugin.normalize 头部 safeParse 入口——形状违规
+ * = 可观测丢弃 + warn（与容错丢弃语义一致，不再盲信类型标注） */
+export const TelegramInboundPayloadSchema = z.looseObject({
+  platform: z.literal("telegram"),
+  update: TelegramUpdateSchema,
+  mediaBlobs: z.record(z.string(), z.string()).optional(),
+});
+
 export interface TelegramApi {
   /**
    * JSON POST 调用（Bot API 绝大多数方法是 POST+JSON 可用）。

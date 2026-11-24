@@ -23,13 +23,13 @@ import type {
   NormalizedInbound,
   PluginContext,
 } from "@qsense/connector-sdk";
-import { createNetKit, type NetKit } from "@qsense/connector-sdk";
+import { createNetKit, formatZodIssues, type NetKit } from "@qsense/connector-sdk";
 import {
   createTelegramApi,
   TelegramApiError,
+  TelegramInboundPayloadSchema,
   TelegramMeSchema,
   TG_ERROR_UNAUTHORIZED,
-  type TelegramInboundPayload,
 } from "./api";
 import { createTelegramInstance } from "./instance";
 import { normalizeTelegramInbound } from "./parser";
@@ -62,7 +62,7 @@ const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
 export function createTelegramConnector(
   opts: TelegramConnectorOpts = {},
 ): ConnectorPlugin {
-  void (opts.log ?? noopLog()); // 当前无插件级共享服务；占位对齐 connector-qq 形态
+  const log = opts.log ?? noopLog();
   // 控制面 HTTP（verifyCredential 等无实例上下文的注册期调用）
   const controlHttp = (opts.net ?? createNetKit()).http({ timeoutMs: 30_000 });
 
@@ -82,20 +82,18 @@ export function createTelegramConnector(
       quota: false,
       proactiveOptIn: false, // Telegram：无 opt 事件概念，凭 chat_id 直发
     },
-    // 契约 v2：解读权在本插件——core ingest 表驱动按 payload.platform="telegram" 路由到此
+    // 契约 v2：解读权在本插件——core ingest 表驱动按 payload.platform="telegram" 路由到此。
+    // B⁺ T5：信封过 wire schema（safeParse）——形状违规 = 可观测丢弃 + warn
+    //（路由已保证 platform 匹配本插件，schema 失败即本平台载荷损坏，不容错放行）。
     normalize: (botId, payload): NormalizedInbound | null => {
-      if (
-        payload === null ||
-        typeof payload !== "object" ||
-        (payload as Record<string, unknown>)["platform"] !== "telegram"
-      ) {
+      const p = TelegramInboundPayloadSchema.safeParse(payload);
+      if (!p.success) {
+        log.warn(
+          `[${botId}] telegram 载荷形状违规，丢弃：${formatZodIssues(p.error, "payload")}`,
+        );
         return null;
       }
-      return normalizeTelegramInbound(
-        botId,
-        payload as TelegramInboundPayload,
-        identities.get(botId),
-      );
+      return normalizeTelegramInbound(botId, p.data, identities.get(botId));
     },
     credentialSchema: {
       type: "object",
