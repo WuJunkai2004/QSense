@@ -15,7 +15,10 @@ import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
 import { makeFakeRuntime } from "./helpers/qq-runtime";
+import { ConnectorRegistry } from "@qsense/connector-sdk";
 import type { ConnectorNet, ProactiveWire, ReplyWire } from "@qsense/connector-sdk";
+import type { ConnectorRuntime } from "../src/connectors/runtime";
+import { createWeixinConnector } from "@qsense/connector-weixin";
 
 const TOKEN = "m7-test-token-0123456789abcdef";
 const BOT = "10001";
@@ -849,6 +852,267 @@ test("M10 UI 单聊：type=all 合并会话（名字=users 权威）+ type=chat 
     const sent = after.messages.find((m) => m.out === true);
     assert.ok(sent !== undefined, "发送后 c2c 镜像应有 out=true 行");
     assert.equal(sent.content, "UI 单聊回复");
+  } finally {
+    await fx.close();
+  }
+});
+
+// —— P4 微信：平台中介扫码注册 + 多平台手动添加（/bots 按平台声明取凭据）+ 连接器状态化错误透传 ——
+
+interface WxFixture {
+  baseUrl: string;
+  registry: BotRegistry;
+  added: string[];
+  close: () => Promise<void>;
+}
+
+const WX_QR_URL = "https://weixin.qq.com/q/ABC";
+const WX_CREATE = "/ui/api/platforms/weixin/login/qr/create";
+const WX_POLL = "/ui/api/platforms/weixin/login/qr/poll";
+
+/** 真 Fastify 应用 + 真微信插件（假 fetch 脚本化上游，零真实网络）；verify 按 index.ts 同款接到插件钩子 */
+async function setupWeixinServer(
+  steps: Array<Record<string, unknown>>,
+): Promise<WxFixture> {
+  const dir = mkdtempSync(join(tmpdir(), "qqbot-wx-ui-"));
+  const db = openDatabase(dir);
+  runMigrations(db, migrations);
+  const repo = new Repo(db);
+  repo.ensureRuntime();
+  repo.setAdminToken(TOKEN);
+  repo.setSendEnable(true);
+
+  const plugins = new ConnectorRegistry();
+  plugins.register(
+    createWeixinConnector({
+      api: {
+        fetch: (async (input: unknown, init?: RequestInit) => {
+          const url = new URL(String(input));
+          const json = (obj: unknown) =>
+            new Response(JSON.stringify(obj), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          if (url.pathname.endsWith("/get_bot_qrcode")) {
+            return json({ qrcode: "QR-SECRET-TOKEN", qrcode_img_content: WX_QR_URL });
+          }
+          if (url.pathname.endsWith("/get_qrcode_status")) {
+            const next = steps.shift();
+            if (next === undefined) {
+              // 脚本耗尽：挂起到请求中止（不空转）
+              await new Promise<void>((resolve) => {
+                init?.signal?.addEventListener("abort", () => resolve(), { once: true });
+              });
+              return json({ status: "wait" });
+            }
+            return json(next);
+          }
+          return json({ ret: 0 }); // notifystart / notifystop 探活
+        }) as typeof fetch,
+      },
+    }),
+  );
+  const registry = new BotRegistry({
+    db,
+    verify: async (platform, credentials) => {
+      const verify = plugins.get(platform)?.hooks?.verifyCredential;
+      if (verify === undefined) {
+        throw new Error(`平台 ${platform} 的连接器未装载，无法校验凭据。`);
+      }
+      await verify(credentials);
+    },
+  });
+  const added: string[] = [];
+  const runtime = {
+    plugins,
+    addBot: (bot: { botId: string }) => added.push(bot.botId),
+    removeBot: () => undefined,
+  } as unknown as ConnectorRuntime;
+  const app = buildServer({
+    log: createLogger("error"),
+    db,
+    repo,
+    version: "0.2.0",
+    registry,
+    connectors: runtime,
+    botStatuses: () => [],
+  });
+  await app.listen({ port: 0, host: "127.0.0.1" });
+  const addr = app.server.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    registry,
+    added,
+    close: async () => {
+      await app.close();
+      db.close();
+      try {
+        rmSync(dir, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        });
+      } catch {
+        /* best-effort */
+      }
+    },
+  };
+}
+
+async function postJson(
+  url: string,
+  body: unknown,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
+test("P4 微信扫码中介：声明在列 + create 透传（令牌不下发）；completed → 宿主校验并注册；凭据不出浏览器", async () => {
+  const fx = await setupWeixinServer([
+    { status: "wait" },
+    {
+      status: "confirmed",
+      bot_token: "WX-TOKEN-1",
+      ilink_bot_id: "abc123@im.bot",
+      baseurl: "https://ilink-sh.weixin.qq.com",
+      ilink_user_id: "u1@im.wechat",
+    },
+  ]);
+  try {
+    // 声明面：weixin 在列且为 qr-pair（表单字段/扫码路由由此驱动）
+    const decls = (await (
+      await get(fx.baseUrl, "/ui/api/connectors", authHeaders())
+    ).json()) as {
+      connectors: Array<{
+        id: string;
+        login: { kind: string; create?: string; poll?: string };
+        credential_secrets: string[];
+      }>;
+    };
+    const wx = decls.connectors.find((c) => c.id === "weixin");
+    assert.ok(wx !== undefined, "weixin 平台声明应在列");
+    assert.deepEqual(wx.login, {
+      kind: "qr-pair",
+      create: "/login/qr/create",
+      poll: "/login/qr/poll",
+    });
+    assert.deepEqual(wx.credential_secrets, ["token"]);
+
+    // create 透传：task_id + 二维码内容；轮询令牌不下发
+    const created = await postJson(`${fx.baseUrl}${WX_CREATE}`, {});
+    assert.equal(created.status, 200);
+    assert.equal(created.body.connect_url, WX_QR_URL);
+    assert.equal(created.body.interval_s, 2);
+    assert.equal(JSON.stringify(created.body).includes("QR-SECRET-TOKEN"), false);
+
+    // poll：pending → created（宿主中介完成校验+落库+联动接入）
+    let last = { status: 0, body: {} as Record<string, unknown> };
+    for (let i = 0; i < 200; i += 1) {
+      last = await postJson(`${fx.baseUrl}${WX_POLL}`, {
+        task_id: created.body.task_id,
+      });
+      if (last.status !== 200 || last.body.status !== "pending") break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.equal(last.status, 200);
+    assert.equal(last.body.status, "created");
+    const bot = last.body.bot as { appid: string; name: string };
+    assert.deepEqual(bot, { appid: "abc123-im-bot", name: "abc123-im-bot" });
+    assert.match(String(last.body.agent_token), /^[0-9a-f]{48}$/);
+    assert.equal(JSON.stringify(last.body).includes("WX-TOKEN-1"), false); // 凭据不出浏览器
+    assert.deepEqual(fx.added, ["abc123-im-bot"]); // 联动运行时接入
+    const record = fx.registry.get("abc123-im-bot");
+    assert.ok(record);
+    assert.equal(record.platform, "weixin");
+    assert.deepEqual(record.credentials, {
+      appid: "abc123-im-bot",
+      token: "WX-TOKEN-1",
+      base_url: "https://ilink-sh.weixin.qq.com",
+      owner_id: "u1@im.wechat",
+    });
+  } finally {
+    await fx.close();
+  }
+});
+
+test("P4 微信扫码中介：终态失败 → 连接器状态化错误经 mapError 透传（409 + 可操作文案），不落库", async () => {
+  const fx = await setupWeixinServer([{ status: "binded_redirect" }]);
+  try {
+    const created = await postJson(`${fx.baseUrl}${WX_CREATE}`, {});
+    assert.equal(created.status, 200);
+    let last = { status: 0, body: {} as Record<string, unknown> };
+    for (let i = 0; i < 200; i += 1) {
+      last = await postJson(`${fx.baseUrl}${WX_POLL}`, {
+        task_id: created.body.task_id,
+      });
+      if (last.status !== 200) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    // 连接器对 SDK 只做类型导入（拿不到 ConnectorError 运行时类）：鸭子类型识别其 status
+    assert.equal(last.status, 409);
+    assert.match(String(last.body.error), /已绑定/);
+    assert.equal(fx.registry.list().length, 0);
+    assert.deepEqual(fx.added, []);
+    // 未知任务：expired（前端据此重开任务）
+    const unknown = await postJson(`${fx.baseUrl}${WX_POLL}`, { task_id: "nope" });
+    assert.equal(unknown.status, 200);
+    assert.deepEqual(unknown.body, { status: "expired" });
+    // 平台不存在：404
+    const missing = await postJson(`${fx.baseUrl}/ui/api/platforms/nope${"/login/qr/create"}`, {});
+    assert.equal(missing.status, 404);
+  } finally {
+    await fx.close();
+  }
+});
+
+test("P4 多平台手动添加：POST /bots 按 platform 的 credentialSchema 取凭据；未知/未装载平台 400", async () => {
+  const fx = await setupWeixinServer([]);
+  try {
+    const ok = await postJson(`${fx.baseUrl}/ui/api/bots`, {
+      platform: "weixin",
+      appid: "abc123-im-bot",
+      token: "WX-TOKEN-2",
+      base_url: "https://ilink-sh.weixin.qq.com",
+      owner_id: "u1@im.wechat",
+      name: "小雅",
+      junk: "不在声明里的键被忽略",
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.body.bot, { appid: "abc123-im-bot", name: "小雅" });
+    const record = fx.registry.get("abc123-im-bot");
+    assert.ok(record);
+    assert.equal(record.platform, "weixin");
+    // 凭据只取声明键；name/junk 不混入
+    assert.deepEqual(record.credentials, {
+      appid: "abc123-im-bot",
+      token: "WX-TOKEN-2",
+      base_url: "https://ilink-sh.weixin.qq.com",
+      owner_id: "u1@im.wechat",
+    });
+    assert.deepEqual(fx.added, ["abc123-im-bot"]);
+
+    // 未知平台
+    const unknown = await postJson(`${fx.baseUrl}/ui/api/bots`, {
+      platform: "nope",
+      appid: "x",
+      token: "y",
+    });
+    assert.equal(unknown.status, 400);
+    assert.match(String(unknown.body.error), /平台不存在/);
+    // 缺省平台 qq：本台架未装载 qq 连接器 → 可操作 400（不落库、不触网）
+    const legacy = await postJson(`${fx.baseUrl}/ui/api/bots`, {
+      appid: "20002",
+      secret: "s2",
+    });
+    assert.equal(legacy.status, 400);
+    assert.match(String(legacy.body.error), /平台不存在/);
+    assert.equal(fx.registry.list().length, 1);
   } finally {
     await fx.close();
   }

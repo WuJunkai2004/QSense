@@ -63,7 +63,9 @@ const MIME: Record<string, string> = {
 };
 
 /** 统一错误映射：BotRegistryError（含参数类错误）→ 400，ConnectorError（插件声明 status）
- *  透传，QrBindError（上游扫码接口）→ 502，TtsError（TTS 上游）→ 502，其余 → 500（记日志） */
+ *  透传，QrBindError（上游扫码接口）→ 502，TtsError（TTS 上游）→ 502，其余 → 500（记日志）。
+ *  连接器对 SDK 只做类型导入（各自打包后 instanceof 跨包不成立），其自带的可操作错误以
+ *  「Error 上带合法 status」的鸭子类型识别：透传状态与文案，不落入通用 500 文案。 */
 function mapError(
   log: Logger,
   e: unknown,
@@ -72,6 +74,12 @@ function mapError(
   if (e instanceof ConnectorError) return { status: e.status, message: e.message };
   if (e instanceof QrBindError) return { status: 502, message: e.message };
   if (e instanceof TtsError) return { status: 502, message: e.message };
+  if (e instanceof Error) {
+    const status = (e as { status?: unknown }).status;
+    if (typeof status === "number" && Number.isInteger(status) && status >= 400 && status < 600) {
+      return { status, message: e.message };
+    }
+  }
   const message = e instanceof Error ? e.message : String(e);
   log.error("ui api error", { reason: message.slice(0, 300) });
   return { status: 500, message: "内部错误，请查看服务日志。" };
@@ -234,8 +242,25 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
       plugin.post("/bots", async (req, reply) => {
         try {
           const body = (req.body ?? {}) as Record<string, unknown>;
-          const appid = typeof body.appid === "string" ? body.appid : "";
-          const secret = typeof body.secret === "string" ? body.secret : "";
+          // 平台缺省 qq（兼容旧前端/脚本）；凭据键按该平台 credentialSchema 的属性名从
+          // 请求体取字符串值——表单本身即按该 schema 渲染，宿主不感知具体键
+          const platform =
+            typeof body.platform === "string" && body.platform.trim() !== ""
+              ? body.platform.trim()
+              : "qq";
+          const target = connectors.get(platform);
+          if (target === undefined) {
+            throw new BotRegistryError(
+              `平台不存在或连接器未装载：${platform}。已注册：${
+                connectors.list().map((p) => p.id).join(", ") || "（无）"
+              }。`,
+            );
+          }
+          const credentials: Record<string, string> = {};
+          for (const key of Object.keys(target.credentialSchema.properties ?? {})) {
+            const v = body[key];
+            if (typeof v === "string") credentials[key] = v;
+          }
           const name = typeof body.name === "string" ? body.name : undefined;
           if (
             body.auth_level !== undefined &&
@@ -251,13 +276,16 @@ export function registerUiRoutes(app: FastifyInstance, deps: UiDeps): void {
               ? body.auth_level
               : undefined;
           const registered = await registry.add({
-            platform: "qq",
-            credentials: { appid, secret },
+            platform,
+            credentials,
             name,
             authLevel,
           });
           supervisor.addBot(registered.bot);
-          uiLog.info("bot added via ui", { appid: registered.bot.botId });
+          uiLog.info("bot added via ui", {
+            platform,
+            appid: registered.bot.botId,
+          });
           // M8：agent_token 仅此一次返回——WebUI 弹窗提示"立即保存"，服务端不留展示通道
           return {
             ok: true,
