@@ -18,7 +18,7 @@ export {
   baseInfo,
   bizCodeOf,
   clientVersionOf,
-  parseWeixinJson,
+  quoteWeixinUint64,
   type WeixinApi,
   type WeixinApiKind,
   type RequestOptions,

@@ -170,7 +170,6 @@ export interface MessageItem {
   voice_item?: VoiceItem;
   file_item?: FileItem;
   video_item?: VideoItem;
-  [key: string]: unknown;
 }
 
 /** 统一消息（proto: WeixinMessage）。uint64 id 字段无损解析为字符串 */
@@ -191,7 +190,6 @@ export interface WeixinMessage {
   /** 会话上下文令牌：出站必须原样回带（敏感，不落日志/不入 raw） */
   context_token?: string;
   run_id?: string;
-  [key: string]: unknown;
 }
 
 export interface GetUpdatesResp {

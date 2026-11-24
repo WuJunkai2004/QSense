@@ -111,10 +111,11 @@ function randomWechatUin(): string {
 const LOSSLESS_ID_KEYS = new Set(["message_id", "msg_id", "svr_id"]);
 
 /**
- * 无损解析：把 LOSSLESS_ID_KEYS 键位置的 JSON 数字先改写成字符串再 JSON.parse。
- * 扫描器只在「字符串键 + 冒号」之后改写裸数字，绝不触碰字符串内部的内容。
+ * uint64 无损改写（传输解码步骤）：把 LOSSLESS_ID_KEYS 键位置的 JSON 数字先
+ * 加引号再交解析方——扫描器只在「字符串键 + 冒号」之后改写裸数字，绝不触碰
+ * 字符串内部的内容。返回改写后的 JSON 文本，解析（+ wire 校验）归 unwrap。
  */
-export function parseWeixinJson(raw: string): unknown {
+export function quoteWeixinUint64(raw: string): string {
   let out = "";
   let i = 0;
   while (i < raw.length) {
@@ -138,9 +139,9 @@ export function parseWeixinJson(raw: string): unknown {
     while (/\s/.test(raw[cursor] ?? "")) cursor += 1;
     if (raw[cursor] !== ":") continue;
 
-    let key: unknown;
+    let key: string;
     try {
-      key = JSON.parse(token) as unknown;
+      key = JSON.parse(token);
     } catch {
       continue;
     }
@@ -162,7 +163,7 @@ export function parseWeixinJson(raw: string): unknown {
       i = numStart;
     }
   }
-  return JSON.parse(out) as unknown;
+  return out;
 }
 
 /** 应答体业务码：errcode 优先（如 -14），其次 ret；全为 0/缺省返回 undefined */
@@ -213,9 +214,13 @@ function ensureNoTrailingSlash(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
-/** 应答体过 wire schema；违规 = 协议异常（biz 档，可定位字段路径、不含数据值） */
-function unwrap<T>(label: string, raw: unknown, schema: z.ZodType<T>): T {
-  const parsed = schema.safeParse(raw);
+/**
+ * 应答体解码 + wire 校验（一步）：uint64 无损改写 → JSON.parse（语法坏原样抛
+ * SyntaxError，同旧语义）→ schema safeParse；null 载荷按空对象；违规 = 协议
+ * 异常（biz 档，可定位字段路径、不含数据值）。
+ */
+function unwrap<T>(label: string, raw: string, schema: z.ZodType<T>): T {
+  const parsed = schema.safeParse(JSON.parse(quoteWeixinUint64(raw)) ?? {});
   if (!parsed.success) {
     const paths = parsed.error.issues
       .slice(0, 5)
@@ -249,7 +254,7 @@ export function createWeixinApi(
       defaultTimeout: number;
     },
     opts: RequestOptions = {},
-  ): Promise<unknown> {
+  ): Promise<string> {
     const url = new URL(path, `${ensureNoTrailingSlash(init.base ?? base)}/`);
     const headers: Record<string, string> = {
       "iLink-App-Id": ILINK_APP_ID,
@@ -292,8 +297,8 @@ export function createWeixinApi(
       );
     }
     const text = await res.text();
-    if (text === "") return {};
-    return parseWeixinJson(text);
+    // 空应答体按空对象（等价旧 `raw ?? {}` 的 schema 容忍路径）
+    return text === "" ? "{}" : text;
   }
 
   return {
@@ -312,7 +317,7 @@ export function createWeixinApi(
         opts,
       );
       // 应答体业务错误不抛（返回原样交轮询循环判定，-14=token 失效）
-      return unwrap("getupdates", raw ?? {}, GetUpdatesRespSchema);
+      return unwrap("getupdates", raw, GetUpdatesRespSchema);
     },
 
     async sendMessage(msg, opts = {}) {
@@ -325,7 +330,7 @@ export function createWeixinApi(
         },
         opts,
       );
-      const resp = unwrap("sendMessage", raw ?? {}, SendMessageRespSchema);
+      const resp = unwrap("sendMessage", raw, SendMessageRespSchema);
       const code = bizCodeOf(resp);
       if (code !== undefined) throw bizError("sendMessage", resp);
       return resp;
@@ -341,7 +346,7 @@ export function createWeixinApi(
         },
         opts,
       );
-      const resp = unwrap("getUploadUrl", raw ?? {}, GetUploadUrlRespSchema);
+      const resp = unwrap("getUploadUrl", raw, GetUploadUrlRespSchema);
       const code = bizCodeOf(resp);
       if (code !== undefined) throw bizError("getUploadUrl", resp);
       return resp;
@@ -353,7 +358,7 @@ export function createWeixinApi(
         { method: "POST", body: JSON.stringify({ base_info: baseInfo() }), defaultTimeout: LIGHT_TIMEOUT_MS },
         opts,
       );
-      const resp = unwrap("notifyStart", raw ?? {}, NotifyRespSchema);
+      const resp = unwrap("notifyStart", raw, NotifyRespSchema);
       const code = bizCodeOf(resp);
       if (code !== undefined) throw bizError("notifyStart", resp);
     },
@@ -364,7 +369,7 @@ export function createWeixinApi(
         { method: "POST", body: JSON.stringify({ base_info: baseInfo() }), defaultTimeout: LIGHT_TIMEOUT_MS },
         opts,
       );
-      const resp = unwrap("notifyStop", raw ?? {}, NotifyRespSchema);
+      const resp = unwrap("notifyStop", raw, NotifyRespSchema);
       const code = bizCodeOf(resp);
       if (code !== undefined) throw bizError("notifyStop", resp);
     },
@@ -378,7 +383,7 @@ export function createWeixinApi(
           defaultTimeout: LIGHT_TIMEOUT_MS,
         },
       );
-      return unwrap("get_bot_qrcode", raw ?? {}, BotQrcodeRespSchema);
+      return unwrap("get_bot_qrcode", raw, BotQrcodeRespSchema);
     },
 
     async getQrcodeStatus(qrcode, opts = {}) {
@@ -395,7 +400,7 @@ export function createWeixinApi(
         },
         opts,
       );
-      return unwrap("get_qrcode_status", raw ?? {}, QrcodeStatusRespSchema);
+      return unwrap("get_qrcode_status", raw, QrcodeStatusRespSchema);
     },
   };
 }
