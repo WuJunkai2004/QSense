@@ -31,8 +31,12 @@ const zh = {
     "平台 {platform} 的 normalize 解读失败，载荷已丢弃：{reason}",
   ingest_save_fail:
     "平台 {platform} 消息入库失败，本条已跳过（去重未标记，重拉同批可恢复），id={id}：{reason}",
+  ingest_shape_fail:
+    "平台 {platform} 消息未过契约校验，已隔离丢弃（不入库、不去重标记），id={id}：{reason}",
   ingest_effect_fail:
     "平台 {platform} 效应 {kind} 落地失败，已跳过：{reason}",
+  ingest_effect_shape_fail:
+    "平台 {platform} 效应未过契约校验，已丢弃：{reason}",
   // —— 退出 ——
   shutdown_done: "已优雅退出。",
   // —— 发送器（M4） ——
@@ -99,8 +103,12 @@ const en: Translation = {
     "normalize failed for platform {platform}; payload dropped: {reason}",
   ingest_save_fail:
     "Message save failed for platform {platform}; item skipped (dedup not marked, recoverable on re-poll), id={id}: {reason}",
+  ingest_shape_fail:
+    "Message failed contract validation for platform {platform}; isolated and dropped (not saved, dedup not marked), id={id}: {reason}",
   ingest_effect_fail:
     "Effect {kind} failed to apply for platform {platform}; skipped: {reason}",
+  ingest_effect_shape_fail:
+    "Effect failed contract validation for platform {platform}; dropped: {reason}",
   shutdown_done: "Graceful shutdown complete.",
   send_disabled:
     "Sending is disabled, rejected. Writes require the master send switch enabled (managed in the WebUI settings) and the target conversation meeting send conditions (group = in the bot's allowlist; direct message = recipient has not rejected messages). Current switch {enabled}, allowlisted groups {allow}.",

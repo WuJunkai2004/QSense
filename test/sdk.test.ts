@@ -529,7 +529,7 @@ describe("sdk/memory+harness", () => {
     assert.equal(bfx.passed, false);
     assert.match(
       bfx.checks.find((c) => c.name === "normalize-shape")?.detail ?? "",
-      /未知效应类别/,
+      /kind/,
     );
   });
 

@@ -7,10 +7,13 @@
 // 效应（InboundEffect）是平台语义到 core 中立词汇表的翻译：群注册表/开关/审核
 // 回执由 core 按 repo 语义落地；botId 以信封为权威盖章（防插件填错 bot 跨 bot 污染）。
 
-import type {
+import {
   ConnectorRegistry,
-  InboundEffect,
-  NormalizedMessage,
+  formatZodIssues,
+  InboundEffectSchema,
+  UnifiedMessageSchema,
+  type InboundEffect,
+  type NormalizedMessage,
 } from "@qsense/connector-sdk";
 import { t } from "../i18n";
 import type { Logger } from "../utils/logger";
@@ -102,9 +105,21 @@ export function createIngestPipeline(deps: IngestDeps): (raw: {
     // 同批时全部命中去重被滤、游标照样推进，进程生命周期内静默丢整批。
     // 每条消息/效应各自 try/catch：单条失败不炸整批、不上抛（绝不抛错纪律），
     // 连接器轮询循环不会把入库问题误当轮询错误触发退避与状态抖动。
+    // T2 zod 网关：normalize 产物逐条过 UnifiedMessageSchema / InboundEffectSchema
+    // ——校验清洗在前（违者隔离告警、不占去重窗口），去重与入库只处理清洁产物。
     const pending: Array<{ m: NormalizedMessage; key: string }> = [];
-    for (const m of inbound.messages) {
-      m.botId = raw.botId;
+    for (const m0 of inbound.messages) {
+      m0.botId = raw.botId;
+      const parsed = UnifiedMessageSchema.safeParse(m0);
+      if (!parsed.success) {
+        deps.log.warn(t("ingest_shape_fail", {
+          platform,
+          id: typeof m0.msgId === "string" ? m0.msgId : "?",
+          reason: formatZodIssues(parsed.error, "message"),
+        }));
+        continue; // 违规隔离：不入库、不去重标记，重拉同批时再次可观测
+      }
+      const m = parsed.data;
       const key = `${m.botId}:${m.scope}:${m.scopeId}:${m.msgId}`;
       if (!dedup.isNew(key)) {
         deps.log.warn(t("gw_event_dedup", { type: "message", id: m.msgId }));
@@ -112,9 +127,21 @@ export function createIngestPipeline(deps: IngestDeps): (raw: {
       }
       pending.push({ m, key });
     }
+    const effects: InboundEffect[] = [];
+    for (const fx0 of inbound.effects) {
+      const parsed = InboundEffectSchema.safeParse(fx0);
+      if (!parsed.success) {
+        deps.log.warn(t("ingest_effect_shape_fail", {
+          platform,
+          reason: formatZodIssues(parsed.error, "effect"),
+        }));
+        continue;
+      }
+      effects.push(parsed.data);
+    }
     deps.tap?.({
       messages: pending.map((p) => p.m),
-      effects: inbound.effects,
+      effects,
     });
     for (const { m, key } of pending) {
       try {
@@ -129,7 +156,7 @@ export function createIngestPipeline(deps: IngestDeps): (raw: {
       }
       dedup.mark(key);
     }
-    for (const fx of inbound.effects) {
+    for (const fx of effects) {
       try {
         applyEffect(deps.repo, raw.botId, fx);
       } catch (e) {

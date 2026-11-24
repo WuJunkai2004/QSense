@@ -134,24 +134,21 @@ function countByMsgId(rig: TestRig, msgId: string): number {
   return row.n;
 }
 
-test("G-1 形状违规消息不炸整批：同批正常消息存活、坏消息不入库、告警不含正文", () => {
+test("G-1 不可清洗的形状违规被隔离：同批正常消息存活、坏消息不入库、告警含字段路径不含正文", () => {
   const rig = setup();
   try {
     const good = msg({ msgId: "m-ok" });
-    // normalize 漏字段（records 缺失）→ saveMessage 读 records.length 抛 TypeError：
-    // 真实形状违规路径。注意 ts/direction 等 undefined 只会被 better-sqlite3
-    // 静默转 NULL（v13 实测）——部分形状违规不抛错、以 NULL 静默入库，这比抛错
-    // 更隐蔽，是 T2 zod 网关（ingest 侧强制校验）必要性的直接证据。
     const bad = msg({
       msgId: "m-bad",
       text: "SECRET-BODY-不得入日志",
-      records: undefined as unknown as [],
+      scope: "频道" as NormalizedMessage["scope"], // 词表违规：schema 不可清洗 → 隔离
     });
     assert.doesNotThrow(() => rig.feed({ messages: [good, bad], effects: [] }));
     assert.equal(countByMsgId(rig, "m-ok"), 1, "同批正常消息必须入库");
     assert.equal(countByMsgId(rig, "m-bad"), 0, "坏消息不入库");
     const saveFails = rig.warns.filter((w) => w.includes("m-bad"));
-    assert.equal(saveFails.length, 1, "坏消息恰有一条入库失败告警");
+    assert.equal(saveFails.length, 1, "坏消息恰有一条契约校验失败告警");
+    assert.ok(saveFails[0]!.includes("scope"), "告警含违规字段路径（可定位）");
     for (const w of rig.warns) {
       assert.ok(!w.includes("SECRET-BODY"), "告警绝不含消息正文（log_content 纪律）");
     }
@@ -160,23 +157,60 @@ test("G-1 形状违规消息不炸整批：同批正常消息存活、坏消息�
   }
 });
 
-test("G-2 失败不标记去重：坏消息修复后重投可入库（封死静默丢批失败链）", () => {
+test("G-1b 可机械清洗的违规被兜底入库：records 缺失 → 清洗为空记录集", () => {
   const rig = setup();
   try {
-    const broken = msg({
-      msgId: "m-x",
-      records: undefined as unknown as [],
+    const sloppy = msg({
+      msgId: "m-sloppy",
+      records: undefined as unknown as [], // normalize 漏字段 → schema default([]) 兜底
     });
-    rig.feed({ messages: [broken], effects: [] });
+    rig.feed({ messages: [sloppy], effects: [] });
+    assert.equal(countByMsgId(rig, "m-sloppy"), 1, "可清洗违规兜底入库（不丢消息）");
+    const row = rig.db
+      .prepare("SELECT records_count FROM messages WHERE bot_id = ? AND msg_id = ?")
+      .get("bot-t1", "m-sloppy") as { records_count: number };
+    assert.equal(row.records_count, 0, "records 清洗为空集");
+  } finally {
+    teardown(rig);
+  }
+});
+
+test("G-2 存储层故障不标记去重：故障排除后重投可入库（封死静默丢批失败链）", () => {
+  const rig = setup();
+  try {
+    // 模拟存储层故障（db 锁/约束等任何 saveMessage 抛错来源）
+    const boomRepo = Object.assign(Object.create(Object.getPrototypeOf(rig.repo)), rig.repo, {
+      saveMessage: () => {
+        throw new Error("db-boom");
+      },
+    }) as unknown as Repo;
+    const plugins = new ConnectorRegistry();
+    plugins.register(makeFakePlugin((_botId, payload) => payload));
+    const warnLog = {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (s: string) => rig.warns.push(s),
+      error: () => undefined,
+      fatal: () => undefined,
+      child: () => warnLog,
+    };
+    const pipeline = createIngestPipeline({
+      repo: boomRepo,
+      log: warnLog as never,
+      plugins,
+    });
+    const failing = msg({ msgId: "m-x" });
+    assert.doesNotThrow(() =>
+      pipeline({ botId: "bot-t1", payload: { platform: "fake", messages: [failing], effects: [] } }),
+    );
     assert.equal(countByMsgId(rig, "m-x"), 0);
     assert.equal(
       rig.warns.filter((w) => w.includes("m-x")).length,
       1,
       "首轮入库失败有告警",
     );
-    // 重拉同批（连接器退避后带旧游标重投）——同一 msgId、形状已修复
-    const repaired = msg({ msgId: "m-x", text: "修复后" });
-    rig.feed({ messages: [repaired], effects: [] });
+    // 故障排除（真 repo）后重拉同批——同一 msgId 必须能重新入库
+    rig.feed({ messages: [msg({ msgId: "m-x", text: "修复后" })], effects: [] });
     assert.equal(
       countByMsgId(rig, "m-x"),
       1,
