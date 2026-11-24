@@ -364,7 +364,7 @@ test("parser：局部引用（选区）在可得正文里定位；定位失败�
 
 // —— 非消费面 ——
 
-test("parser：非消费面 → null（机器人回声/群消息/已删除/无法定位/非微信信封）", () => {
+test("parser：非消费面 → null（机器人回声/群消息/已删除/无法定位）；信封形状违规声明面拒绝", () => {
   assert.equal(normalizeWeixinMessage(BOT, payloadOf(textMsg({ message_type: MessageType.BOT }))), null);
   assert.equal(normalizeWeixinMessage(BOT, payloadOf(textMsg({ group_id: "g1@im.bizchat" }))), null);
   assert.equal(normalizeWeixinMessage(BOT, payloadOf(textMsg({ delete_time_ms: TS + 1000 }))), null);
@@ -373,15 +373,19 @@ test("parser：非消费面 → null（机器人回声/群消息/已删除/无�
     normalizeWeixinMessage(BOT, payloadOf(textMsg({ message_id: undefined, client_id: undefined }))),
     null,
   );
-  assert.equal(normalizeWeixinMessage(BOT, { platform: "qq", data: {} }), null);
-  assert.equal(normalizeWeixinMessage(BOT, null), null);
-  assert.equal(normalizeWeixinInbound(BOT, { platform: "weixin", message: "x" }), null);
-  // 数字 id（未经无损解析的载荷）也能定位
-  const numeric = normalizeWeixinMessage(
-    BOT,
-    payloadOf(textMsg({ message_id: undefined, item_list: [{ type: 1, msg_id: 42 as unknown as string, text_item: { text: "x" } }] })),
+  // B⁺ T5：信封形状归声明面 schema 把关（safeParse 失败 = 可观测丢弃 + warn）
+  const plugin = createWeixinConnector();
+  assert.equal(plugin.normalize(BOT, { platform: "qq", data: {} }), null);
+  assert.equal(plugin.normalize(BOT, null), null);
+  assert.equal(plugin.normalize(BOT, { platform: "weixin", message: "x" }), null);
+  // 数字 id（未经无损解析的载荷）：schema 违规，边界拒绝（传输层 parseWeixinJson 保证线上恒字符串）
+  assert.equal(
+    plugin.normalize(
+      BOT,
+      payloadOf(textMsg({ message_id: undefined, item_list: [{ type: 1, msg_id: 42 as unknown as string, text_item: { text: "x" } }] })),
+    ),
+    null,
   );
-  assert.equal(numeric?.msgId, "42");
 });
 
 // —— 真管线 ——
