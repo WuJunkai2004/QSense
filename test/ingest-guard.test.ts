@@ -1,0 +1,266 @@
+// T1 ingest 管线加固验收（2026-11-24）：形状违规消息不得炸整批、不得触发
+// 「标记后入库失败→重拉全滤→游标推进→静默丢批」失败链、告警不得含消息正文。
+//
+// 失败链背景（架构审查 §1.3）：旧管线 BoundedDedup.isNew 检查即标记，单条
+// saveMessage 抛错（如 undefined 绑定撞 better-sqlite3 TypeError）时该键已进
+// 去重窗口——连接器重拉同批时全部命中去重被滤、游标照样推进，进程生命周期内
+// 永久静默丢失。加固后：检查/标记两段式 + 逐条 try/catch 隔离 + 入库成功才标记。
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  ConnectorRegistry,
+  type ConnectorLogger,
+  type ConnectorPlugin,
+  type InboundEffect,
+  type NormalizedMessage,
+} from "@qsense/connector-sdk";
+import { createIngestPipeline } from "../src/connectors/ingest";
+import { openDatabase, runMigrations, type DB } from "../src/store/db";
+import { migrations } from "../src/store/migrations";
+import { Repo } from "../src/store/repo";
+
+/** 正常成品消息工厂（over 允许注入非法字段值——测试的职责就是注入非法输入） */
+function msg(over: Partial<NormalizedMessage>): NormalizedMessage {
+  return {
+    botId: "bot-t1",
+    scope: "group",
+    scopeId: "G1",
+    msgId: "m-good",
+    authorOpenid: "u1",
+    authorName: "测试者",
+    ts: 1700000000000,
+    text: "hello",
+    content: "hello",
+    quote: null,
+    records: [],
+    mentions: [],
+    attachments: [],
+    raw: { src: "fake" },
+    direction: 0,
+    ...over,
+  } as NormalizedMessage;
+}
+
+/** 效应工厂（over 同上允许注入非法值） */
+function fx(over: Partial<InboundEffect>): InboundEffect {
+  return { kind: "group-seen", scopeId: "G1", fullMsg: true, ...over } as InboundEffect;
+}
+
+interface TestRig {
+  repo: Repo;
+  db: DB;
+  warns: string[];
+  dir: string;
+  /** 投递一批（inbound 直接透传给管线，模拟插件 normalize 产出） */
+  feed: (inbound: { messages: NormalizedMessage[]; effects: InboundEffect[] } | null) => void;
+}
+
+/** fake 平台插件：声明面补齐过 validatePlugin 闸门，normalize 由用例给定 */
+function makeFakePlugin(
+  normalize: (botId: string, payload: unknown) => unknown,
+): ConnectorPlugin {
+  return {
+    id: "fake",
+    sdkRange: "^2.0.0",
+    title: "假平台",
+    caps: {
+      scopes: ["group"],
+      media: { image: false, voice: false, video: false, file: false },
+      recall: false,
+      passiveWindow: false,
+      quota: false,
+    },
+    credentialSchema: { type: "object", properties: {} },
+    credentialSecrets: [],
+    tools: [],
+    create: () => ({}) as never, // 声明面过闸即可；ingest 管线只用 normalize
+    normalize,
+  } as unknown as ConnectorPlugin;
+}
+
+/** 台架：fake 插件（normalize=透传）+ 假日志（收集 warn）+ 真库 */
+function setup(): TestRig {
+  const dir = mkdtempSync(join(tmpdir(), "qsense-ingest-guard-"));
+  const db = openDatabase(dir);
+  runMigrations(db, migrations);
+  const repo = new Repo(db);
+  const warns: string[] = [];
+  const log = {
+    debug: () => undefined,
+    info: () => undefined,
+    warn: (s: string) => warns.push(s),
+    error: () => undefined,
+    fatal: () => undefined,
+    child: () => log,
+  } as unknown as ConnectorLogger;
+  const plugins = new ConnectorRegistry();
+  // fake 平台插件：normalize 原样透传信封内容（测试完全控制管线产出）
+  plugins.register(makeFakePlugin((_botId, payload) => payload));
+  const pipeline = createIngestPipeline({ repo, log: log as never, plugins });
+  return {
+    repo,
+    db,
+    warns,
+    dir,
+    feed: (inbound) => {
+      pipeline({
+        botId: "bot-t1",
+        payload:
+          inbound === null
+            ? null
+            : { platform: "fake", ...inbound },
+      });
+    },
+  };
+}
+
+function teardown(rig: TestRig): void {
+  rig.db.close();
+  try {
+    rmSync(rig.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch {
+    /* Windows 句柄延迟，best-effort */
+  }
+}
+
+function countByMsgId(rig: TestRig, msgId: string): number {
+  const row = rig.db
+    .prepare("SELECT COUNT(*) AS n FROM messages WHERE bot_id = ? AND msg_id = ?")
+    .get("bot-t1", msgId) as { n: number };
+  return row.n;
+}
+
+test("G-1 形状违规消息不炸整批：同批正常消息存活、坏消息不入库、告警不含正文", () => {
+  const rig = setup();
+  try {
+    const good = msg({ msgId: "m-ok" });
+    // normalize 漏字段（records 缺失）→ saveMessage 读 records.length 抛 TypeError：
+    // 真实形状违规路径。注意 ts/direction 等 undefined 只会被 better-sqlite3
+    // 静默转 NULL（v13 实测）——部分形状违规不抛错、以 NULL 静默入库，这比抛错
+    // 更隐蔽，是 T2 zod 网关（ingest 侧强制校验）必要性的直接证据。
+    const bad = msg({
+      msgId: "m-bad",
+      text: "SECRET-BODY-不得入日志",
+      records: undefined as unknown as [],
+    });
+    assert.doesNotThrow(() => rig.feed({ messages: [good, bad], effects: [] }));
+    assert.equal(countByMsgId(rig, "m-ok"), 1, "同批正常消息必须入库");
+    assert.equal(countByMsgId(rig, "m-bad"), 0, "坏消息不入库");
+    const saveFails = rig.warns.filter((w) => w.includes("m-bad"));
+    assert.equal(saveFails.length, 1, "坏消息恰有一条入库失败告警");
+    for (const w of rig.warns) {
+      assert.ok(!w.includes("SECRET-BODY"), "告警绝不含消息正文（log_content 纪律）");
+    }
+  } finally {
+    teardown(rig);
+  }
+});
+
+test("G-2 失败不标记去重：坏消息修复后重投可入库（封死静默丢批失败链）", () => {
+  const rig = setup();
+  try {
+    const broken = msg({
+      msgId: "m-x",
+      records: undefined as unknown as [],
+    });
+    rig.feed({ messages: [broken], effects: [] });
+    assert.equal(countByMsgId(rig, "m-x"), 0);
+    assert.equal(
+      rig.warns.filter((w) => w.includes("m-x")).length,
+      1,
+      "首轮入库失败有告警",
+    );
+    // 重拉同批（连接器退避后带旧游标重投）——同一 msgId、形状已修复
+    const repaired = msg({ msgId: "m-x", text: "修复后" });
+    rig.feed({ messages: [repaired], effects: [] });
+    assert.equal(
+      countByMsgId(rig, "m-x"),
+      1,
+      "失败链核心断言：入库失败的键未被去重标记，重投必须能重新入库",
+    );
+  } finally {
+    teardown(rig);
+  }
+});
+
+test("G-3 成功入库的去重语义不变：同键重投仍被滤", () => {
+  const rig = setup();
+  try {
+    rig.feed({ messages: [msg({ msgId: "m-d" })], effects: [] });
+    rig.feed({ messages: [msg({ msgId: "m-d", text: "重投" })], effects: [] });
+    assert.equal(countByMsgId(rig, "m-d"), 1, "存储层不重复");
+    const dedupWarns = rig.warns.filter((w) => w.includes("去重") || w.includes("duplicate") || w.includes("Duplicate"));
+    assert.equal(dedupWarns.length, 1, "重投恰有一条去重告警");
+  } finally {
+    teardown(rig);
+  }
+});
+
+test("G-4 效应落地失败不炸管线、不影响同批消息", () => {
+  const rig = setup();
+  try {
+    const good = msg({ msgId: "m-e" });
+    // repo 效应路径对坏参数天然归一化（如 enabled?1:0），自然抛错难以构造——
+    // 隔离机制的测试直接 mock repo 注入抛错，不赌 repo 内部实现细节
+    const boomRepo = Object.assign(Object.create(Object.getPrototypeOf(rig.repo)), rig.repo, {
+      setGroupSwitch: () => {
+        throw new Error("fx-boom");
+      },
+    }) as unknown as Repo;
+    const plugins = new ConnectorRegistry();
+    plugins.register(makeFakePlugin((_botId, payload) => payload));
+    const warnLog = {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (s: string) => rig.warns.push(s),
+      error: () => undefined,
+      fatal: () => undefined,
+      child: () => warnLog,
+    };
+    const pipeline = createIngestPipeline({
+      repo: boomRepo,
+      log: warnLog as never,
+      plugins,
+    });
+    const badFx = fx({ kind: "group-opt", scopeId: "G1", allow: true });
+    assert.doesNotThrow(() =>
+      pipeline({ botId: "bot-t1", payload: { platform: "fake", messages: [good], effects: [badFx] } }),
+    );
+    assert.equal(countByMsgId(rig, "m-e"), 1, "效应失败不影响同批消息入库");
+    const fxWarns = rig.warns.filter((w) => w.includes("group-opt") && w.includes("fx-boom"));
+    assert.equal(fxWarns.length, 1, "效应落地失败有告警且含效应类别与原因");
+  } finally {
+    teardown(rig);
+  }
+});
+
+test("G-5 管线整体绝不抛错（每条消息路径纪律）：null 信封 / 未知平台 / normalize 抛错", () => {
+  const rig = setup();
+  try {
+    assert.doesNotThrow(() => rig.feed(null));
+    const plugins = new ConnectorRegistry();
+    const log = {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (s: string) => rig.warns.push(s),
+      error: () => undefined,
+      fatal: () => undefined,
+      child: () => log,
+    } as unknown as ConnectorLogger;
+    const throwingPlugin = makeFakePlugin(() => {
+      throw new Error("boom");
+    });
+    plugins.register(throwingPlugin);
+    const pipeline = createIngestPipeline({ repo: rig.repo, log: log as never, plugins });
+    assert.doesNotThrow(() =>
+      pipeline({ botId: "bot-t1", payload: { platform: "boom", x: 1 } }),
+    );
+    assert.ok(rig.warns.some((w) => w.includes("boom")));
+  } finally {
+    teardown(rig);
+  }
+});

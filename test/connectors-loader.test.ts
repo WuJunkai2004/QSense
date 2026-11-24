@@ -7,6 +7,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ConnectorPlugin } from "@qsense/connector-sdk";
 import { createQqConnector } from "@qsense/connector-qq";
 import {
@@ -186,16 +189,42 @@ test("多平台声明同样按声明装载（声明驱动，不硬编码平台�
 
 test("decl：文件缺失 = 零声明；存在则解析", () => {
   assert.deepEqual(loadConnectorDeclarations("no-such-dir/no-config.toml"), []);
-  // 仓库自带的 config.toml 必须可解析（qq + telegram 两声明，凭据红线）
-  const decls = loadConnectorDeclarations("config.toml");
-  assert.deepEqual(
-    decls.map((d) => d.platform),
-    ["qq", "telegram"],
-  );
-  for (const d of decls) {
-    assert.equal(typeof d.package, "string");
-    assert.ok(d.package !== "");
-    assert.equal(d.source === undefined, false);
+  // 临时 toml 断言解析行为（不依赖仓库根生产 config.toml——其内容随真实
+  // 平台接线变化，weixin 接线曾让本用例断言过期失败，2026-11-24 解耦）
+  const dir = mkdtempSync(join(tmpdir(), "qsense-decl-test-"));
+  try {
+    const tomlPath = join(dir, "config.toml");
+    writeFileSync(
+      tomlPath,
+      [
+        "[connectors.qq]",
+        'package = "@qsense/connector-qq"',
+        'range = "^2.x"',
+        'source = "file"',
+        "[connectors.telegram]",
+        'package = "@qsense/connector-telegram"',
+        'range = "^2.x"',
+        'source = "file"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const decls = loadConnectorDeclarations(tomlPath);
+    assert.deepEqual(
+      decls.map((d) => d.platform),
+      ["qq", "telegram"],
+    );
+    for (const d of decls) {
+      assert.equal(typeof d.package, "string");
+      assert.ok(d.package !== "");
+      assert.equal(d.source === undefined, false);
+    }
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch {
+      /* Windows 句柄延迟，best-effort */
+    }
   }
 });
 

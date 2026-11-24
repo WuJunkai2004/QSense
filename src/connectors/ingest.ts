@@ -97,8 +97,12 @@ export function createIngestPipeline(deps: IngestDeps): (raw: {
     }
     if (inbound === null) return;
 
-    // botId 以信封为权威（成品消息逐条盖章）；消息级去重先行
-    const messages: NormalizedMessage[] = [];
+    // botId 以信封为权威（成品消息逐条盖章）。次序纪律（T1 加固）：去重只检查、
+    // 入库成功才标记——旧的「检查即标记」与单条入库失败组合，曾造成连接器重拉
+    // 同批时全部命中去重被滤、游标照样推进，进程生命周期内静默丢整批。
+    // 每条消息/效应各自 try/catch：单条失败不炸整批、不上抛（绝不抛错纪律），
+    // 连接器轮询循环不会把入库问题误当轮询错误触发退避与状态抖动。
+    const pending: Array<{ m: NormalizedMessage; key: string }> = [];
     for (const m of inbound.messages) {
       m.botId = raw.botId;
       const key = `${m.botId}:${m.scope}:${m.scopeId}:${m.msgId}`;
@@ -106,10 +110,41 @@ export function createIngestPipeline(deps: IngestDeps): (raw: {
         deps.log.warn(t("gw_event_dedup", { type: "message", id: m.msgId }));
         continue;
       }
-      messages.push(m);
+      pending.push({ m, key });
     }
-    deps.tap?.({ messages, effects: inbound.effects });
-    for (const m of messages) deps.repo.saveMessage(m);
-    for (const fx of inbound.effects) applyEffect(deps.repo, raw.botId, fx);
+    deps.tap?.({
+      messages: pending.map((p) => p.m),
+      effects: inbound.effects,
+    });
+    for (const { m, key } of pending) {
+      try {
+        deps.repo.saveMessage(m);
+      } catch (e) {
+        deps.log.warn(t("ingest_save_fail", {
+          platform,
+          id: m.msgId,
+          reason: shortReason(e),
+        }));
+        continue; // 未标记去重：重拉同批时本条仍有机会重新入库
+      }
+      dedup.mark(key);
+    }
+    for (const fx of inbound.effects) {
+      try {
+        applyEffect(deps.repo, raw.botId, fx);
+      } catch (e) {
+        deps.log.warn(t("ingest_effect_fail", {
+          platform,
+          kind: fx.kind,
+          reason: shortReason(e),
+        }));
+      }
+    }
   };
+}
+
+/** 告警用错误摘要：截断防日志膨胀；不含消息正文（log_content 纪律） */
+function shortReason(e: unknown): string {
+  const s = e instanceof Error ? e.message : String(e);
+  return s.length > 200 ? `${s.slice(0, 200)}…` : s;
 }

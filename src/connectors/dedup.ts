@@ -9,16 +9,24 @@ export class BoundedDedup {
 
   constructor(private readonly max = 4096) {}
 
-  /** 返回 true 表示首次出现；false 表示重复（调用方应丢弃） */
+  /**
+   * 只检查不标记：首次出现返回 true，重复返回 false。
+   * 调用方须在后续处理（入库）成功后调 mark 完成标记——检查即标记的旧语义
+   * 曾与入库失败组合出「重拉全滤→游标推进→静默丢批」失败链（T1 加固，2026-11-24）。
+   */
   isNew(key: string): boolean {
-    if (this.seen.has(key)) return false;
+    return !this.seen.has(key);
+  }
+
+  /** 标记已处理；有界淘汰最老键 */
+  mark(key: string): void {
+    if (this.seen.has(key)) return;
     this.seen.add(key);
     this.ring.push(key);
     if (this.ring.length > this.max) {
       const oldest = this.ring.shift();
       if (oldest !== undefined) this.seen.delete(oldest);
     }
-    return true;
   }
 
   get size(): number {
