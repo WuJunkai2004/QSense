@@ -11,15 +11,115 @@
 
 import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
-import type {
-  NormalizedAttachment,
-  NormalizedMessage,
-  MsgScope,
+import { z } from "zod";
+import {
+  formatZodIssues,
+  QuoteSchema,
+  type NormalizedAttachment,
+  type NormalizedMessage,
+  type MsgScope,
 } from "@qsense/connector-sdk";
+import type { Logger } from "../utils/logger";
 import type { TtsConfig } from "../tts";
 import type { DB } from "./db";
 
-type Stmt<P extends unknown[] = unknown[]> = Database.Statement<P>;
+// B⁺ T6：better-sqlite3 v13 内建双泛型 prepare<Params, Result>——行类型进语句，
+// 读取端零盲转型。Stmt=位置参数（R=行类型），NamedStmt=命名参数对象绑定（P 与
+// SQL @占位一一对应，better-sqlite3 对缺失键抛错、多余键忽略）。
+type Stmt<P extends unknown[] = [], R = unknown> = Database.Statement<P, R>;
+type NamedStmt<P, R = unknown> = Database.Statement<[P], R>;
+
+/** messages 行写入参数（命名绑定） */
+interface InsertMsgParams {
+  bot_id: string;
+  scope: MsgScope;
+  scope_id: string;
+  msg_id: string;
+  author_openid: string | null;
+  author_name: string | null;
+  author_role: string | null;
+  ts: number | null;
+  text: string;
+  content: string;
+  quote_json: string | null;
+  records_count: number;
+  mentions_json: string | null;
+  attachments_json: string | null;
+  ark_json: string | null;
+  raw_json: string | null;
+  direction: number;
+  msg_idx: string | null;
+}
+
+/** message_records 行写入参数（命名绑定） */
+interface InsertRecordParams {
+  bot_id: string;
+  scope: MsgScope;
+  scope_id: string;
+  msg_id: string;
+  ord: number;
+  depth: number;
+  author_openid: string | null;
+  author_name: string | null;
+  ts: number | null;
+  text: string;
+  quote_json: string | null;
+  attachments_json: string | null;
+}
+
+/** users upsert 参数（命名绑定） */
+interface UpsertUserParams {
+  bot_id: string;
+  openid: string;
+  name: string | null;
+  now: number;
+}
+
+/** sessions upsert 参数（命名绑定） */
+interface UpsertSessionParams {
+  bot_id: string;
+  session_id: string;
+  kind: "group" | "chat";
+  now: number;
+}
+
+/** groups 写入参数（upsert / ensure / 开关共用形状） */
+interface GroupWriteParams {
+  bot_id: string;
+  group_openid: string;
+  full_msg_enabled: number;
+  now: number;
+}
+
+/** members upsert 参数（命名绑定） */
+interface UpsertMemberParams {
+  bot_id: string;
+  group_openid: string;
+  member_openid: string;
+  member_role: string | null;
+  now: number;
+}
+
+/** JSON.parse 容错：坏 JSON → undefined（统一交 schema safeParse 按缺失处理） */
+function jsonParseOf(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/** 运行时设置（kv settings:runtime:v1）——读端 schema 把关，坏档按安全默认 */
+const RuntimeSettingsSchema = z.object({ sendEnable: z.boolean() });
+
+/** TTS 全局配置（kv tts:config:v1）——api_key 允许空串（=不带 Authorization 头） */
+const TtsConfigSchema = z.object({
+  base_url: z.string().min(1),
+  api_key: z.string(),
+  model: z.string().min(1),
+  voice: z.string().min(1),
+  format: z.enum(["mp3", "wav"]).optional(),
+});
 
 export interface MsgRow {
   rid: number;
@@ -77,42 +177,91 @@ export interface QuoteMsgData {
   attachments?: NormalizedAttachment[];
 }
 
+/** 群注册表行（listGroups） */
+export interface GroupRow {
+  group_openid: string;
+  full_msg_enabled: number;
+  added_at: number;
+  updated_at: number;
+  member_count: number;
+}
+
+/** WebUI 群会话行（listGroupsWithLast）：附最后一条消息摘要 */
+export interface GroupWithLastRow extends GroupRow {
+  last_ts: number | null;
+  last_content: string | null;
+  last_author: string | null;
+}
+
+/** WebUI 单聊会话行（listChatsWithLast） */
+export interface ChatWithLastRow {
+  user_openid: string;
+  last_ts: number | null;
+  last_content: string | null;
+  last_author: string | null;
+}
+
+/** 成员名册行（listMembers）：名字 join users 取 QQ 昵称，未收录回落 openid */
+export interface MemberRow {
+  member_openid: string;
+  username: string;
+  member_role: string | null;
+  first_seen: number;
+  last_seen: number;
+  msg_count: number;
+}
+
 export class Repo {
-  // —— 热路径 stmt（构造器缓存） ——
-  private readonly insertMsgStmt: Stmt<[Record<string, unknown>]>;
-  private readonly insertRecordStmt: Stmt<[Record<string, unknown>]>;
-  private readonly upsertUserStmt: Stmt<[Record<string, unknown>]>;
-  private readonly userNameStmt: Stmt<[string, string]>;
-  private readonly afterStmt: Stmt<[string, string, string, number, number]>;
-  private readonly byMsgIdStmt: Stmt<[string, string, string, string]>;
-  private readonly latestStmt: Stmt<[string, string, string, number]>;
+  /** 坏档可观测（quote_json 等）：默认静默（测试零依赖），生产由 index 注入引擎 logger */
+  private readonly log: Logger;
+
+  // —— 热路径 stmt（构造器缓存；泛型第二参=行类型，读取端零盲转型） ——
+  private readonly insertMsgStmt: NamedStmt<InsertMsgParams>;
+  private readonly insertRecordStmt: NamedStmt<InsertRecordParams>;
+  private readonly upsertUserStmt: NamedStmt<UpsertUserParams>;
+  private readonly userNameStmt: Stmt<[string, string], { name: string | null }>;
+  private readonly afterStmt: Stmt<[string, string, string, number, number], MsgRow>;
+  private readonly byMsgIdStmt: Stmt<[string, string, string, string], MsgRow>;
+  private readonly latestStmt: Stmt<[string, string, string, number], MsgRow>;
   private readonly beforeTsStmt: Stmt<
-    [string, string, string, number, number, number, number]
+    [string, string, string, number, number, number, number],
+    MsgRow
   >;
   private afterTsStmt: Stmt<
-    [string, string, string, number, number, number, number]
+    [string, string, string, number, number, number, number],
+    MsgRow
   >;
   private pageBeforeStmt: Stmt<
-    [string, string, string, number | null, number, number]
+    [string, string, string, number | null, number, number],
+    MsgRow
   >;
-  private readonly ftsStmt: Stmt<[string, string, string, string, number]>;
-  private readonly unreadStmt: Stmt<[number, string, string, string]>;
-  private readonly listChatsStmt: Stmt<[string]>;
-  private readonly msgIdxStmt: Stmt<[string, string, string, string]>;
+  private readonly ftsStmt: Stmt<[string, string, string, string, number], MsgRow>;
+  private readonly unreadStmt: Stmt<
+    [number, string, string, string],
+    { unread: number; last_ts: number | null }
+  >;
+  private readonly listChatsStmt: Stmt<
+    [string],
+    { user_openid: string; last_ts: number | null }
+  >;
+  private readonly msgIdxStmt: Stmt<
+    [string, string, string, string],
+    { author_openid: string | null; msg_id: string; author_name: string | null }
+  >;
   private readonly quoteUpdateStmt: Stmt<[string, number]>;
-  private readonly recordsStmt: Stmt<[string, string, string, string]>;
+  private readonly recordsStmt: Stmt<[string, string, string, string], RecordRow>;
   private readonly detectGroupMsgStmt: Stmt<[string, string]>;
   private readonly detectChatMsgStmt: Stmt<[string, string]>;
   private readonly detectGroupRegStmt: Stmt<[string, string]>;
   /** P3：会话注册表（sessions 表）——kind 裁决权威源 + ingest 登写 */
-  private readonly sessionKindStmt: Stmt<[string, string]>;
-  private readonly upsertSessionStmt: Stmt<[Record<string, unknown>]>;
-  private readonly upsertGroupStmt: Stmt<[Record<string, unknown>]>;
-  private readonly ensureGroupStmt: Stmt<[Record<string, unknown>]>;
-  private readonly setGroupSwitchStmt: Stmt<[Record<string, unknown>]>;
+  private readonly sessionKindStmt: Stmt<[string, string], { kind: string }>;
+  private readonly upsertSessionStmt: NamedStmt<UpsertSessionParams>;
+  private readonly upsertGroupStmt: NamedStmt<GroupWriteParams>;
+  private readonly ensureGroupStmt: NamedStmt<GroupWriteParams>;
+  private readonly setGroupSwitchStmt: NamedStmt<GroupWriteParams>;
   private readonly deleteGroupStmt: Stmt<[string, string]>;
-  private readonly upsertMemberStmt: Stmt<[Record<string, unknown>]>;
-  private readonly kvGetStmt: Stmt<[string]>;
+  private readonly upsertMemberStmt: NamedStmt<UpsertMemberParams>;
+  private readonly kvGetStmt: Stmt<[string], { v: string }>;
   private readonly kvSetStmt: Stmt<[string, string]>;
   private readonly insertSendStmt: Stmt<
     [
@@ -131,7 +280,11 @@ export class Repo {
   >;
   private readonly incrQuotaStmt: Stmt<[string, string, string]>;
 
-  constructor(private readonly db: DB) {
+  constructor(
+    private readonly db: DB,
+    log: Logger = noopLogger(),
+  ) {
+    this.log = log;
     this.insertMsgStmt = db.prepare(`
       INSERT OR IGNORE INTO messages(
         bot_id, scope, scope_id, msg_id, author_openid, author_name, author_role,
@@ -160,47 +313,65 @@ export class Repo {
         name = COALESCE(excluded.name, users.name),
         last_seen = MAX(users.last_seen, excluded.last_seen)
     `);
-    this.userNameStmt = db.prepare(
+    this.userNameStmt = db.prepare<[string, string], { name: string | null }>(
       "SELECT name FROM users WHERE bot_id = ? AND openid = ?",
     );
-    this.afterStmt = db.prepare(`
+    this.afterStmt = db.prepare<
+      [string, string, string, number, number],
+      MsgRow
+    >(`
       SELECT rowid AS rid, * FROM messages
       WHERE bot_id = ? AND scope = ? AND scope_id = ? AND rowid > ?
       ORDER BY rowid ASC LIMIT ?
     `);
-    this.byMsgIdStmt = db.prepare(
+    this.byMsgIdStmt = db.prepare<[string, string, string, string], MsgRow>(
       "SELECT rowid AS rid, * FROM messages WHERE bot_id = ? AND scope = ? AND scope_id = ? AND msg_id = ?",
     );
-    this.latestStmt = db.prepare(`
+    this.latestStmt = db.prepare<[string, string, string, number], MsgRow>(`
       SELECT rowid AS rid, * FROM messages
       WHERE bot_id = ? AND scope = ? AND scope_id = ?
       ORDER BY ts DESC, rowid DESC LIMIT ?
     `);
-    this.beforeTsStmt = db.prepare(`
+    this.beforeTsStmt = db.prepare<
+      [string, string, string, number, number, number, number],
+      MsgRow
+    >(`
       SELECT rowid AS rid, * FROM messages
       WHERE bot_id = ? AND scope = ? AND scope_id = ? AND (ts < ? OR (ts = ? AND rowid < ?))
       ORDER BY ts DESC, rowid DESC LIMIT ?
     `);
-    this.afterTsStmt = db.prepare(`
+    this.afterTsStmt = db.prepare<
+      [string, string, string, number, number, number, number],
+      MsgRow
+    >(`
       SELECT rowid AS rid, * FROM messages
       WHERE bot_id = ? AND scope = ? AND scope_id = ? AND (ts > ? OR (ts = ? AND rowid > ?))
       ORDER BY ts ASC, rowid ASC LIMIT ?
     `);
-    this.pageBeforeStmt = db.prepare(`
+    this.pageBeforeStmt = db.prepare<
+      [string, string, string, number | null, number, number],
+      MsgRow
+    >(`
       SELECT rowid AS rid, * FROM messages
       WHERE bot_id = ? AND scope = ? AND scope_id = ? AND (? IS NULL OR rowid < ?)
       ORDER BY rowid DESC LIMIT ?
     `);
-    this.ftsStmt = db.prepare(`
+    this.ftsStmt = db.prepare<[string, string, string, string, number], MsgRow>(`
       SELECT m.rowid AS rid, m.* FROM messages_fts f
       JOIN messages m ON m.rowid = f.rowid
       WHERE messages_fts MATCH ? AND m.bot_id = ? AND m.scope = ? AND m.scope_id = ?
       ORDER BY m.ts DESC, m.rowid DESC LIMIT ?
     `);
-    this.unreadStmt = db.prepare(
+    this.unreadStmt = db.prepare<
+      [number, string, string, string],
+      { unread: number; last_ts: number | null }
+    >(
       "SELECT COALESCE(SUM(rowid > ?), 0) AS unread, MAX(ts) AS last_ts FROM messages WHERE bot_id = ? AND scope = ? AND scope_id = ?",
     );
-    this.listChatsStmt = db.prepare(`
+    this.listChatsStmt = db.prepare<
+      [string],
+      { user_openid: string; last_ts: number | null }
+    >(`
       SELECT c.scope_id AS user_openid, MAX(lm.ts) AS last_ts
       FROM (SELECT scope_id, MAX(rowid) AS rid FROM messages WHERE bot_id = ? AND scope = 'chat' GROUP BY scope_id) c
       JOIN messages lm ON lm.rowid = c.rid
@@ -208,13 +379,16 @@ export class Repo {
       ORDER BY last_ts DESC
     `);
     // 引用 enrich（ingest + 读取懒补共用）：msg_idx 锚 → 被引消息身份
-    this.msgIdxStmt = db.prepare(
+    this.msgIdxStmt = db.prepare<
+      [string, string, string, string],
+      { author_openid: string | null; msg_id: string; author_name: string | null }
+    >(
       "SELECT author_openid, msg_id, author_name FROM messages WHERE bot_id = ? AND scope = ? AND scope_id = ? AND msg_idx = ? ORDER BY rowid DESC LIMIT 1",
     );
-    this.quoteUpdateStmt = db.prepare(
+    this.quoteUpdateStmt = db.prepare<[string, number]>(
       "UPDATE messages SET quote_json = ? WHERE rowid = ?",
     );
-    this.recordsStmt = db.prepare(`
+    this.recordsStmt = db.prepare<[string, string, string, string], RecordRow>(`
       SELECT ord, depth, author_openid, author_name, ts, text, quote_json, attachments_json
       FROM message_records WHERE bot_id = ? AND scope = ? AND scope_id = ? AND msg_id = ?
       ORDER BY ord ASC
@@ -230,39 +404,39 @@ export class Repo {
       "SELECT 1 FROM groups WHERE bot_id = ? AND group_openid = ? LIMIT 1",
     );
     // P3 会话注册表：显式登记 (bot_id, session_id) → kind，探测降级为兜底
-    this.sessionKindStmt = db.prepare(
+    this.sessionKindStmt = db.prepare<[string, string], { kind: string }>(
       "SELECT kind FROM sessions WHERE bot_id = ? AND session_id = ?",
     );
-    this.upsertSessionStmt = db.prepare(`
+    this.upsertSessionStmt = db.prepare<UpsertSessionParams>(`
       INSERT INTO sessions(bot_id, session_id, kind, updated_at)
       VALUES (@bot_id, @session_id, @kind, @now)
       ON CONFLICT(bot_id, session_id) DO UPDATE SET
         kind = @kind,
         updated_at = @now
     `);
-    this.upsertGroupStmt = db.prepare(`
+    this.upsertGroupStmt = db.prepare<GroupWriteParams>(`
       INSERT INTO groups(bot_id, group_openid, full_msg_enabled, added_at, updated_at)
       VALUES (@bot_id, @group_openid, @full_msg_enabled, @now, @now)
       ON CONFLICT(bot_id, group_openid) DO UPDATE SET
         full_msg_enabled = @full_msg_enabled,
         updated_at = @now
     `);
-    this.ensureGroupStmt = db.prepare(`
+    this.ensureGroupStmt = db.prepare<GroupWriteParams>(`
       INSERT OR IGNORE INTO groups(bot_id, group_openid, full_msg_enabled, added_at, updated_at)
       VALUES (@bot_id, @group_openid, @full_msg_enabled, @now, @now)
     `);
-    this.setGroupSwitchStmt = db.prepare(`
+    this.setGroupSwitchStmt = db.prepare<GroupWriteParams>(`
       INSERT INTO groups(bot_id, group_openid, full_msg_enabled, added_at, updated_at)
       VALUES (@bot_id, @group_openid, @full_msg_enabled, @now, @now)
       ON CONFLICT(bot_id, group_openid) DO UPDATE SET
         full_msg_enabled = @full_msg_enabled,
         updated_at = @now
     `);
-    this.deleteGroupStmt = db.prepare(
+    this.deleteGroupStmt = db.prepare<[string, string]>(
       "DELETE FROM groups WHERE bot_id = ? AND group_openid = ?",
     );
     // members 只存成员关系事实（无 username 列——名字权威在 users 表）
-    this.upsertMemberStmt = db.prepare(`
+    this.upsertMemberStmt = db.prepare<UpsertMemberParams>(`
       INSERT INTO members(bot_id, group_openid, member_openid, member_role, first_seen, last_seen, msg_count)
       VALUES (@bot_id, @group_openid, @member_openid, @member_role, @now, @now, 1)
       ON CONFLICT(bot_id, group_openid, member_openid) DO UPDATE SET
@@ -270,7 +444,9 @@ export class Repo {
         last_seen = excluded.last_seen,
         msg_count = members.msg_count + 1
     `);
-    this.kvGetStmt = db.prepare("SELECT v FROM kv WHERE k = ?");
+    this.kvGetStmt = db.prepare<[string], { v: string }>(
+      "SELECT v FROM kv WHERE k = ?",
+    );
     this.kvSetStmt = db.prepare(
       "INSERT INTO kv(k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
     );
@@ -308,13 +484,7 @@ export class Repo {
           m.scope,
           m.scopeId,
           quote.msgIdx,
-        ) as
-          | {
-              author_openid: string | null;
-              msg_id: string;
-              author_name: string | null;
-            }
-          | undefined;
+        );
         if (hit !== undefined) {
           quote = {
             ...quote,
@@ -387,7 +557,7 @@ export class Repo {
       }
       return info.changes > 0;
     });
-    return run() as boolean;
+    return run();
   }
 
   /**
@@ -429,51 +599,40 @@ export class Repo {
   /**
    * quote_msg 数据（读取端）：quote_json 直读，被引晚到（只有锚没有身份）时查缓存懒补并回写。
    * body 已按「首行 + ≤50 字符（码点计，超出加 …）」截断——被引原文是别人的话，不整段进上下文。
+   * B⁺ T6：落盘 JSON 过 SDK QuoteSchema（z.infer 即落库形状），坏档按缺失处理 + warn。
    */
   quoteOf(row: MsgRow): QuoteMsgData | null {
     if (row.quote_json === null) return null;
-    let q: {
-      msgIdx?: string;
-      body?: string;
-      attachments?: unknown;
-      authorOpenid?: string | null;
-      authorName?: string | null;
-      msgId?: string | null;
-    };
-    try {
-      q = JSON.parse(row.quote_json) as typeof q;
-    } catch {
+    const q = QuoteSchema.safeParse(jsonParseOf(row.quote_json));
+    if (!q.success) {
+      this.log.warn(
+        `quote_json 坏档按缺失处理（rid=${row.rid}）：${formatZodIssues(q.error, "quote_json")}`,
+      );
       return null;
     }
-    let { authorOpenid, authorName, msgId } = q;
-    if (q.msgIdx !== undefined && (authorOpenid ?? null) === null) {
+    const body = q.data;
+    if (body === null) return null;
+    let { authorOpenid, authorName, msgId } = body;
+    if (body.msgIdx !== undefined && (authorOpenid ?? null) === null) {
       const hit = this.msgIdxStmt.get(
         row.bot_id,
         row.scope,
         row.scope_id,
-        q.msgIdx,
-      ) as
-        | {
-            author_openid: string | null;
-            msg_id: string;
-            author_name: string | null;
-          }
-        | undefined;
+        body.msgIdx,
+      );
       if (hit !== undefined) {
         authorOpenid = hit.author_openid;
         msgId = hit.msg_id;
         authorName = hit.author_name;
         this.quoteUpdateStmt.run(
-          JSON.stringify({ ...q, authorOpenid, authorName, msgId }),
+          JSON.stringify({ ...body, authorOpenid, authorName, msgId }),
           row.rid,
         );
       }
     }
-    const first = (q.body ?? "").split("\n")[0] ?? "";
+    const first = (body.body ?? "").split("\n")[0] ?? "";
     const cps = Array.from(first);
-    const atts = Array.isArray(q.attachments)
-      ? (q.attachments as NormalizedAttachment[])
-      : [];
+    const atts = body.attachments ?? [];
     return {
       id: authorOpenid ?? null,
       msgId: msgId ?? null,
@@ -564,8 +723,7 @@ export class Repo {
   }
 
   getC2cSwitch(botId: string, userOpenid: string): boolean | null {
-    const row = this.kvGetStmt.get(`c2c:switch:${botId}:${userOpenid}`) as
-      { v: string } | undefined;
+    const row = this.kvGetStmt.get(`c2c:switch:${botId}:${userOpenid}`);
     if (!row) return null;
     return row.v === "1";
   }
@@ -575,31 +733,13 @@ export class Repo {
   // 每 bot 使用开关：kv tts:<appid>（"enable"/"disable"，无键=关——新 bot 缺省禁用）。
 
   /** 全局 TTS 配置；null=未配置（send_media tts: 将被可操作拒绝）。
-   *  format 缺省=旧配置（字段加入前保存的）→ 按 "wav" 处理；非法值视为坏数据。 */
+   *  B⁺ T6：JSON 过 zod schema，坏档/字段缺失按未配置处理（安全默认）。
+   *  format 缺省=旧配置（字段加入前保存的）→ 按 "wav" 处理。 */
   getTtsConfig(): TtsConfig | null {
-    const row = this.kvGetStmt.get(TTS_CONFIG_KEY) as
-      { v: string } | undefined;
+    const row = this.kvGetStmt.get(TTS_CONFIG_KEY);
     if (row === undefined) return null;
-    try {
-      const cfg = JSON.parse(row.v) as Partial<TtsConfig>;
-      if (
-        typeof cfg.base_url !== "string" ||
-        cfg.base_url === "" ||
-        typeof cfg.model !== "string" ||
-        cfg.model === "" ||
-        typeof cfg.voice !== "string" ||
-        cfg.voice === "" ||
-        typeof cfg.api_key !== "string" ||
-        (cfg.format !== undefined &&
-          cfg.format !== "mp3" &&
-          cfg.format !== "wav")
-      ) {
-        return null;
-      }
-      return cfg as TtsConfig;
-    } catch {
-      return null; // 坏数据按未配置处理（安全默认）
-    }
+    const r = TtsConfigSchema.safeParse(jsonParseOf(row.v));
+    return r.success ? r.data : null;
   }
 
   setTtsConfig(cfg: TtsConfig): void {
@@ -607,8 +747,7 @@ export class Repo {
   }
 
   getTtsEnabled(botId: string): boolean {
-    const row = this.kvGetStmt.get(`tts:${botId}`) as
-      { v: string } | undefined;
+    const row = this.kvGetStmt.get(`tts:${botId}`);
     return row?.v === "enable";
   }
 
@@ -616,22 +755,22 @@ export class Repo {
     this.kvSetStmt.run(`tts:${botId}`, enabled ? "enable" : "disable");
   }
 
-  listGroups(botId: string): Array<Record<string, unknown>> {
+  listGroups(botId: string): GroupRow[] {
     return this.db
-      .prepare(
+      .prepare<[string], GroupRow>(
         `
         SELECT g.group_openid, g.full_msg_enabled, g.added_at, g.updated_at,
                (SELECT COUNT(*) FROM members m WHERE m.bot_id = g.bot_id AND m.group_openid = g.group_openid) AS member_count
         FROM groups g WHERE g.bot_id = ? ORDER BY g.updated_at DESC
       `,
       )
-      .all(botId) as Array<Record<string, unknown>>;
+      .all(botId);
   }
 
   /** WebUI 群会话列表：群 + 成员数 + 最后一条消息摘要（作者名以 users 最新昵称为准） */
-  listGroupsWithLast(botId: string): Array<Record<string, unknown>> {
+  listGroupsWithLast(botId: string): GroupWithLastRow[] {
     return this.db
-      .prepare(
+      .prepare<[string], GroupWithLastRow>(
         `
         SELECT g.group_openid, g.full_msg_enabled, g.added_at, g.updated_at,
                (SELECT COUNT(*) FROM members m WHERE m.bot_id = g.bot_id AND m.group_openid = g.group_openid) AS member_count,
@@ -647,13 +786,13 @@ export class Repo {
         ORDER BY COALESCE(lm.ts, g.updated_at, g.added_at) DESC
       `,
       )
-      .all(botId) as Array<Record<string, unknown>>;
+      .all(botId);
   }
 
   /** WebUI 单聊会话列表：openid + 最后一条消息摘要（名字=users 权威，旧名册反查 hack 已死） */
-  listChatsWithLast(botId: string): Array<Record<string, unknown>> {
+  listChatsWithLast(botId: string): ChatWithLastRow[] {
     return this.db
-      .prepare(
+      .prepare<[string], ChatWithLastRow>(
         `
         SELECT c.scope_id AS user_openid, lm.ts AS last_ts, lm.content AS last_content,
                COALESCE(u.name, lm.author_name) AS last_author
@@ -666,17 +805,13 @@ export class Repo {
         ORDER BY lm.ts DESC
       `,
       )
-      .all(botId) as Array<Record<string, unknown>>;
+      .all(botId);
   }
 
   /** 成员名册（关系事实）：名字 join users 取 QQ 昵称，未收录回落 openid */
-  listMembers(
-    botId: string,
-    groupOpenid: string,
-    limit: number,
-  ): Array<Record<string, unknown>> {
+  listMembers(botId: string, groupOpenid: string, limit: number): MemberRow[] {
     return this.db
-      .prepare(
+      .prepare<[string, string, number], MemberRow>(
         `
         SELECT m.member_openid, COALESCE(u.name, m.member_openid) AS username,
                m.member_role, m.first_seen, m.last_seen, m.msg_count
@@ -686,16 +821,16 @@ export class Repo {
         ORDER BY m.msg_count DESC, m.last_seen DESC LIMIT ?
       `,
       )
-      .all(botId, groupOpenid, limit) as Array<Record<string, unknown>>;
+      .all(botId, groupOpenid, limit);
   }
 
   /** 群成员 openid 集合（出站 AT 翻译的成员校验源；members 关系事实，消息流自建） */
   groupMemberIds(botId: string, groupOpenid: string): Set<string> {
     const rows = this.db
-      .prepare(
+      .prepare<[string, string], { member_openid: string }>(
         "SELECT member_openid FROM members WHERE bot_id = ? AND group_openid = ?",
       )
-      .all(botId, groupOpenid) as Array<{ member_openid: string }>;
+      .all(botId, groupOpenid);
     return new Set(rows.map((r) => r.member_openid));
   }
 
@@ -720,25 +855,22 @@ export class Repo {
       last_ts: number | null;
     }> = [];
     for (const g of this.listGroups(botId)) {
-      const gid = g.group_openid as string;
+      const gid = g.group_openid;
       const mark = this.getCursor(botId, gid);
       const row = this.unreadStmt.get(
         mark === null ? 0 : Number(mark),
         botId,
         "group",
         gid,
-      ) as { unread: number; last_ts: number | null };
+      );
       out.push({
         scope: "group",
         scopeId: gid,
-        unread: row.unread,
-        last_ts: row.last_ts,
+        unread: row?.unread ?? 0,
+        last_ts: row?.last_ts ?? null,
       });
     }
-    const chats = this.listChatsStmt.all(botId) as Array<{
-      user_openid: string;
-      last_ts: number | null;
-    }>;
+    const chats = this.listChatsStmt.all(botId);
     for (const c of chats) {
       const mark = this.getCursor(botId, `c2c:${c.user_openid}`);
       const row = this.unreadStmt.get(
@@ -746,12 +878,12 @@ export class Repo {
         botId,
         "chat",
         c.user_openid,
-      ) as { unread: number; last_ts: number | null };
+      );
       out.push({
         scope: "chat",
         scopeId: c.user_openid,
-        unread: row.unread,
-        last_ts: row.last_ts,
+        unread: row?.unread ?? 0,
+        last_ts: row?.last_ts ?? null,
       });
     }
     return out;
@@ -773,7 +905,7 @@ export class Repo {
       scopeId,
       afterRowid,
       limit,
-    ) as MsgRow[];
+    );
   }
 
   /** 锚点定位（browse/context/get_media/get_records 共用） */
@@ -783,8 +915,7 @@ export class Repo {
     scopeId: string,
     msgId: string,
   ): MsgRow | null {
-    const row = this.byMsgIdStmt.get(botId, scope, scopeId, msgId) as
-      MsgRow | undefined;
+    const row = this.byMsgIdStmt.get(botId, scope, scopeId, msgId);
     return row ?? null;
   }
 
@@ -798,9 +929,7 @@ export class Repo {
    * null=两侧均无。
    */
   detectSessionKind(botId: string, id: string): "group" | "chat" | null {
-    const hit = this.sessionKindStmt.get(botId, id) as
-      | { kind: string }
-      | undefined;
+    const hit = this.sessionKindStmt.get(botId, id);
     if (hit !== undefined) {
       return hit.kind === "chat" ? "chat" : "group";
     }
@@ -831,7 +960,7 @@ export class Repo {
       ts,
       rowid,
       limit,
-    ) as MsgRow[];
+    );
   }
 
   browseAfter(
@@ -850,7 +979,7 @@ export class Repo {
       ts,
       rowid,
       limit,
-    ) as MsgRow[];
+    );
   }
 
   browseLatest(
@@ -859,7 +988,7 @@ export class Repo {
     scopeId: string,
     limit: number,
   ): MsgRow[] {
-    return this.latestStmt.all(botId, scope, scopeId, limit) as MsgRow[];
+    return this.latestStmt.all(botId, scope, scopeId, limit);
   }
 
   /** WebUI 消息流翻页：beforeRid=null 取最新一页；返回按 rowid 升序（气泡渲染序） */
@@ -877,7 +1006,7 @@ export class Repo {
       beforeRid,
       beforeRid ?? 0,
       limit,
-    ) as MsgRow[];
+    );
     return rows.reverse();
   }
 
@@ -903,21 +1032,21 @@ export class Repo {
           scope,
           scopeId,
           limit,
-        ) as MsgRow[];
+        );
       } catch {
         // FTS 语法问题 → LIKE 兜底
       }
     }
     const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
     return this.db
-      .prepare(
+      .prepare<[string, MsgScope, string, string, number], MsgRow>(
         `
         SELECT rowid AS rid, * FROM messages
         WHERE bot_id = ? AND scope = ? AND scope_id = ? AND text LIKE ? ESCAPE '\\'
         ORDER BY ts DESC, rowid DESC LIMIT ?
       `,
       )
-      .all(botId, scope, scopeId, like, limit) as MsgRow[];
+      .all(botId, scope, scopeId, like, limit);
   }
 
   /** 某消息前后文：锚点前 radius 条 + 锚点后 radius 条，按时间轴升序返回 */
@@ -956,7 +1085,7 @@ export class Repo {
     scopeId: string,
     msgId: string,
   ): RecordRow[] {
-    return this.recordsStmt.all(botId, scope, scopeId, msgId) as RecordRow[];
+    return this.recordsStmt.all(botId, scope, scopeId, msgId);
   }
 
   /**
@@ -976,13 +1105,7 @@ export class Repo {
     let authorOpenid = q.authorOpenid ?? null;
     let msgId = q.msgId ?? null;
     if (q.msgIdx !== undefined && authorOpenid === null) {
-      const hit = this.msgIdxStmt.get(botId, scope, scopeId, q.msgIdx) as
-        | {
-            author_openid: string | null;
-            msg_id: string;
-            author_name: string | null;
-          }
-        | undefined;
+      const hit = this.msgIdxStmt.get(botId, scope, scopeId, q.msgIdx);
       if (hit !== undefined) {
         authorOpenid = hit.author_openid;
         msgId = hit.msg_id;
@@ -1005,8 +1128,7 @@ export class Repo {
    * 键延续历史：群 scope 为 groupOpenid，私聊为 `c2c:{userOpenid}`（保持存量水位连续性）。
    */
   getCursor(botId: string, key: string): string | null {
-    const row = this.kvGetStmt.get(`cursor:${botId}:${key}`) as
-      { v: string } | undefined;
+    const row = this.kvGetStmt.get(`cursor:${botId}:${key}`);
     return row ? row.v : null;
   }
 
@@ -1044,16 +1166,12 @@ export class Repo {
         .prepare("DELETE FROM groups WHERE bot_id = ? AND group_openid = ?")
         .run(botId, groupOpenid).changes,
       cursors: this.db
-        .prepare("DELETE FROM kv WHERE k = ?")
+        .prepare<[string]>(
+          "DELETE FROM kv WHERE k = ?",
+        )
         .run(`cursor:${botId}:${groupOpenid}`).changes,
     }));
-    const r = run() as {
-      messages: number;
-      records: number;
-      members: number;
-      groups: number;
-      cursors: number;
-    };
+    const r = run();
     return {
       messages: r.messages,
       members: r.members,
@@ -1072,32 +1190,34 @@ export class Repo {
     payloadHash: string,
   ): SendRow | null {
     const row = this.db
-      .prepare(
+      .prepare<[string, string, string, string], SendRow>(
         `SELECT * FROM sends WHERE bot_id = ? AND kind = ? AND reply_msg_id = ? AND payload_hash = ?
          AND status IN ('sent', 'pending_audit') ORDER BY id ASC LIMIT 1`,
       )
-      .get(botId, kind, replyMsgId, payloadHash) as SendRow | undefined;
+      .get(botId, kind, replyMsgId, payloadHash);
     return row ?? null;
   }
 
   /** 被动窗口已用次数：除 failed（官方未受理）外的全部账本行 */
   countPassiveSends(botId: string, replyMsgId: string): number {
-    const row = this.db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM sends WHERE bot_id = ? AND kind = 'passive' AND reply_msg_id = ? AND status != 'failed'",
-      )
-      .get(botId, replyMsgId) as { n: number };
-    return row.n;
+    return (
+      this.db
+        .prepare<[string, string], { n: number }>(
+          "SELECT COUNT(*) AS n FROM sends WHERE bot_id = ? AND kind = 'passive' AND reply_msg_id = ? AND status != 'failed'",
+        )
+        .get(botId, replyMsgId)?.n ?? 0
+    );
   }
 
   /** 下一个 msg_seq：账本内单调递增（含 failed 行，保证不复用官方可能已受理的序号） */
   nextMsgSeq(botId: string, replyMsgId: string): number {
-    const row = this.db
-      .prepare(
-        "SELECT COALESCE(MAX(msg_seq), 0) AS m FROM sends WHERE bot_id = ? AND kind = 'passive' AND reply_msg_id = ?",
-      )
-      .get(botId, replyMsgId) as { m: number };
-    return row.m + 1;
+    return (
+      this.db
+        .prepare<[string, string], { m: number }>(
+          "SELECT COALESCE(MAX(msg_seq), 0) AS m FROM sends WHERE bot_id = ? AND kind = 'passive' AND reply_msg_id = ?",
+        )
+        .get(botId, replyMsgId)?.m ?? 0
+    ) + 1;
   }
 
   /** 预订账本行（reservation 先行）：返回 rowid */
@@ -1140,10 +1260,10 @@ export class Repo {
   /** 单群当日主动消息已发数（北京自然日，见 sender.beijingDate） */
   proactiveCountFor(botId: string, targetOpenid: string, date: string): number {
     const row = this.db
-      .prepare(
+      .prepare<[string, string, string], { n: number }>(
         "SELECT proactive_count AS n FROM quota_daily WHERE bot_id = ? AND target_openid = ? AND date = ?",
       )
-      .get(botId, targetOpenid, date) as { n: number } | undefined;
+      .get(botId, targetOpenid, date);
     return row?.n ?? 0;
   }
 
@@ -1154,18 +1274,19 @@ export class Repo {
 
   /** 当日主动消息已发总量（M4 写路径负责记账，此处只读水位） */
   proactiveSentToday(botId: string, dateStr: string): number {
-    const row = this.db
-      .prepare(
-        "SELECT COALESCE(SUM(proactive_count), 0) AS n FROM quota_daily WHERE bot_id = ? AND date = ?",
-      )
-      .get(botId, dateStr) as { n: number };
-    return row.n;
+    return (
+      this.db
+        .prepare<[string, string], { n: number }>(
+          "SELECT COALESCE(SUM(proactive_count), 0) AS n FROM quota_daily WHERE bot_id = ? AND date = ?",
+        )
+        .get(botId, dateStr)?.n ?? 0
+    );
   }
 
   /** WebUI 发送记录：某 bot 对某会话的最近账本行（含审核回填状态，无消息内容） */
   recentSends(botId: string, targetOpenid: string, limit: number): SendRow[] {
     return this.db
-      .prepare(
+      .prepare<[string, string, number], SendRow>(
         `
         SELECT id, bot_id, target_openid, kind, reply_msg_id, msg_seq,
                payload_hash, provider_msg_id, status, error_code, created_at
@@ -1173,7 +1294,7 @@ export class Repo {
         ORDER BY id DESC LIMIT ?
       `,
       )
-      .all(botId, targetOpenid, limit) as SendRow[];
+      .all(botId, targetOpenid, limit);
   }
 
   /** MESSAGE_AUDIT 回填：定位该目标最早的 pending_audit 行，落到 pass/reject */
@@ -1183,10 +1304,10 @@ export class Repo {
     status: "audit_pass" | "audit_reject",
   ): boolean {
     const row = this.db
-      .prepare(
+      .prepare<[string, string], { id: number }>(
         "SELECT id FROM sends WHERE bot_id = ? AND target_openid = ? AND status = 'pending_audit' ORDER BY id ASC LIMIT 1",
       )
-      .get(botId, targetOpenid) as { id: number } | undefined;
+      .get(botId, targetOpenid);
     if (row === undefined) return false;
     this.updateSendStatus(row.id, status);
     return true;
@@ -1194,17 +1315,12 @@ export class Repo {
 
   // —— M8 运行时设置（kv）：bots 表归 BotRegistry 管，这里只管非 bot 维度设置 ——
 
-  /** 发送总开关（kv settings:runtime:v1）。缺省=关闭（安全默认） */
+  /** 发送总开关（kv settings:runtime:v1）。缺省=关闭（安全默认）；坏档按关闭处理 */
   getSendEnable(): boolean {
-    const row = this.kvGetStmt.get(SETTINGS_KEY) as { v: string } | undefined;
+    const row = this.kvGetStmt.get(SETTINGS_KEY);
     if (row === undefined) return false;
-    try {
-      return (
-        (JSON.parse(row.v) as { sendEnable?: boolean }).sendEnable === true
-      );
-    } catch {
-      return false; // 坏数据按关闭处理（安全默认）
-    }
+    const r = RuntimeSettingsSchema.safeParse(jsonParseOf(row.v));
+    return r.success && r.data.sendEnable === true;
   }
 
   setSendEnable(v: boolean): void {
@@ -1221,8 +1337,7 @@ export class Repo {
       "INSERT OR IGNORE INTO kv(k, v) VALUES (?, ?)",
     );
     insert.run(SETTINGS_KEY, JSON.stringify({ sendEnable: false }));
-    const existing = this.kvGetStmt.get(ADMIN_TOKEN_KEY) as
-      { v: string } | undefined;
+    const existing = this.kvGetStmt.get(ADMIN_TOKEN_KEY);
     if (existing !== undefined) {
       return { adminToken: existing.v, adminCreated: false };
     }
@@ -1233,9 +1348,7 @@ export class Repo {
 
   /** admin token（kv admin:token:v1）：WebUI/设置页管理凭证。null=尚未播种 */
   getAdminToken(): string | null {
-    const row = this.kvGetStmt.get(ADMIN_TOKEN_KEY) as
-      { v: string } | undefined;
-    return row?.v ?? null;
+    return this.kvGetStmt.get(ADMIN_TOKEN_KEY)?.v ?? null;
   }
 
   setAdminToken(v: string): void {
@@ -1246,6 +1359,18 @@ export class Repo {
 const SETTINGS_KEY = "settings:runtime:v1";
 const ADMIN_TOKEN_KEY = "admin:token:v1";
 const TTS_CONFIG_KEY = "tts:config:v1";
+
+/** Repo 零依赖静默 logger（测试/工具脚本缺省；生产 index.ts 注入引擎 logger） */
+function noopLogger(): Logger {
+  return {
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    fatal: () => {},
+    child: () => noopLogger(),
+  };
+}
 
 function newAdminToken(): string {
   // 与 agent_token 同规格（48hex）；生成后仅存 kv，首次生成时打印一次

@@ -43,7 +43,7 @@ async function main(): Promise<void> {
 
   // 事件入库（M2）+ 发送器（M4）+ 机器人注册表（M7 运行时动态 bot）：
   // 单一 Repo 实例贯穿缓存/账本/MCP 工具；registry 贯穿网关/发送器/工具面/UI
-  const repo = new Repo(db);
+  const repo = new Repo(db, log.child("repo"));
   // M9 运行时引导（幂等）：发送开关缺省 false；admin token 缺失时现场生成，
   // 仅在首次生成时打印一次（之后只存 kv admin:token:v1，遗失需自行轮换）。
   const boot = repo.ensureRuntime();
