@@ -2,3 +2,15 @@
 	path = ui
 	url = https://github.com/WuJunkai2004/QSense.git
 	branch = webui
+[submodule "packages/connector-qq"]
+	path = packages/connector-qq
+	url = https://github.com/WuJunkai2004/QSense.git
+	branch = connector/qq
+[submodule "packages/connector-telegram"]
+	path = packages/connector-telegram
+	url = https://github.com/WuJunkai2004/QSense.git
+	branch = connector/tg
+[submodule "packages/connector-weixin"]
+	path = packages/connector-weixin
+	url = https://github.com/WuJunkai2004/QSense.git
+	branch = connector/wx
