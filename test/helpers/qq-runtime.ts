@@ -3,7 +3,6 @@
 
 import {
   ConnectorRegistry,
-  type BotConfigSnapshot,
   type NetKit,
 } from "@qsense/connector-sdk";
 import {
@@ -12,7 +11,7 @@ import {
 } from "@qsense/connector-qq";
 import type { BotRegistry } from "../../src/bots";
 import type {
-  ConnectorRuntime,
+  ConnectorSupervisor,
   GatewayStatus,
 } from "../../src/connectors/runtime";
 import { createBotHost, configSnapshotOf } from "../../src/connectors/host";
@@ -32,13 +31,16 @@ export interface FakeRuntimeOpts {
 }
 
 export interface FakeRuntime {
-  runtime: ConnectorRuntime;
+  /** Supervisor 最小消费面假件（真 ConnectorRuntime 结构满足本接口） */
+  runtime: ConnectorSupervisor;
   plugins: ConnectorRegistry;
   plugin: QqConnectorPlugin;
   added: string[];
   removed: string[];
   /** 已执行运行时清理（forget：token 缓存 + 会话）的 bot */
   cleared: string[];
+  /** 网关状态快照（bootstrap/settings 面板渲染用） */
+  statuses: GatewayStatus[];
 }
 
 export function makeFakeRuntime(opts: FakeRuntimeOpts): FakeRuntime {
@@ -53,21 +55,21 @@ export function makeFakeRuntime(opts: FakeRuntimeOpts): FakeRuntime {
   const removed: string[] = [];
   const cleared: string[] = [];
   const statuses: GatewayStatus[] = [];
-  const runtime = {
+  // Supervisor 最小消费面假件（绝不发起真实网络；协议侧由 gateway.test 覆盖）
+  const runtime: ConnectorSupervisor = {
     plugins,
-    addBot: (bot: { botId: string }) => {
+    addBot: (bot) => {
       added.push(bot.botId);
       opts.onAdd?.(bot.botId);
     },
-    removeBot: (botId: string) => {
+    removeBot: (botId) => {
       removed.push(botId);
       plugin.forget(botId); // 真 token 缓存清理（QQ 插件内联）
       cleared.push(botId); // 台架记录：运行时清理已发生
       opts.onRemove?.(botId);
     },
-    configOf: (botId: string): BotConfigSnapshot =>
-      configSnapshotOf(opts.repo, opts.registry, botId),
-    hostFor: (botId: string) =>
+    configOf: (botId) => configSnapshotOf(opts.repo, opts.registry, botId),
+    hostFor: (botId) =>
       createBotHost({
         db: opts.db,
         log,
@@ -76,7 +78,14 @@ export function makeFakeRuntime(opts: FakeRuntimeOpts): FakeRuntime {
         ingest: () => undefined,
         onStatus: () => undefined,
       }),
-    statuses: (): GatewayStatus[] => statuses,
-  } as unknown as ConnectorRuntime;
-  return { runtime, plugins, plugin, added, removed, cleared };
+  };
+  return {
+    runtime,
+    plugins,
+    plugin,
+    added,
+    removed,
+    cleared,
+    statuses,
+  };
 }

@@ -8,8 +8,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ConnectorRegistry } from "@qsense/connector-sdk";
+import { ConnectorRegistry, type NormalizedAttachment } from "@qsense/connector-sdk";
 import { createQqConnector } from "@qsense/connector-qq";
 import { createTelegramConnector } from "@qsense/connector-telegram";
 import { buildServer } from "../src/server/http";
@@ -171,7 +173,7 @@ async function setupServer(opts: SetupOpts = {}): Promise<Fixture> {
             await gate;
             return { handle: "HANG" };
           },
-        }) as never,
+        }) 
     });
   }
 
@@ -250,12 +252,87 @@ async function connectClient(
   return client;
 }
 
-function payloadOf(result: {
-  content: Array<{ type: string; text?: string }>;
-}): Record<string, unknown> {
-  assert.equal(result.content.length, 1);
-  assert.equal(result.content[0]!.type, "text");
-  return JSON.parse(result.content[0]!.text ?? "") as Record<string, unknown>;
+// —— 工具输出 JSON round-trip 的测试消费面（与 src/tools/defs.ts 各工具输出形状
+// 对齐；可选字段并集 = 逐工具形状的闭集，测试只读。访问点不再 as Record 链） ——
+interface ConvJson {
+  type: "chat" | "group";
+  id: string;
+  unread: number;
+  last_msg_ts: string | null;
+}
+
+interface QuoteJson {
+  id: string | null;
+  msg_id: string | null;
+  content: string;
+  attachments?: NormalizedAttachment[];
+}
+
+interface MsgJson {
+  msg_id: string;
+  ts: string | null;
+  author: { id: string | null; name: string | null; role: string | null };
+  content: string | null;
+  quote_msg?: QuoteJson;
+  records_count?: number;
+  mentions?: Array<{ id: string; name?: string }>;
+  attachments?: NormalizedAttachment[];
+}
+
+interface RecordItemJson {
+  ord: number;
+  depth: number;
+  author: { id: string | null; name: string | null };
+  ts: string | null;
+  text: string | null;
+  quote_msg?: QuoteJson;
+  attachments?: NormalizedAttachment[];
+}
+
+interface PayloadJson {
+  count?: number;
+  has_more?: boolean;
+  conversations?: ConvJson[];
+  messages?: MsgJson[];
+  members?: Array<{
+    member_id: string;
+    username: string;
+    member_role: string | null;
+    first_seen: string | null;
+    last_seen: string | null;
+    msg_count: number;
+  }>;
+  records?: RecordItemJson[];
+  msg_id?: string;
+  id?: string;
+  status?: string;
+  provider_msg_id?: string;
+  detail?: string;
+  upload_url?: string;
+  asset_id?: string;
+  curl?: string;
+  /** quota 工具（QQ 平台扩展）输出 */
+  send_enabled?: boolean;
+  proactive_sent_today?: number;
+}
+
+/** callTool + 单文本块解包：应答过 SDK CallToolResult schema（运行时锚点）后
+ * 判别窄化取文本块——本文件所有被解包的调用都是文本块输出 */
+async function callPayload(
+  client: Client,
+  name: string,
+  args: CallToolRequest["params"]["arguments"],
+): Promise<PayloadJson> {
+  const gate = CallToolResultSchema.safeParse(
+    await client.callTool({ name, arguments: args }),
+  );
+  assert.ok(gate.success, "callTool 应答应过 CallToolResult schema");
+  assert.equal(gate.data.content.length, 1);
+  const block = gate.data.content[0]!;
+  if (block.type !== "text") {
+    throw new Error(`payload 首块不是文本：${String(block.type)}`);
+  }
+  return JSON.parse(block.text);
 }
 
 test("M3-1 未带 token / 错 token → 401", async () => {
@@ -378,11 +455,9 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
     const client = await connectClient(fx.baseUrl, fx.agentToken);
 
     // 会话列表：2 群；无水位 → 未读=全部消息
-    const listed = payloadOf(
-      (await client.callTool({ name: "list_all", arguments: {} })) as never,
-    );
+    const listed = await callPayload(client, "list_all", {});
     assert.equal(listed.count, 2);
-    const convs = listed.conversations as Array<Record<string, unknown>>;
+    const convs = listed.conversations!;
     const g1 = convs.find((c) => c.id === GROUP)!;
     assert.equal(g1.type, "group");
     assert.equal(g1.unread, 5);
@@ -390,34 +465,20 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
     assert.ok(!("full_msg_enabled" in g1), "agent 视角不含管理面字段");
 
     // list_new：有未读 → 命中
-    const news = payloadOf(
-      (await client.callTool({ name: "list_new", arguments: {} })) as never,
-    );
+    const news = await callPayload(client, "list_new", {});
     assert.equal(news.count, 1);
 
     // 取新消息（拉取即已读，水位自动推进）
-    const first = payloadOf(
-      (await client.callTool({
-        name: "get_new",
-        arguments: { id: GROUP },
-      })) as never,
-    );
+    const first = await callPayload(client, "get_new", { id: GROUP });
     assert.equal(first.count, 5);
     assert.ok(!("next_cursor" in first), "已读水位是服务端内部状态，不外露");
 
     // 重复拉取：零重复（水位已推进）
-    const second = payloadOf(
-      (await client.callTool({
-        name: "get_new",
-        arguments: { id: GROUP },
-      })) as never,
-    );
+    const second = await callPayload(client, "get_new", { id: GROUP });
     assert.equal(second.count, 0);
 
     // 已读后 list_new 不再命中该群
-    const news2 = payloadOf(
-      (await client.callTool({ name: "list_new", arguments: {} })) as never,
-    );
+    const news2 = await callPayload(client, "list_new", {});
     assert.equal(news2.count, 0);
 
     // 新消息到达 → 再次未读；增量拉取只给新消息
@@ -430,32 +491,18 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
       ts: Date.now(),
       authorName: null,
     });
-    const news3 = payloadOf(
-      (await client.callTool({ name: "list_new", arguments: {} })) as never,
-    );
+    const news3 = await callPayload(client, "list_new", {});
     assert.equal(news3.count, 1);
-    const inc = payloadOf(
-      (await client.callTool({
-        name: "get_new",
-        arguments: { id: GROUP },
-      })) as never,
-    );
+    const inc = await callPayload(client, "get_new", { id: GROUP });
     assert.deepEqual(
-      (inc.messages as Array<Record<string, unknown>>).map((m) => m.msg_id),
+      (inc.messages!).map((m) => m.msg_id),
       ["M6"],
     );
 
     // 搜索（≥3 字走 FTS trigram 路径，见 repo.searchMessages：[...q].length >= 3）
     // "排期表" 命中 M4/M5；M1 仅含「排期」二字，短语不应命中——同时验证 FTS JOIN 真实执行
-    const search = payloadOf(
-      (await client.callTool({
-        name: "search",
-        arguments: { id: GROUP, query: "排期表" },
-      })) as never,
-    );
-    const hitIds = (search.messages as Array<Record<string, unknown>>).map(
-      (m) => m.msg_id,
-    );
+    const search = await callPayload(client, "search", { id: GROUP, query: "排期表" });
+    const hitIds = (search.messages!).map((m) => m.msg_id);
     assert.ok(hitIds.includes("M4"), "FTS 应命中 M4");
     assert.ok(hitIds.includes("M5"), "FTS 应命中 M5");
     assert.ok(
@@ -463,13 +510,8 @@ test("M3-3 闭环：会话列表 → 取新消息（拉取即已读） → 关�
       "短语「排期表」不应命中仅含「排期」的 M1",
     );
     // 2 字降级 LIKE 子串路径（"开会" 仅 M1）
-    const search2 = payloadOf(
-      (await client.callTool({
-        name: "search",
-        arguments: { id: GROUP, query: "开会" },
-      })) as never,
-    );
-    assert.equal((search2.messages as unknown[]).length, 1);
+    const search2 = await callPayload(client, "search", { id: GROUP, query: "开会" });
+    assert.equal((search2.messages!).length, 1);
     await client.close();
   } finally {
     await fx.close();
@@ -543,53 +585,29 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
   try {
     client = await connectClient(fx.baseUrl, fx.agentToken);
 
-    const ctx = payloadOf(
-      (await client.callTool({
-        name: "context",
-        arguments: { id: GROUP, msg_id: "M3", radius: 2 },
-      })) as never,
-    );
-    const ctxIds = (ctx.messages as Array<Record<string, unknown>>).map(
-      (m) => m.msg_id,
-    );
+    const ctx = await callPayload(client, "context", { id: GROUP, msg_id: "M3", radius: 2 });
+    const ctxIds = (ctx.messages!).map((m) => m.msg_id);
     assert.deepEqual(ctxIds, ["M1", "M2", "M3", "M4", "M5"]);
 
-    const before = payloadOf(
-      (await client.callTool({
-        name: "browse",
-        arguments: { id: GROUP, msg_id: "M3", mode: "before", limit: 10 },
-      })) as never,
-    );
+    const before = await callPayload(client, "browse", { id: GROUP, msg_id: "M3", mode: "before", limit: 10 });
     // before 方向按时间轴降序（新→旧，聊天回滚语义）
     assert.deepEqual(
-      (before.messages as Array<Record<string, unknown>>).map((m) => m.msg_id),
+      (before.messages!).map((m) => m.msg_id),
       ["M2", "M1"],
     );
 
-    const latest = payloadOf(
-      (await client.callTool({
-        name: "browse",
-        arguments: { id: GROUP, limit: 2 },
-      })) as never,
-    );
+    const latest = await callPayload(client, "browse", { id: GROUP, limit: 2 });
     assert.deepEqual(
-      (latest.messages as Array<Record<string, unknown>>).map((m) => m.msg_id),
+      (latest.messages!).map((m) => m.msg_id),
       ["M4", "M5"],
     );
 
-    const members = payloadOf(
-      (await client.callTool({
-        name: "list_members",
-        arguments: { id: GROUP },
-      })) as never,
-    );
-    const memberList = members.members as Array<Record<string, unknown>>;
+    const members = await callPayload(client, "list_members", { id: GROUP });
+    const memberList = members.members!;
     assert.equal(memberList.length, 3);
     assert.equal(memberList[0]!.msg_count, 3); // 小明 3 条最活跃
 
-    const quota = payloadOf(
-      (await client.callTool({ name: "quota", arguments: {} })) as never,
-    );
+    const quota = await callPayload(client, "quota", {});
     assert.equal(quota.send_enabled, false);
     assert.equal(quota.proactive_sent_today, 0);
 
@@ -718,19 +736,14 @@ test("M3-5 引用结构化（quote_json 直读）+ 信封统一：quote_msg 呈�
     });
 
     client = await connectClient(fx.baseUrl, fx.agentToken);
-    const res = payloadOf(
-      (await client.callTool({
-        name: "get_new",
-        arguments: { id: GROUP },
-      })) as never,
-    );
+    const res = await callPayload(client, "get_new", { id: GROUP });
     assert.ok(!("group" in res), "信封无会话回显字段");
     assert.equal(typeof res.has_more, "boolean");
-    const msgs = res.messages as Array<Record<string, unknown>>;
+    const msgs = res.messages!;
     const q2 = msgs.find((m) => m.msg_id === "Q2")!;
     assert.ok(!("group_openid" in q2), "消息条目无会话回显字段");
     assert.equal(String(q2.content), "看看这条", "正文干净");
-    const q2quote = q2.quote_msg as Record<string, unknown>;
+    const q2quote = q2.quote_msg!;
     assert.equal(
       q2quote.id,
       "U_A",
@@ -744,7 +757,7 @@ test("M3-5 引用结构化（quote_json 直读）+ 信封统一：quote_msg 呈�
     );
     const q3 = msgs.find((m) => m.msg_id === "Q3")!;
     assert.equal(String(q3.content), "引用了一条没缓存的消息");
-    const q3quote = q3.quote_msg as Record<string, unknown>;
+    const q3quote = q3.quote_msg!;
     assert.equal(q3quote.id, null, "被引不在缓存：身份 null");
     assert.equal(q3quote.msg_id, null);
     assert.equal(
@@ -755,12 +768,12 @@ test("M3-5 引用结构化（quote_json 直读）+ 信封统一：quote_msg 呈�
     const q4 = msgs.find((m) => m.msg_id === "Q4")!;
     assert.equal(String(q4.content), "看看这条");
     assert.equal(
-      (q4.quote_msg as Record<string, unknown>).msg_id,
+      q4.quote_msg!.msg_id,
       "Q1",
       "命中产 quote_msg",
     );
     const q6 = msgs.find((m) => m.msg_id === "Q6")!;
-    const q6quote = q6.quote_msg as Record<string, unknown>;
+    const q6quote = q6.quote_msg!;
     assert.equal(q6quote.id, "U_C");
     assert.equal(q6quote.msg_id, "Q5");
     assert.equal(
@@ -845,14 +858,9 @@ test("M3-5b get_records：聊天记录拍平展开（users 昵称/嵌套 depth/�
     });
 
     client = await connectClient(fx.baseUrl, fx.agentToken);
-    const ok = payloadOf(
-      (await client.callTool({
-        name: "get_records",
-        arguments: { id: GROUP, msg_id: "R1" },
-      })) as never,
-    );
+    const ok = await callPayload(client, "get_records", { id: GROUP, msg_id: "R1" });
     assert.equal(ok.count, 2);
-    const recs = ok.records as Array<Record<string, unknown>>;
+    const recs = ok.records!;
     const r0 = recs[0]!;
     assert.equal(r0.ord, 0);
     assert.equal(r0.depth, 0);
@@ -864,7 +872,7 @@ test("M3-5b get_records：聊天记录拍平展开（users 昵称/嵌套 depth/�
       "子行作者名以 users 最新昵称为准（非行快照）",
     );
     assert.equal(r0.text, "记录里的发言");
-    const r0quote = r0.quote_msg as Record<string, unknown>;
+    const r0quote = r0.quote_msg!;
     assert.equal(r0quote.msg_id, "R0", "子行引用锚解析为宿主 msg_id");
     assert.ok(Array.isArray(r0.attachments) && r0.attachments.length === 1);
     const r1 = recs[1]!;
@@ -1025,13 +1033,8 @@ test("M3-6b 内联 data:URL 附件：工具输出不回显 base64 载荷（带�
       rawJson: "{}",
     });
     client = await connectClient(fx.baseUrl, fx.agentToken);
-    const res = payloadOf(
-      (await client.callTool({
-        name: "browse",
-        arguments: { id: GROUP, limit: 1 },
-      })) as never,
-    );
-    const msg = (res.messages as Array<Record<string, unknown>>)[0]!;
+    const res = await callPayload(client, "browse", { id: GROUP, limit: 1 });
+    const msg = res.messages![0]!;
     assert.equal(msg.msg_id, "MD2");
     const atts = msg.attachments as Array<{ url: string; content_type: string }>;
     assert.match(
@@ -1040,10 +1043,7 @@ test("M3-6b 内联 data:URL 附件：工具输出不回显 base64 载荷（带�
     );
     assert.equal(atts[0]!.content_type, "image/png"); // 其余元数据保留
     assert.equal(atts[1]!.url, "https://cdn.example/b.png"); // 非内联 URL 原样
-    const quoteMsg = msg.quote_msg as {
-      attachments: Array<{ url: string }>;
-    };
-    assert.match(quoteMsg.attachments[0]!.url, /内联/); // 被引内联图同样压缩
+    assert.match(msg.quote_msg!.attachments![0]!.url, /内联/); // 被引内联图同样压缩
     assert.equal(JSON.stringify(res).includes(payload), false); // 载荷不进工具输出
 
     // get_media 仍从库列取图（data:URL 可被通用 fetch）
@@ -1103,12 +1103,7 @@ test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防�
       rawJson: "{}",
     });
     client = await connectClient(fx.baseUrl, fx.agentToken);
-    const res = payloadOf(
-      (await client.callTool({
-        name: "context",
-        arguments: { id: GROUP, msg_id: "M_SELF", radius: 1 },
-      })) as never,
-    );
+    const res = await callPayload(client, "context", { id: GROUP, msg_id: "M_SELF", radius: 1 });
     const msgs = res.messages as Array<{
       msg_id: string;
       author: { role: string | null };
@@ -1171,84 +1166,47 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     client = await connectClient(fx.baseUrl, fx.agentToken);
 
     // list_new 红点含私聊会话（unread=2）
-    const fresh = payloadOf(
-      (await client.callTool({ name: "list_new", arguments: {} })) as never,
-    );
-    const chat = (fresh.conversations as Array<Record<string, unknown>>).find(
+    const fresh = await callPayload(client, "list_new", {});
+    const chat = (fresh.conversations!).find(
       (c) => c.type === "chat",
     )!;
     assert.equal(chat.id, USER);
     assert.equal(chat.unread, 2);
 
     // get_new：拉取即已读，重复调用不重拉；引用结构化 quote_msg（侧别由 id 探测）
-    const first = payloadOf(
-      (await client.callTool({
-        name: "get_new",
-        arguments: { id: USER },
-      })) as never,
-    );
+    const first = await callPayload(client, "get_new", { id: USER });
     assert.equal(first.count, 2);
-    const again = payloadOf(
-      (await client.callTool({
-        name: "get_new",
-        arguments: { id: USER },
-      })) as never,
-    );
+    const again = await callPayload(client, "get_new", { id: USER });
     assert.equal(again.count, 0, "水位已推进，重拉为空");
-    const c2 = (first.messages as Array<Record<string, unknown>>).find(
+    const c2 = (first.messages!).find(
       (m) => m.msg_id === "C2",
     )!;
     assert.equal(String(c2.content), "单聊里引用一下", "单聊引用同样摘除内联");
-    const c2quote = c2.quote_msg as Record<string, unknown>;
+    const c2quote = c2.quote_msg!;
     assert.equal(c2quote.msg_id, "C1");
     assert.equal(c2quote.content, "被引的单聊原文");
 
     // 已读后红点消失
-    const after = payloadOf(
-      (await client.callTool({
-        name: "list_all",
-        arguments: { type: "chat" },
-      })) as never,
-    );
+    const after = await callPayload(client, "list_all", { type: "chat" });
     assert.equal(
-      (after.conversations as Array<Record<string, unknown>>).find(
+      (after.conversations!).find(
         (c) => c.id === USER,
       )!.unread,
       0,
     );
 
     // search：≥3 字 FTS 命中；<3 字降级 LIKE 兜底
-    const fts = payloadOf(
-      (await client.callTool({
-        name: "search",
-        arguments: { id: USER, query: "单聊原文" },
-      })) as never,
-    );
+    const fts = await callPayload(client, "search", { id: USER, query: "单聊原文" });
     assert.equal(fts.count, 1, "FTS 只命中 C1");
-    const like = payloadOf(
-      (await client.callTool({
-        name: "search",
-        arguments: { id: USER, query: "引用" },
-      })) as never,
-    );
+    const like = await callPayload(client, "search", { id: USER, query: "引用" });
     assert.equal(like.count, 1, "LIKE 兜底命中 C2 令牌行");
 
     // browse：单聊锚点 around
-    const around = payloadOf(
-      (await client.callTool({
-        name: "browse",
-        arguments: { id: USER, msg_id: "C1", mode: "around" },
-      })) as never,
-    );
+    const around = await callPayload(client, "browse", { id: USER, msg_id: "C1", mode: "around" });
     assert.equal(around.count, 2, "前后文含 C1/C2 两条");
 
     // 群聊侧不受影响（探测：GROUP 命中群缓存）
-    const g = payloadOf(
-      (await client.callTool({
-        name: "get_new",
-        arguments: { id: GROUP },
-      })) as never,
-    );
+    const g = await callPayload(client, "get_new", { id: GROUP });
     assert.equal(g.count, 5, "群聊种子消息照常拉取");
 
     // 探测语义：侧别由 id 决定——单聊 id 查群消息（及反向）均报"不存在，可先 search"
@@ -1301,12 +1259,7 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
     // 探测补充证据：C2C 开关事件可先行于首条缓存消息（用户已 opt-in 但尚无消息）
     //——kv 记录独立裁决 chat 侧，主动消息门禁亦依赖该记录
     repo.setC2cSwitch("10001", "C2C_OPENID_U2", true);
-    const optinOnly = payloadOf(
-      (await client.callTool({
-        name: "get_new",
-        arguments: { id: "C2C_OPENID_U2" },
-      })) as never,
-    );
+    const optinOnly = await callPayload(client, "get_new", { id: "C2C_OPENID_U2" });
     assert.equal(
       optinOnly.count,
       0,

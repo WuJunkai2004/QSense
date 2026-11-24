@@ -24,7 +24,10 @@ import {
 import { z } from "zod";
 import { QrBindError } from "@qsense/connector-qq";
 import { BotRegistryError, type BotRegistry } from "../bots";
-import type { ConnectorRuntime, GatewayStatus } from "../connectors/runtime";
+import type {
+  ConnectorSupervisor,
+  GatewayStatus,
+} from "../connectors/runtime";
 import type { Logger } from "../utils/logger";
 import { TtsError, synthesizeSpeech, type TtsDeps, type TtsFormat } from "../tts";
 import type { Sender } from "../sender";
@@ -38,8 +41,8 @@ export interface UiDeps {
   repo: Repo;
   version: string;
   registry: BotRegistry;
-  /** 连接器运行时（P1 收口，原 GatewaySupervisor）：接入/摘除 bot + 插件上下面解析 */
-  supervisor: ConnectorRuntime;
+  /** 连接器运行时（P1 收口）：接入/摘除 bot + 插件上下面解析 */
+  supervisor: ConnectorSupervisor;
   /** 平台插件声明面注册表（GET /connectors 与 /platforms/:id/* 挂载用） */
   connectors: ConnectorRegistry;
   /** 各 bot 网关状态快照（bootstrap 展示用） */

@@ -15,9 +15,18 @@ import { openDatabase, runMigrations } from "../src/store/db";
 import { migrations } from "../src/store/migrations";
 import { Repo } from "../src/store/repo";
 import { makeFakeRuntime } from "./helpers/qq-runtime";
-import { ConnectorRegistry, FakeNetKit, jsonResponse } from "@qsense/connector-sdk";
-import type { ConnectorNet, ProactiveWire, ReplyWire } from "@qsense/connector-sdk";
-import type { ConnectorRuntime } from "../src/connectors/runtime";
+import {
+  ConnectorRegistry,
+  FakeNetKit,
+  jsonResponse,
+  type ConnectorNet,
+  type JsonSchema,
+  type ProactiveWire,
+  type ReplyWire,
+} from "@qsense/connector-sdk";
+import type { QuotaSnapshot } from "@qsense/connector-qq";
+import type { QrcodeStatusResp } from "@qsense/connector-weixin";
+import type { ConnectorSupervisor } from "../src/connectors/runtime";
 import { createWeixinConnector } from "@qsense/connector-weixin";
 
 const TOKEN = "m7-test-token-0123456789abcdef";
@@ -497,7 +506,7 @@ test("M7-U13 每 bot 开关：接收消息联动网关增删；MCP 关闭后该 
   const fx = await setupServer(false);
   try {
     const h = authHeaders({ "Content-Type": "application/json" });
-    const toggle = async (body: unknown): Promise<Response> =>
+    const toggle = async (body: UiPostBody): Promise<Response> =>
       fetch(`${fx.baseUrl}/ui/api/settings`, {
         method: "PUT",
         headers: h,
@@ -679,7 +688,7 @@ test("M7-U11 connectors 声明端点：平台声明面（caps/credentialSchema/l
         caps: { scopes: string[]; quota: boolean };
         credential_schema: {
           required: string[];
-          properties: Record<string, unknown>;
+          properties: Record<string, JsonSchema>;
         };
         credential_secrets: string[];
         login: { kind: string; create?: string; poll?: string };
@@ -718,7 +727,7 @@ test("M7-U10 quota：水位与令牌桶快照", async () => {
     const body = (await res.json()) as {
       send_enabled: boolean;
       proactive_sent_today: number;
-      buckets: unknown;
+      buckets: QuotaSnapshot;
     };
     assert.equal(body.send_enabled, true);
     assert.equal(body.proactive_sent_today, 0);
@@ -872,7 +881,7 @@ const WX_POLL = "/ui/api/platforms/weixin/login/qr/poll";
 
 /** 真 Fastify 应用 + 真微信插件（假 fetch 脚本化上游，零真实网络）；verify 按 index.ts 同款接到插件钩子 */
 async function setupWeixinServer(
-  steps: Array<Record<string, unknown>>,
+  steps: Array<QrcodeStatusResp>,
 ): Promise<WxFixture> {
   const dir = mkdtempSync(join(tmpdir(), "qqbot-wx-ui-"));
   const db = openDatabase(dir);
@@ -914,11 +923,18 @@ async function setupWeixinServer(
     },
   });
   const added: string[] = [];
-  const runtime = {
+  // Supervisor 最小消费面假件（configOf/hostFor 本用例不触，缺省占位）
+  const runtime: ConnectorSupervisor = {
     plugins,
-    addBot: (bot: { botId: string }) => added.push(bot.botId),
+    addBot: (bot) => added.push(bot.botId),
     removeBot: () => undefined,
-  } as unknown as ConnectorRuntime;
+    configOf: () => {
+      throw new Error("本用例不触 configOf");
+    },
+    hostFor: () => {
+      throw new Error("本用例不触 hostFor");
+    },
+  };
   const app = buildServer({
     log: createLogger("error"),
     db,
@@ -952,16 +968,64 @@ async function setupWeixinServer(
   };
 }
 
+/** WebUI JSON 请求体测试消费面：settings 段 / qr-poll / 注册表单 / 发送的并集（闭集）。
+ * 凭据键按目标平台 credentialSchema 动态（宿主逐键 typeof 收字符串），故带具体值
+ * 索签名——不是万能字典（值域闭集），与 ui.ts BotCreateWire looseObject 同理 */
+interface UiPostBody {
+  [key: string]:
+    | string
+    | number
+    | boolean
+    | Record<string, string>
+    | Array<{ appid: string; groups: string[] }>
+    | Array<{ appid: string; auth_level: string }>
+    | Array<{ appid: string; enabled: boolean }>
+    | undefined;
+  task_id?: string;
+  platform?: string;
+  credentials?: Record<string, string>;
+  name?: string;
+  auth_level?: string;
+  send_enabled?: boolean;
+  allow_groups?: Array<{ appid: string; groups: string[] }>;
+  auth_levels?: Array<{ appid: string; auth_level: string }>;
+  tts_enabled?: Array<{ appid: string; enabled: boolean }>;
+  receive_enabled?: Array<{ appid: string; enabled: boolean }>;
+  mcp_enabled?: Array<{ appid: string; enabled: boolean }>;
+  text?: string;
+  group?: string;
+  type?: string;
+  bot?: string;
+  reply_msg_id?: string;
+}
+
+/** WebUI JSON 应答体测试消费面（各端点形状的可选字段并集；测试只读） */
+interface UiJson {
+  error?: string;
+  ok?: boolean;
+  status?: string;
+  task_id?: string;
+  connect_url?: string;
+  interval_s?: number;
+  agent_token?: string;
+  note?: string;
+  bot?: { appid: string; name: string };
+  appid?: string;
+  groups?: Array<{ group_openid: string }>;
+  send_enabled?: boolean;
+  purged?: { messages: number };
+}
+
 async function postJson(
   url: string,
-  body: unknown,
-): Promise<{ status: number; body: Record<string, unknown> }> {
+  body: UiPostBody,
+): Promise<{ status: number; body: UiJson }> {
   const res = await fetch(url, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
-  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  return { status: res.status, body: (await res.json()) as UiJson };
 }
 
 test("P4 微信扫码中介：声明在列 + create 透传（令牌不下发）；completed → 宿主校验并注册；凭据不出浏览器", async () => {
@@ -1003,7 +1067,7 @@ test("P4 微信扫码中介：声明在列 + create 透传（令牌不下发）�
     assert.equal(JSON.stringify(created.body).includes("QR-SECRET-TOKEN"), false);
 
     // poll：pending → created（宿主中介完成校验+落库+联动接入）
-    let last = { status: 0, body: {} as Record<string, unknown> };
+    let last: { status: number; body: UiJson } = { status: 0, body: {} };
     for (let i = 0; i < 200; i += 1) {
       last = await postJson(`${fx.baseUrl}${WX_POLL}`, {
         task_id: created.body.task_id,
@@ -1037,7 +1101,7 @@ test("P4 微信扫码中介：终态失败 → 连接器状态化错误经 mapEr
   try {
     const created = await postJson(`${fx.baseUrl}${WX_CREATE}`, {});
     assert.equal(created.status, 200);
-    let last = { status: 0, body: {} as Record<string, unknown> };
+    let last: { status: number; body: UiJson } = { status: 0, body: {} };
     for (let i = 0; i < 200; i += 1) {
       last = await postJson(`${fx.baseUrl}${WX_POLL}`, {
         task_id: created.body.task_id,
@@ -1051,9 +1115,9 @@ test("P4 微信扫码中介：终态失败 → 连接器状态化错误经 mapEr
     assert.equal(fx.registry.list().length, 0);
     assert.deepEqual(fx.added, []);
     // 未知任务：expired（前端据此重开任务）
-    const unknown = await postJson(`${fx.baseUrl}${WX_POLL}`, { task_id: "nope" });
-    assert.equal(unknown.status, 200);
-    assert.deepEqual(unknown.body, { status: "expired" });
+    const unknownTask = await postJson(`${fx.baseUrl}${WX_POLL}`, { task_id: "nope" });
+    assert.equal(unknownTask.status, 200);
+    assert.deepEqual(unknownTask.body, { status: "expired" });
     // 平台不存在：404
     const missing = await postJson(`${fx.baseUrl}/ui/api/platforms/nope${"/login/qr/create"}`, {});
     assert.equal(missing.status, 404);
@@ -1089,13 +1153,13 @@ test("P4 多平台手动添加：POST /bots 按 platform 的 credentialSchema �
     assert.deepEqual(fx.added, ["abc123-im-bot"]);
 
     // 未知平台
-    const unknown = await postJson(`${fx.baseUrl}/ui/api/bots`, {
+    const unknownPlatform = await postJson(`${fx.baseUrl}/ui/api/bots`, {
       platform: "nope",
       appid: "x",
       token: "y",
     });
-    assert.equal(unknown.status, 400);
-    assert.match(String(unknown.body.error), /平台不存在/);
+    assert.equal(unknownPlatform.status, 400);
+    assert.match(String(unknownPlatform.body.error), /平台不存在/);
     // 缺省平台 qq：本台架未装载 qq 连接器 → 可操作 400（不落库、不触网）
     const legacy = await postJson(`${fx.baseUrl}/ui/api/bots`, {
       appid: "20002",

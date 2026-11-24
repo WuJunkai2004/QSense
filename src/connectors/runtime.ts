@@ -44,6 +44,19 @@ export interface ConnectorRuntimeDeps {
   onStatus?: (s: GatewayStatus) => void;
 }
 
+/**
+ * Supervisor 最小消费面（ui.ts 注入点）：真 ConnectorRuntime 结构满足
+ * （类实例可赋给纯形状接口，私有成员不参与）；测试假件以同形状注入（零断言）。
+ */
+export interface ConnectorSupervisor {
+  /** 声明面注册表（ui.ts 另有 connectors 同引用；http.ts 经此取插件面） */
+  plugins: ConnectorRegistry;
+  addBot(bot: BotRecord): void;
+  removeBot(botId: string): void;
+  configOf(botId: string): BotConfigSnapshot;
+  hostFor(botId: string): HostApi;
+}
+
 export class ConnectorRuntime {
   private readonly entries = new Map<string, Entry>();
   private readonly statusMap = new Map<string, GatewayStatus>();

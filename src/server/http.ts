@@ -6,7 +6,7 @@ import Fastify from "fastify";
 import type { AssetStore } from "../assets";
 import { BotRegistryError, parseAuthLevel, type BotRegistry } from "../bots";
 import type { AuthLevel } from "../utils/config";
-import type { ConnectorRuntime, GatewayStatus } from "../connectors/runtime";
+import type { ConnectorSupervisor, GatewayStatus } from "../connectors/runtime";
 import type { Logger } from "../utils/logger";
 import type { Sender } from "../sender";
 import type { DB } from "../store/db";
@@ -53,8 +53,9 @@ export interface ServerDeps {
   version: string;
   /** —— WebUI 依赖（齐备才挂载 /ui 与 /ui/api）—— */
   registry?: BotRegistry;
-  /** 连接器运行时（P1 收口，原 supervisor）：/ui 装配条件 + 运行时接入/摘除 */
-  connectors?: ConnectorRuntime;
+  /** 连接器运行时（P1 收口，原 supervisor）：/ui 装配条件 + 运行时接入/摘除。
+   * http 层只消费 Supervisor 最小面（真 ConnectorRuntime 结构满足；测试假件同形） */
+  connectors?: ConnectorSupervisor;
   botStatuses?: () => GatewayStatus[];
   /** MCP 工具执行全局并发上限（测试注入口；缺省 8，语义见 mcp.ts McpDeps） */
   maxConcurrent?: number;
