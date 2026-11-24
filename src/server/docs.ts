@@ -47,7 +47,9 @@ Content-Type: application/json
 | \`auth_level\` | string | \`uncertified\` | QQ 平台语义：主动消息频控预算 \`certified\`=60条/分、\`uncertified\`=30条/分 |
 
 各平台凭据形状（由该平台连接器声明权威）：QQ=\`{"appid":"…","secret":"…"}\`；
-Telegram=\`{"appid":"<bot数字id>","token":"<BotFather token，形如 123456:AA-xxx>"}\`。
+Telegram=\`{"appid":"<bot数字id>","token":"<BotFather token，形如 123456:AA-xxx>"}\`；
+微信=\`{"appid":"<ilink_bot_id 的安全形式：@ 与 . 替换为减号>","token":"<扫码下发的 bot_token>","base_url":"可选，账号实际 API 入口","owner_id":"可选，扫码人 id"}\`
+（微信推荐经 WebUI「扫码添加」完成绑定：凭据由扫码应答产出并经宿主中介直接注册）。
 
 服务端先过**官方凭据校验**（平台连接器 verifyCredential，未过官方校验绝不入库），
 落库后自动拉起该 bot 的网关连接，返回：

@@ -38,8 +38,15 @@ source = "file:packages/connector-qq"
 package = "@qsense/connector-telegram"
 source = "file:packages/connector-telegram"
 
-# 新平台示例（P4 微信或第三方插件，core 零改动进场）：
-# [connectors.weixin]
-# package = "@qsense/connector-weixin"
+# 微信（P4，iLink bot API 长轮询；凭据经 WebUI「扫码添加」产出，不进 toml）。
+# 协议参照 @tencent-weixin/openclaw-weixin 2.4.10 解包自研，不使用参照包本体；
+# 能力面：仅单聊、无被动窗口、无额度、无撤回；详见 packages/connector-weixin/README.md。
+[connectors.weixin]
+package = "@qsense/connector-weixin"
+source = "file:packages/connector-weixin"
+
+# 第三方插件示例（core 零改动进场）：
+# [connectors.foo]
+# package = "@vendor/connector-foo"
 # range = "^2.0.0"
-# source = "file:packages/connector-weixin"
+# source = "npmjs"

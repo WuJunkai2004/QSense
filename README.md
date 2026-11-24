@@ -1,18 +1,18 @@
 # QSense
 
-QQ / Telegram **官方**机器人 → MCP 网关。
+QQ / Telegram **官方**机器人 + 微信（iLink）→ MCP 网关。
 
 机器人经官方接口收到的群聊、私聊消息被缓存在本地 SQLite，再以 MCP 工具的形式提供给本地 AI 客户端（如 OpenCode），让智能体具备"读群、记忆、发言"的环境感知能力。附带一个 QQ 桌面风格的 WebUI，供人类管理机器人、控制发送、浏览消息。
 
-**合规是生存底线**：数据只来自官方 API，事件走官方 WebSocket Gateway（出站长连接，无需公网 IP / 域名 / TLS），不使用任何注入式协议端。
+**合规是生存底线**：数据只来自官方 API，事件走官方 WebSocket Gateway（出站长连接，无需公网 IP / 域名 / TLS），不使用任何注入式协议端。微信经腾讯 iLink bot API（扫码配对 + 长轮询，自研实现，不使用任何注入客户端与第三方包本体——见[连接器说明与风险声明](packages/connector-weixin/README.md)）。
 
 ```
-QQ / Telegram 官方服务器
+QQ / Telegram / 微信 官方服务器
    │  官方 WebSocket / 长轮询（出站，无需公网入站）
    ▼
 ┌───────────────────────────────────────────────┐
 │ QSense 常驻服务（默认 127.0.0.1:8787）          │
-│  ├─ 连接器插件（connector-qq / connector-telegram）│
+│  ├─ 连接器插件（connector-qq / -telegram / -weixin）│
 │  ├─ 消息规范化 + SQLite 全量缓存（中文全文检索）  │
 │  ├─ 发送器（被动窗口 / 额度记账 / 幂等账本）      │
 │  ├─ MCP   /mcp（Streamable HTTP + Bearer）      │
@@ -42,7 +42,7 @@ cp config.toml.example config.toml
 npm run build && npm start
 ```
 
-首次启动会在日志里**打印一次 admin token**（之后不再显示），用它登录 `http://127.0.0.1:8787/ui`，在「添加机器人」里填 appid/secret（服务端先过官方校验），得到只显示一次的 agent_token。
+首次启动会在日志里**打印一次 admin token**（之后不再显示），用它登录 `http://127.0.0.1:8787/ui`，在「添加机器人」里选择平台：QQ 可扫码绑定或填 appid/secret，微信扫码配对（iLink）。服务端先过官方校验，注册成功后得到只显示一次的 agent_token。
 
 让 AI 客户端连上（以 OpenCode 为例，workspace 根 `opencode.jsonc`）：
 
@@ -94,11 +94,19 @@ bot 的 appid/secret、agent_token、发送开关、群白名单全部存 SQLite
 
 ## WebUI（/ui）
 
-admin token 登录。功能：多机器人管理（运行时添加/移除、扫码配对）、发送总开关与群白名单、每 bot 接收/MCP 独立开关、agent token 轮换、消息浏览与发送（与 MCP 同一套门禁，无旁路）、成员名册、发送账本与额度水位、整群数据删除（二次确认）。
+admin token 登录。功能：多机器人管理（运行时添加/移除、多平台选择、QQ 与微信扫码配对）、发送总开关与群白名单、每 bot 接收/MCP 独立开关、agent token 轮换、消息浏览与发送（与 MCP 同一套门禁，无旁路）、成员名册、发送账本与额度水位、整群数据删除（二次确认）。
+
+## 微信（iLink，实验性）
+
+`packages/connector-weixin`：经腾讯 iLink bot API 接入微信——扫码配对、`getupdates` 长轮询收消息、`sendmessage` 发消息、CDN 加密收发图片/文件/视频。**仅单聊**，无被动窗口、无额度语义、不支持撤回；单条文本上限 4000 字符；语音条发送未核实（音频按文件附件降级，入站语音取平台转写文本）。
+
+启用：`config.toml` 声明 `[connectors.weixin]`（见模板）→ 重启 → WebUI「添加机器人」选「微信（iLink）」扫码。
+
+状态（2026-11-24）：协议面开发完成、单测覆盖；配对握手段已对微信官方服务端实测通过（取二维码 / 状态长轮询）；**收发段待真机验收**（详见包内 README 的「待真机验证」清单）。协议非公开文档化，本实现参照腾讯开源的 `@tencent-weixin/openclaw-weixin` 2.4.10 解包自研，存在协议漂移与平台条款风险，详见[风险声明](packages/connector-weixin/README.md#风险声明)。
 
 ## 安全与合规
 
-- 身份全程 openid（bot 维度隔离、不可逆），不获取、不存储真实 QQ 号
+- 身份全程 openid（bot 维度隔离、不可逆），不获取、不存储真实 QQ 号；微信侧只有 iLink 用户 id，同样不获取、不存储真实微信号
 - 日志默认不含消息正文，敏感键自动剥离
 - AppSecret / agent_token / admin token 只存服务器 SQLite；admin token 仅首启打印一次
 - 消息缓存**永不自动清理**；唯一删除通道是 WebUI 整群删除（admin + 二次确认）
@@ -109,8 +117,8 @@ admin token 登录。功能：多机器人管理（运行时添加/移除、扫�
 ## 开发
 
 ```bash
-npm run build   # tsc --noEmit + esbuild 三构建（宿主 + 两个 connector dist）
-npm test        # 208 用例全量（零真实网络依赖），改完必跑
+npm run build   # tsc --noEmit + esbuild 四构建（宿主 + 三个 connector dist）
+npm test        # 269 用例全量（零真实网络依赖），改完必跑
 npm start       # 起服务（读 config.toml，自动连官方网关）
 ```
 
@@ -122,6 +130,7 @@ npm start       # 起服务（读 config.toml，自动连官方网关）
 | `packages/connector-sdk/`      | 三面契约 + 加载闸门 + conformance harness            |
 | `packages/connector-qq/`       | QQ 连接器插件（WS 网关 / 线格式 / 额度 / 扫码配对）  |
 | `packages/connector-telegram/` | Telegram 连接器插件                                  |
+| `packages/connector-weixin/`   | 微信连接器插件（iLink 长轮询 / 扫码配对 / CDN 加密媒体；实验性） |
 | `ui/`                          | WebUI 前端（submodule，webui 分支）                  |
 | `test/`                        | 全量测试                                             |
 | `scripts/`                     | 运维 / 迁移演练 / 单工具调试脚本                     |
