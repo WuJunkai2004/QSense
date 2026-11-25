@@ -1,6 +1,6 @@
 // MCP 验收：客户端 SDK 直连 /mcp——
 // 鉴权（401）、listTools、会话列表→取新消息（拉取即已读，水位自动推进）→搜历史闭环、
-// context/browse。
+// browse 锚点与前后文。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -286,19 +286,35 @@ interface RecordItemJson {
   attachments?: NormalizedAttachment[];
 }
 
+interface MemberJson {
+  member_id: string;
+  name: string;
+  role: string | null;
+  first_seen: string;
+  last_seen: string;
+  msg_count: number;
+}
+
 interface PayloadJson {
   count?: number;
   has_more?: boolean;
   conversations?: ConvJson[];
   messages?: MsgJson[];
-  members?: Array<{
-    member_id: string;
-    username: string;
-    member_role: string | null;
-    first_seen: string | null;
-    last_seen: string | null;
+  /** get_info：群 / 群成员 / 单聊对象三种判别输出 */
+  type?: "group" | "member" | "chat";
+  member_count?: number;
+  members_has_more?: boolean;
+  full_msg_enabled?: boolean;
+  members?: MemberJson[];
+  member?: MemberJson;
+  group_id?: string;
+  user?: {
+    id: string;
+    name: string;
+    first_seen: string;
+    last_seen: string;
     msg_count: number;
-  }>;
+  };
   records?: RecordItemJson[];
   msg_id?: string;
   id?: string;
@@ -365,7 +381,7 @@ test("M3-1 未带 token / 错 token → 401", async () => {
   }
 });
 
-test("M3-2 listTools = 基座 13 + quota；未开启发送时写工具硬拒绝", async () => {
+test("M3-2 listTools = 基座 12 + quota；未开启发送时写工具硬拒绝", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
@@ -374,12 +390,11 @@ test("M3-2 listTools = 基座 13 + quota；未开启发送时写工具硬拒绝"
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
       "browse",
-      "context",
+      "get_info",
       "get_media",
       "get_new",
       "get_records",
       "list_all",
-      "list_members",
       "list_new",
       "quota",
       "recall",
@@ -416,7 +431,7 @@ test("跨平台工具过滤（P5）：telegram bot 工具面无 quota，跨平�
     client = await connectClient(fx.baseUrl, fx.tgAgentToken!);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    assert.equal(names.length, 13, "telegram bot 工具面 = 基座 13（无平台扩展）");
+    assert.equal(names.length, 12, "telegram bot 工具面 = 基座 12（无平台扩展）");
     assert.ok(
       !names.includes("quota"),
       "quota 是 QQ 平台扩展工具，telegram bot 不可见",
@@ -576,15 +591,43 @@ test("M6-14 MCP 并发闸（真实路径）：占满上限后第二请求立即�
   }
 });
 
-test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可操作", async () => {
+test("M3-4 browse 锚点/前后文 / get_info 群名册 / quota / 错误可操作", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
     client = await connectClient(fx.baseUrl, fx.agentToken);
 
-    const ctx = await callPayload(client, "context", { id: GROUP, msg_id: "M3", radius: 2 });
+    const ctx = await callPayload(client, "browse", {
+      id: GROUP,
+      msg_id: "M3",
+      mode: "around",
+      limit: 5,
+    });
     const ctxIds = (ctx.messages!).map((m) => m.msg_id);
     assert.deepEqual(ctxIds, ["M1", "M2", "M3", "M4", "M5"]);
+    assert.equal(ctx.count, 5, "around 的 limit 是包含锚点在内的总条数");
+    assert.equal(ctx.has_more, false, "两侧均已取尽");
+
+    const one = await callPayload(client, "browse", {
+      id: GROUP,
+      msg_id: "M3",
+      mode: "around",
+      limit: 1,
+    });
+    assert.deepEqual(one.messages!.map((m) => m.msg_id), ["M3"]);
+    assert.equal(one.has_more, true, "锚点两侧仍有消息");
+
+    const two = await callPayload(client, "browse", {
+      id: GROUP,
+      msg_id: "M3",
+      mode: "around",
+      limit: 2,
+    });
+    assert.deepEqual(
+      two.messages!.map((m) => m.msg_id),
+      ["M2", "M3"],
+      "偶数上限优先补更早一侧",
+    );
 
     const before = await callPayload(client, "browse", { id: GROUP, msg_id: "M3", mode: "before", limit: 10 });
     // before 方向按时间轴降序（新→旧，聊天回滚语义）
@@ -599,10 +642,26 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
       ["M4", "M5"],
     );
 
-    const members = await callPayload(client, "list_members", { id: GROUP });
-    const memberList = members.members!;
+    const groupInfo = await callPayload(client, "get_info", { id: GROUP });
+    assert.equal(groupInfo.type, "group");
+    assert.equal(groupInfo.member_count, 3);
+    const memberList = groupInfo.members!;
     assert.equal(memberList.length, 3);
     assert.equal(memberList[0]!.msg_count, 3); // 小明 3 条最活跃
+
+    const memberInfo = await callPayload(client, "get_info", {
+      id: GROUP,
+      member_id: memberList[0]!.member_id,
+    });
+    assert.equal(memberInfo.type, "member");
+    assert.equal(memberInfo.member!.member_id, memberList[0]!.member_id);
+
+    const noMember = (await client.callTool({
+      name: "get_info",
+      arguments: { id: GROUP, member_id: "NO_SUCH_MEMBER" },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(noMember.isError, true);
+    assert.ok(noMember.content[0]!.text.includes("不在群"));
 
     const quota = await callPayload(client, "quota", {});
     assert.equal(quota.send_enabled, false);
@@ -610,8 +669,8 @@ test("M3-4 context 前后文 / browse 锚点翻页 / 名册 / quota / 错误可�
 
     // 不存在的锚点 → 可操作错误（isError=true 且不炸）
     const miss = (await client.callTool({
-      name: "context",
-      arguments: { id: GROUP, msg_id: "NOPE" },
+      name: "browse",
+      arguments: { id: GROUP, msg_id: "NOPE", mode: "around" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(miss.isError, true);
     assert.ok(miss.content[0]!.text.includes("search"), "错误提示应引导先搜索");
@@ -1106,7 +1165,12 @@ test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防�
       rawJson: "{}",
     });
     client = await connectClient(fx.baseUrl, fx.agentToken);
-    const res = await callPayload(client, "context", { id: GROUP, msg_id: "M_SELF", radius: 1 });
+    const res = await callPayload(client, "browse", {
+      id: GROUP,
+      msg_id: "M_SELF",
+      mode: "around",
+      limit: 3,
+    });
     const msgs = res.messages as Array<{
       msg_id: string;
       author: { role: string | null };
@@ -1125,7 +1189,7 @@ test("M3-7 自己发的消息（direction=1 补记）author.role=yourself，防�
   }
 });
 
-test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存；侧别由 id 自动探测", async () => {
+test("M3-8 单聊读取面：get_new 水位/search/browse/get_info 走 c2c 缓存；侧别由 id 自动探测", async () => {
   const fx = await setupServer();
   let client: Client | null = null;
   try {
@@ -1214,8 +1278,8 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
 
     // 探测语义：侧别由 id 决定——单聊 id 查群消息（及反向）均报"不存在，可先 search"
     const wrongSide = (await client.callTool({
-      name: "context",
-      arguments: { id: USER, msg_id: "M1" },
+      name: "browse",
+      arguments: { id: USER, msg_id: "M1", mode: "around" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(wrongSide.isError, true);
     assert.ok(
@@ -1223,16 +1287,16 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
       "跨会话锚点报可定位错误",
     );
     const wrongSide2 = (await client.callTool({
-      name: "context",
-      arguments: { id: GROUP, msg_id: "C1" },
+      name: "browse",
+      arguments: { id: GROUP, msg_id: "C1", mode: "around" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(wrongSide2.isError, true);
     assert.ok(wrongSide2.content[0]!.text.includes("search"), "反向同理");
 
     // 真不存在的消息 → 仍走"可先 search"路径
     const miss = (await client.callTool({
-      name: "context",
-      arguments: { id: USER, msg_id: "NOPE" },
+      name: "browse",
+      arguments: { id: USER, msg_id: "NOPE", mode: "around" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(miss.isError, true);
     assert.ok(miss.content[0]!.text.includes("search"));
@@ -1248,15 +1312,20 @@ test("M3-8 单聊读取面：get_new 水位/search/browse/context 走 c2c 缓存
       "探测失败应给可操作提示",
     );
 
-    // list_members 传单聊 id → 可操作报错（名册仅群聊语义，不静默返回空册）
+    // get_info 单聊 id → 返回对端用户资料
+    const chatInfo = await callPayload(client, "get_info", { id: USER });
+    assert.equal(chatInfo.type, "chat");
+    assert.equal(chatInfo.id, USER);
+    assert.equal(chatInfo.user!.msg_count, 2);
+    // 单聊传 member_id 无意义 → 可操作错误
     const roster = (await client.callTool({
-      name: "list_members",
-      arguments: { id: USER },
+      name: "get_info",
+      arguments: { id: USER, member_id: "NOT_A_GROUP_MEMBER" },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(roster.isError, true);
     assert.ok(
-      roster.content[0]!.text.includes("单聊会话"),
-      "list_members 单聊 id 应报可操作错误",
+      roster.content[0]!.text.includes("没有群成员名册"),
+      "get_info 单聊传 member_id 应报可操作错误",
     );
 
     // 探测补充证据：C2C 开关事件可先行于首条缓存消息（用户已 opt-in 但尚无消息）

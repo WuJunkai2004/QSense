@@ -673,7 +673,7 @@ test("verifyCredential：凭据 base_url 校验（仅 https；非法回退缺省
   assert.equal(seen.at(-1)!.startsWith("https://ilink-sh.example.qq.com/sub/"), true);
 });
 
-test("插件声明面：caps / credentialSchema / login / 无扩展工具 → 工具面 = 基座 13", () => {
+test("插件声明面：caps / credentialSchema / login / 无扩展工具 → 工具面 = 基座 12", () => {
   const plugin = createWeixinConnector({});
   assert.equal(plugin.id, "weixin");
   assert.deepEqual(plugin.caps, {

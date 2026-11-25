@@ -42,7 +42,7 @@ export interface McpDeps {
    * 默认 8 足以覆盖单用户场景并防止过载。 */
   maxConcurrent?: number;
   version: string;
-  /** 平台插件声明面注册表：扩展工具经 ToolRouter 聚合；缺省=仅基座 13 */
+  /** 平台插件声明面注册表：扩展工具经 ToolRouter 聚合；缺省=仅基座 12 */
   plugins?: ConnectorRegistry;
   /** 插件工具上下面解析（host+config 按 bot）；缺省=插件工具不可用 */
   pluginContext?: (
@@ -115,7 +115,7 @@ export function createMcpHandler(
   }
   const sessions = new Map<string, Session>();
 
-  // 工具路由：基座 13（保留名）+ 该 bot
+  // 工具路由：基座 12（保留名）+ 该 bot
   // 平台的插件声明扩展。同一服务多平台 bot 并存时，每个 bot 的工具面只含本平台
   // 扩展工具（Telegram bot 看不到 QQ 的 quota——平台语义隔离是工具面结构性的，
   // 不靠调用时报错兜底）。bot 的 platform 不可变（bots 表），会话期内路由表稳定。

@@ -143,7 +143,7 @@ export function validatePluginTool(tool: PluginToolDecl): void {
   }
   if (RESERVED_TOOL_NAMES.has(name)) {
     throw new GateError(
-      `插件工具与基座保留名冲突：${name}（基座 14 工具名为核心保留）。`,
+      `插件工具与基座保留名冲突：${name}（基座工具名为核心保留）。`,
     );
   }
   if (typeof description !== "string" || description.trim() === "") {

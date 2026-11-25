@@ -18,7 +18,7 @@ import type { NetKit } from "./net";
 export const SDK_VERSION = "2.4.0";
 
 // ---------------------------------------------------------------------------
-// 基座工具保留名（13）：插件工具不得与之重名（加载即硬失败）。quota 等平台
+// 基座工具保留名（12）：插件工具不得与之重名（加载即硬失败）。quota 等平台
 // 扩展工具由插件声明，跨插件唯一性由 ConnectorRegistry 保证。注册是管理面操作，
 // 经 HTTP POST /register 完成，不占用工具名。
 // ---------------------------------------------------------------------------
@@ -26,11 +26,10 @@ export const SDK_VERSION = "2.4.0";
 export const BASE_TOOL_NAMES = [
   "list_all",
   "list_new",
-  "list_members",
+  "get_info",
   "get_new",
   "browse",
   "search",
-  "context",
   "get_records",
   "get_media",
   "send",
@@ -41,7 +40,7 @@ export const BASE_TOOL_NAMES = [
 
 export type BaseToolName = (typeof BASE_TOOL_NAMES)[number];
 
-/** 保留名集合（基座 13；插件声明面校验用） */
+/** 保留名集合（基座 12；插件声明面校验用） */
 export const RESERVED_TOOL_NAMES: ReadonlySet<string> = new Set(BASE_TOOL_NAMES);
 
 // ---------------------------------------------------------------------------

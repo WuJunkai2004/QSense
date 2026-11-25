@@ -198,6 +198,15 @@ export interface MemberRow {
   msg_count: number;
 }
 
+/** 用户资料行（userInfoOf）：bot 维度身份与活跃度 */
+export interface UserInfoRow {
+  openid: string;
+  name: string;
+  first_seen: number;
+  last_seen: number;
+  msg_count: number;
+}
+
 export class Repo {
   /** 坏档可观测（quote_json 等）：默认静默（测试零依赖），生产由 index 注入引擎 logger */
   private readonly log: Logger;
@@ -652,6 +661,23 @@ export class Repo {
   // —— 身份（users 表，QQ 昵称唯一权威） ——
 
   /** 最新 QQ 昵称；users 未收录返回 null（读取端回落行快照 author_name） */
+  /** 用户资料：昵称以 users 为权威，并附带该 bot 维度内的发言统计 */
+  userInfoOf(botId: string, openid: string): UserInfoRow | null {
+    const row = this.db
+      .prepare<[string, string], UserInfoRow>(
+        `
+        SELECT u.openid, COALESCE(u.name, u.openid) AS name,
+               u.first_seen, u.last_seen,
+               (SELECT COUNT(*) FROM messages m
+                 WHERE m.bot_id = u.bot_id AND m.author_openid = u.openid) AS msg_count
+        FROM users u
+        WHERE u.bot_id = ? AND u.openid = ?
+      `,
+      )
+      .get(botId, openid);
+    return row ?? null;
+  }
+
   userNameOf(botId: string, openid: string): string | null {
     const row = this.userNameStmt.get(botId, openid) as
       { name: string | null } | undefined;
@@ -832,6 +858,27 @@ export class Repo {
       .all(botId, groupOpenid, limit);
   }
 
+  /** 指定群成员资料；未收录返回 null */
+  memberOf(
+    botId: string,
+    groupOpenid: string,
+    memberOpenid: string,
+  ): MemberRow | null {
+    const row = this.db
+      .prepare<[string, string, string], MemberRow>(
+        `
+        SELECT m.member_openid, COALESCE(u.name, m.member_openid) AS username,
+               m.member_role, m.first_seen, m.last_seen, m.msg_count
+        FROM members m
+        LEFT JOIN users u ON u.bot_id = m.bot_id AND u.openid = m.member_openid
+        WHERE m.bot_id = ? AND m.group_openid = ? AND m.member_openid = ?
+        LIMIT 1
+      `,
+      )
+      .get(botId, groupOpenid, memberOpenid);
+    return row ?? null;
+  }
+
   /** 群成员 openid 集合（出站 AT 翻译的成员校验源；members 关系事实，消息流自建） */
   groupMemberIds(botId: string, groupOpenid: string): Set<string> {
     const rows = this.db
@@ -916,7 +963,7 @@ export class Repo {
     );
   }
 
-  /** 锚点定位（browse/context/get_media/get_records 共用） */
+  /** 锚点定位（browse/get_media/get_records 共用） */
   getMessageByMsgId(
     botId: string,
     scope: MsgScope,
@@ -1056,32 +1103,44 @@ export class Repo {
   }
 
   /** 某消息前后文：锚点前 radius 条 + 锚点后 radius 条，按时间轴升序返回 */
-  contextMessages(
+  /**
+   * 锚点前后文：两侧各取指定条数并包含锚点，按时间升序返回。
+   * 参数是两侧条数，不含锚点；内部多取一条用于准确判断该侧是否还有更多。
+   */
+  browseAround(
     botId: string,
     scope: MsgScope,
     scopeId: string,
     anchor: MsgRow,
-    radius: number,
-  ): MsgRow[] {
-    const before = this.browseBefore(
+    beforeLimit: number,
+    afterLimit: number,
+  ): { rows: MsgRow[]; hasMore: boolean } {
+    const beforeFetched = this.browseBefore(
       botId,
       scope,
       scopeId,
       anchor.ts ?? 0,
       anchor.rid,
-      radius,
+      beforeLimit + 1,
     );
-    const after = this.browseAfter(
+    const afterFetched = this.browseAfter(
       botId,
       scope,
       scopeId,
       anchor.ts ?? 0,
       anchor.rid,
-      radius,
+      afterLimit + 1,
     );
-    return [...before, anchor, ...after].sort(
-      (a, b) => (a.ts ?? 0) - (b.ts ?? 0) || a.rid - b.rid,
-    );
+    const before = beforeFetched.slice(0, beforeLimit);
+    const after = afterFetched.slice(0, afterLimit);
+    return {
+      rows: [...before, anchor, ...after].sort(
+        (a, b) => (a.ts ?? 0) - (b.ts ?? 0) || a.rid - b.rid,
+      ),
+      hasMore:
+        beforeFetched.length > beforeLimit ||
+        afterFetched.length > afterLimit,
+    };
   }
 
   /** 聊天记录子消息（拍平行，按 ord 升序） */
